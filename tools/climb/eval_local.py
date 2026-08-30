@@ -724,6 +724,9 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "tests/m1-perception/test_production_commissioning_harness.py::test_clob_missing_leg_harness_rejects_then_recovers_complete_coverage",
         "tests/m1-perception/test_production_commissioning_harness.py::test_clob_429_harness_records_typed_failure_then_recovers",
         "tests/m1-perception/test_production_commissioning_harness.py::test_gamma_provider_harness_records_typed_failure_then_recovers",
+        "tests/m1-perception/test_production_commissioning.py::test_standalone_attack_proof_verifier_rejects_identity_drift",
+        "tests/m1-perception/test_transactional_runtime_coverage.py::test_disposable_commissioning_end_to_end_turn_references_one_real_lineage",
+        "tests/m1-perception/test_production_commissioning_harness.py::test_complete_bundle_requires_explicit_test_dsn_before_artifact_mutation",
         "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_cleans_after_interrupted_attack_body",
         "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_never_drops_preexisting_cluster_roles",
         "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_preserves_attack_and_connection_cleanup_failures",
@@ -756,6 +759,7 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "tests/m1-perception/test_makefile_contract.py::test_make_clob_missing_leg_commissioning_executes_exact_harness_command",
         "tests/m1-perception/test_makefile_contract.py::test_make_clob_429_commissioning_executes_exact_harness_command",
         "tests/m1-perception/test_makefile_contract.py::test_make_gamma_provider_commissioning_executes_exact_harness_command",
+        "tests/m1-perception/test_makefile_contract.py::test_make_complete_commissioning_executes_exact_resumable_harness_command",
         "-q",
     ],
     "restart": [

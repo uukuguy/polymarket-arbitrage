@@ -13,6 +13,7 @@ from polyarb.control_plane.production_commissioning_harness import (
     CommissioningHarnessError,
     run_clob_429_commissioning,
     run_clob_missing_leg_commissioning,
+    run_complete_commissioning_bundle,
     run_gamma_malformed_commissioning,
     run_gamma_timeout_commissioning,
     run_heartbeat_outage_commissioning,
@@ -74,6 +75,23 @@ def test_stale_owner_harness_requires_explicit_test_dsn_before_artifact_mutation
 
     with pytest.raises(CommissioningHarnessError, match="POLYARB_CONTROL_PLANE_TEST_DSN"):
         run_stale_owner_commissioning(
+            root=root,
+            release_id=RELEASE,
+            config_id=CONFIG,
+        )
+
+    assert not root.exists()
+
+
+def test_complete_bundle_requires_explicit_test_dsn_before_artifact_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("POLYARB_CONTROL_PLANE_TEST_DSN", raising=False)
+    root = tmp_path / "evidence"
+
+    with pytest.raises(CommissioningHarnessError, match="POLYARB_CONTROL_PLANE_TEST_DSN"):
+        run_complete_commissioning_bundle(
             root=root,
             release_id=RELEASE,
             config_id=CONFIG,

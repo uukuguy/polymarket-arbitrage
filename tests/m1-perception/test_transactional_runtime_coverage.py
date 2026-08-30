@@ -32,6 +32,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     StaleQuotePointerCommissioningAdapter,
     StructureParityMismatchCommissioningAdapter,
     WorkerExitCommissioningAdapter,
+    complete_end_to_end_turn,
     complete_normal_turn,
     prepare_normal_turn,
 )
@@ -490,6 +491,40 @@ def test_disposable_commissioning_normal_turn_references_real_durable_facts(
     assert proof["terminal_fact_id"] == f"attempt:{proof['attempt_id']}"
     assert proof["postcondition_fact_id"].startswith("postgres:")
     assert proof["succeeded_at"].endswith("+00:00")
+
+
+def test_disposable_commissioning_end_to_end_turn_references_one_real_lineage(
+    control_plane: PostgresControlPlane,
+) -> None:
+    proof = complete_end_to_end_turn(
+        control_plane,
+        experiment_id="end-to-end:complete-envelope",
+        now=NOW + timedelta(days=2),
+    )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        lineage = connection.execute(
+            """
+            SELECT structure.generation_key, input.bundle_digest,
+                   quote.generation_key, opportunity.generation_key
+            FROM m1_publication_pointers AS structure
+            JOIN m1_structure_generation_inputs AS input
+              ON input.generation_key = structure.generation_key
+            JOIN m1_generation_manifests AS quote
+              ON quote.generation_key = 'quote:' || input.bundle_digest
+            JOIN m1_opportunity_projections AS opportunity
+              ON opportunity.generation_key = quote.generation_key
+             AND opportunity.structure_generation_key = structure.generation_key
+            WHERE structure.pointer_key = 'structure:current:shadow'
+            """
+        ).fetchone()
+
+    assert lineage is not None
+    assert proof["structure_pointer_fact_id"].endswith(str(lineage[0]))
+    assert proof["quote_pointer_fact_id"].endswith(str(lineage[2]))
+    assert proof["opportunity_pointer_fact_id"].endswith(str(lineage[3]))
+    assert proof["lineage_id"].startswith("sha256:")
+    assert proof["verified_at"].endswith("+00:00")
 
 
 @pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)

@@ -12769,3 +12769,21 @@ envelope before deciding whether any further production mutation is necessary.
 complete commissioning bundle with eight normal turns, every required attack
 proof and real end-to-end lineage, then verify the assembled envelope before
 considering any production mutation.
+
+### SESSION 384 — 2026-08-30 (resumable commissioning envelope implemented)
+
+- [ORCHESTRATION] Added one resumable complete command for eight normal turns,
+  66 node-level attacks, real E2E lineage and final envelope assembly.
+- [RESUME SAFETY] Existing artifacts are independently identity/lifecycle
+  verified before skip; missing proofs alone rerun and no artifact is overwritten.
+- [CHAIN TRUTH] Final lineage is read from a PostgreSQL join proving the current
+  Quote consumes the certified Structure digest and current Opportunity binds
+  both generations; synthetic pointer IDs are no longer needed.
+- [TDD] Focused contracts, Ruff and Pyright pass. Broader suite passed 328/329;
+  the only pre-commit failure was the expected exact-HEAD image-input guard.
+- [CONTEXT SAFETY] Docker context remains `orbstack`; no Colima/global mutation,
+  Fly, production provider/DB, Machine, canary or qualification mutation.
+
+[NEXT] Commit Plan 05.6-246 without protected user files, rerun exact-HEAD gates,
+then generate the complete 66-proof bundle against an isolated OrbStack
+PostgreSQL 16 service and confirm H-057 through climb.

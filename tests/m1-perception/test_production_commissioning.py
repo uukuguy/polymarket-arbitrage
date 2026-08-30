@@ -13,6 +13,7 @@ from polyarb.control_plane.production_commissioning import (
     PRODUCTION_CHAIN,
     CommissioningEvidenceError,
     build_commissioning_plan,
+    verify_attack_proof,
     verify_commissioning_evidence,
 )
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY
@@ -55,6 +56,39 @@ def test_every_attack_is_an_executable_closed_loop_contract() -> None:
         assert attack.qualification_impact in {"pause", "block", "invalidate"}
         covered_nodes.update(attack.targets)
     assert covered_nodes == set(PRODUCTION_CHAIN)
+
+
+def test_standalone_attack_proof_verifier_rejects_identity_drift() -> None:
+    evidence = _complete_evidence()
+    node_id = "structure-fetch"
+    attack_id = PRODUCTION_CHAIN[node_id].required_attacks[0]
+    nodes = evidence["nodes"]
+    assert isinstance(nodes, dict)
+    node = nodes[node_id]
+    assert isinstance(node, dict)
+    attacks = node["attacks"]
+    assert isinstance(attacks, dict)
+    proof = attacks[attack_id]
+
+    verified_at = verify_attack_proof(
+        proof,
+        node_id=node_id,
+        attack_id=attack_id,
+        expected_release="a" * 40,
+        expected_config="sha256:" + "b" * 64,
+    )
+    assert verified_at.tzinfo is not None
+
+    assert isinstance(proof, dict)
+    proof["config_id"] = "sha256:" + "c" * 64
+    with pytest.raises(CommissioningEvidenceError, match="attack-proof-identity"):
+        verify_attack_proof(
+            proof,
+            node_id=node_id,
+            attack_id=attack_id,
+            expected_release="a" * 40,
+            expected_config="sha256:" + "b" * 64,
+        )
 
 
 def _complete_evidence() -> dict[str, object]:

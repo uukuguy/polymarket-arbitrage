@@ -99,6 +99,21 @@ runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma�
 或 recovery 抛错也会进入 cleanup；如果原故障和 cleanup 同时失败，两条异常会一起
 保留，不能用 cleanup 错误覆盖根因。
 
+## 完整矩阵为什么可以断点续跑
+
+`make m1-production-commissioning-complete` 不把 66 次攻击包进一个不可恢复的大事务。
+八个正常回合、每个节点级攻击和最终 E2E lineage 都各自写入 exclusive artifact：
+
+- 文件不存在才执行对应的 disposable PostgreSQL 实验；
+- 文件存在时先独立验证 release/config/node/attack 身份和生命周期，再允许跳过；
+- 文件残缺、身份漂移或时间线错误立即 fail closed，绝不覆盖“修好”；
+- 最终 envelope 已存在时直接重新读取并验签，不重复 66 次攻击。
+
+E2E proof 也不是手写三个 ID。harness 先真实认证 Structure manifest 并发布 shadow
+pointer，再认证消费该 bundle digest 的 Quote generation，最后发布同时引用该 Structure
+与 Quote 的 Opportunity projection；随后用一次数据库 join 读取三段当前指针并计算
+lineage digest。这样“每个节点单测都过”仍不能冒充“整条生产链因果相连”。
+
 ## 设计取舍
 
 1. **先列契约，再写注入器。** 注入器如果先行，很容易只覆盖容易制造的故障；闭合矩阵
@@ -118,6 +133,7 @@ runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma�
 2. `worker-exit` 攻击后新 worker 成功了，但旧 owner 的 terminal write 没有被显式拒绝，
    该节点能否 ready？为什么？
 3. 为什么 `cleanup_verified` 与业务 postcondition 必须同时存在？
+4. 一个已有 proof 的 config_id 与本次命令不同，为什么断点续跑必须停止而不是重做覆盖？
 4. Quote 的 `successful_count=3` 小于 Structure 的 `progress_count=10`，为何不能据此判定
    `progress.regressed`？
 5. 哪四类真实外部边界值得 production canary，哪些故障应留在 disposable exact-image？

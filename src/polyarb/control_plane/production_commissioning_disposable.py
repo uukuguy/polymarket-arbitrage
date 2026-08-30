@@ -5227,6 +5227,84 @@ def complete_normal_turn(
     return prepared.complete(now=now + timedelta(seconds=30))
 
 
+def complete_end_to_end_turn(
+    control_plane: PostgresControlPlane,
+    *,
+    experiment_id: str,
+    now: datetime,
+) -> dict[str, str]:
+    """Publish and prove one causally linked Structure/Quote/Opportunity lineage."""
+
+    prepared = _prepare_opportunity_certify(
+        control_plane,
+        experiment_id,
+        now,
+    )
+    quote_generation = prepared.lease.input_identity
+    structure_digest = quote_generation.removeprefix("quote:")
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        structure_row = connection.execute(
+            """
+            SELECT generation_key FROM m1_structure_generation_inputs
+            WHERE bundle_digest = %s
+            """,
+            (structure_digest,),
+        ).fetchone()
+    if structure_row is None:
+        raise DisposableCommissioningError("end-to-end-structure-missing")
+    control_plane.publish_structure_shadow(
+        generation_key=str(structure_row[0]),
+        now=now + timedelta(seconds=25),
+    )
+    completed_at = now + timedelta(seconds=30)
+    prepared.complete(now=completed_at)
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        lineage = connection.execute(
+            """
+            SELECT structure.generation_key, input.bundle_digest,
+                   quote.generation_key, opportunity.generation_key
+            FROM m1_publication_pointers AS structure
+            JOIN m1_structure_generation_inputs AS input
+              ON input.generation_key = structure.generation_key
+            JOIN m1_publication_pointers AS quote
+              ON quote.pointer_key = 'quote:current'
+             AND quote.generation_key = 'quote:' || input.bundle_digest
+            JOIN m1_opportunity_publication_pointers AS current_opportunity
+              ON current_opportunity.pointer_key = 'opportunity:current'
+             AND current_opportunity.generation_key = quote.generation_key
+            JOIN m1_opportunity_projections AS opportunity
+              ON opportunity.generation_key = current_opportunity.generation_key
+             AND opportunity.structure_generation_key = structure.generation_key
+            WHERE structure.pointer_key = 'structure:current:shadow'
+            """
+        ).fetchone()
+    if lineage is None:
+        raise DisposableCommissioningError("end-to-end-lineage-missing")
+    structure_generation, structure_digest, quote_generation, opportunity_generation = map(
+        str, lineage
+    )
+    lineage_digest = sha256(
+        "\n".join(
+            (structure_generation, structure_digest, quote_generation, opportunity_generation)
+        ).encode()
+    ).hexdigest()
+    return {
+        "lineage_id": f"sha256:{lineage_digest}",
+        "structure_pointer_fact_id": (
+            f"postgres:m1_publication_pointers:structure:current:shadow:"
+            f"{structure_generation}"
+        ),
+        "quote_pointer_fact_id": (
+            f"postgres:m1_publication_pointers:quote:current:{quote_generation}"
+        ),
+        "opportunity_pointer_fact_id": (
+            "postgres:m1_opportunity_publication_pointers:opportunity:current:"
+            f"{opportunity_generation}"
+        ),
+        "verified_at": completed_at.astimezone(UTC).isoformat(),
+    }
+
+
 def prepare_normal_turn(
     control_plane: PostgresControlPlane,
     *,
@@ -5828,6 +5906,7 @@ __all__ = [
     "StaleQuotePointerCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",
     "WorkerExitCommissioningAdapter",
+    "complete_end_to_end_turn",
     "complete_normal_turn",
     "prepare_normal_turn",
 ]

@@ -5,12 +5,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from .production_commissioning import PRODUCTION_CHAIN
+from polyarb.safe_artifact import read_stable_bytes, write_exclusive_bytes
+
+from .production_commissioning import (
+    ATTACK_CONTRACTS,
+    PRODUCTION_CHAIN,
+    CommissioningEvidenceError,
+    verify_attack_proof,
+    verify_commissioning_evidence_file,
+    verify_normal_turn,
+)
 from .production_commissioning_disposable import (
     Clob429CommissioningAdapter,
     ClobMissingLegCommissioningAdapter,
@@ -29,11 +38,14 @@ from .production_commissioning_disposable import (
     StaleQuotePointerCommissioningAdapter,
     StructureParityMismatchCommissioningAdapter,
     WorkerExitCommissioningAdapter,
+    complete_end_to_end_turn,
+    complete_normal_turn,
 )
 from .production_commissioning_runner import (
     AttackIdentity,
     CommissioningAttackAdapter,
     CommissioningAttackError,
+    assemble_commissioning_evidence,
     run_disposable_attack,
 )
 from .runtime_fault_matrix import (
@@ -61,10 +73,61 @@ _CLOB_429_ATTACK_ID: Final[str] = "clob-429"
 _GAMMA_TIMEOUT_ATTACK_ID: Final[str] = "gamma-timeout"
 _GAMMA_MALFORMED_ATTACK_ID: Final[str] = "gamma-malformed-page"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
+_NORMAL_NOW: Final[datetime] = _BASE_NOW + timedelta(days=1)
+_END_TO_END_NOW: Final[datetime] = _BASE_NOW + timedelta(days=2)
 
 
 class CommissioningHarnessError(RuntimeError):
     """The isolated commissioning harness could not produce complete proof."""
+
+
+_ATTACK_ADAPTER_FACTORIES: Final[
+    Mapping[str, Callable[..., CommissioningAttackAdapter]]
+] = {
+    _STALE_OWNER_ATTACK_ID: StaleOwnerCommissioningAdapter,
+    _PROGRESS_STALL_ATTACK_ID: ProgressStallCommissioningAdapter,
+    _RETRY_BUDGET_ATTACK_ID: RetryBudgetCommissioningAdapter,
+    _HEARTBEAT_OUTAGE_ATTACK_ID: HeartbeatOutageCommissioningAdapter,
+    _WORKER_EXIT_ATTACK_ID: WorkerExitCommissioningAdapter,
+    _SOURCE_RECEIPT_GAP_ATTACK_ID: SourceReceiptGapCommissioningAdapter,
+    _QUOTE_BATCH_INCOMPLETE_ATTACK_ID: QuoteBatchIncompleteCommissioningAdapter,
+    _QUOTE_ADMISSION_MISSING_SHARD_ATTACK_ID: QuoteAdmissionMissingShardCommissioningAdapter,
+    _NORMALIZATION_PAYLOAD_CORRUPT_ATTACK_ID: NormalizationPayloadCorruptCommissioningAdapter,
+    _STRUCTURE_PARITY_MISMATCH_ATTACK_ID: StructureParityMismatchCommissioningAdapter,
+    _PUBLICATION_POINTER_CONFLICT_ATTACK_ID: PublicationPointerConflictCommissioningAdapter,
+    _R2_READ_TIMEOUT_ATTACK_ID: R2ReadTimeoutCommissioningAdapter,
+    _R2_WRITE_TIMEOUT_ATTACK_ID: R2WriteTimeoutCommissioningAdapter,
+    _STALE_QUOTE_POINTER_ATTACK_ID: StaleQuotePointerCommissioningAdapter,
+    _CLOB_MISSING_LEG_ATTACK_ID: ClobMissingLegCommissioningAdapter,
+    _CLOB_429_ATTACK_ID: Clob429CommissioningAdapter,
+    _GAMMA_TIMEOUT_ATTACK_ID: GammaProviderCommissioningAdapter,
+    _GAMMA_MALFORMED_ATTACK_ID: GammaProviderCommissioningAdapter,
+}
+
+
+def _read_mapping(path: Path) -> Mapping[str, object]:
+    try:
+        value = json.loads(read_stable_bytes(path))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise CommissioningHarnessError(f"persisted-proof-invalid:{path.name}") from error
+    if not isinstance(value, Mapping):
+        raise CommissioningHarnessError(f"persisted-proof-invalid:{path.name}")
+    return value
+
+
+def _write_mapping(path: Path, value: Mapping[str, object]) -> None:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode() + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_exclusive_bytes(path, payload)
+    except FileExistsError as error:
+        raise CommissioningHarnessError(f"persisted-proof-conflict:{path.name}") from error
 
 
 def _selected_nodes(node_ids: Sequence[str] | None) -> tuple[str, ...]:
@@ -489,10 +552,99 @@ def run_gamma_malformed_commissioning(
     )
 
 
+def run_complete_commissioning_bundle(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Resume and assemble the complete exact-image commissioning envelope."""
+
+    try:
+        validated_control_plane_test_dsn()
+    except RuntimeFaultMatrixError as error:
+        raise CommissioningHarnessError(str(error)) from error
+
+    envelope = root / "commissioning-evidence.json"
+    if envelope.is_file():
+        try:
+            return verify_commissioning_evidence_file(
+                envelope,
+                expected_release=release_id,
+                expected_config=config_id,
+            )
+        except CommissioningEvidenceError as error:
+            raise CommissioningHarnessError(f"persisted-envelope-invalid:{error}") from error
+
+    try:
+        for index, node_id in enumerate(PRODUCTION_CHAIN):
+            path = root / "normal-turns" / f"{node_id}.json"
+            if path.is_file():
+                verify_normal_turn(_read_mapping(path), node_id=node_id)
+                continue
+            with migrated_disposable_control_plane_database() as database:
+                proof = complete_normal_turn(
+                    database.control_plane,
+                    node_id=node_id,
+                    experiment_id=f"normal-turn:{node_id}",
+                    now=_NORMAL_NOW + timedelta(minutes=index),
+                )
+            _write_mapping(path, proof)
+
+        for attack_id, contract in ATTACK_CONTRACTS.items():
+            missing: list[str] = []
+            for node_id in contract.targets:
+                path = root / "attacks" / node_id / attack_id / "proof.json"
+                if not path.is_file():
+                    missing.append(node_id)
+                    continue
+                verify_attack_proof(
+                    _read_mapping(path),
+                    node_id=node_id,
+                    attack_id=attack_id,
+                    expected_release=release_id,
+                    expected_config=config_id,
+                )
+            if missing:
+                _run_commissioning(
+                    attack_id=attack_id,
+                    adapter_factory=_ATTACK_ADAPTER_FACTORIES[attack_id],
+                    root=root,
+                    release_id=release_id,
+                    config_id=config_id,
+                    node_ids=missing,
+                )
+
+        end_to_end_path = root / "end-to-end.json"
+        if not end_to_end_path.is_file():
+            with migrated_disposable_control_plane_database() as database:
+                end_to_end = complete_end_to_end_turn(
+                    database.control_plane,
+                    experiment_id="end-to-end:complete-envelope",
+                    now=_END_TO_END_NOW,
+                )
+            _write_mapping(end_to_end_path, end_to_end)
+
+        return assemble_commissioning_evidence(
+            root=root,
+            expected_release=release_id,
+            expected_config=config_id,
+        )
+    except (CommissioningAttackError, CommissioningEvidenceError) as error:
+        raise CommissioningHarnessError(f"commissioning-bundle-invalid:{error}") from error
+    except CommissioningHarnessError:
+        raise
+    except Exception as error:
+        raise CommissioningHarnessError(
+            f"commissioning-bundle-failed:{type(error).__name__}"
+        ) from error
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
     for command in (
+        "complete",
         "stale-owner",
         "progress-stall",
         "retry-budget",
@@ -523,6 +675,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     runners: dict[str, Callable[..., dict[str, object]]] = {
+        "complete": run_complete_commissioning_bundle,
         "stale-owner": run_stale_owner_commissioning,
         "progress-stall": run_progress_stall_commissioning,
         "retry-budget": run_retry_budget_commissioning,
@@ -561,6 +714,7 @@ __all__ = [
     "run_heartbeat_outage_commissioning",
     "run_clob_missing_leg_commissioning",
     "run_clob_429_commissioning",
+    "run_complete_commissioning_bundle",
     "run_gamma_malformed_commissioning",
     "run_gamma_timeout_commissioning",
     "run_normalization_payload_corrupt_commissioning",

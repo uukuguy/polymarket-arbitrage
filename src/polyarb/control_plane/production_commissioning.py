@@ -415,6 +415,14 @@ def _validate_normal_turn(node_id: str, value: object) -> datetime:
     return _timestamp(turn.get("succeeded_at"), f"normal-turn-invalid:{node_id}:succeeded-at")
 
 
+def verify_normal_turn(proof: object, *, node_id: str) -> datetime:
+    """Verify one persisted normal-turn proof before a resumable run reuses it."""
+
+    if node_id not in PRODUCTION_CHAIN:
+        raise CommissioningEvidenceError("normal-turn-unknown-node")
+    return _validate_normal_turn(node_id, proof)
+
+
 def _validate_attack_proof(
     value: object,
     *,
@@ -462,6 +470,35 @@ def _validate_attack_proof(
     if any(left >= right for left, right in zip(timeline, timeline[1:])):
         raise CommissioningEvidenceError(f"lifecycle-order:{node_id}:{attack.attack_id}")
     return timeline[-1]
+
+
+def verify_attack_proof(
+    proof: object,
+    *,
+    node_id: str,
+    attack_id: str,
+    expected_release: str,
+    expected_config: str,
+) -> datetime:
+    """Verify one persisted attack proof before a resumable run reuses it."""
+
+    if node_id not in PRODUCTION_CHAIN:
+        raise CommissioningEvidenceError("attack-proof-unknown-node")
+    if attack_id not in ATTACK_CONTRACTS:
+        raise CommissioningEvidenceError("attack-proof-unknown-attack")
+    if attack_id not in PRODUCTION_CHAIN[node_id].required_attacks:
+        raise CommissioningEvidenceError("attack-proof-not-required")
+    if _RELEASE_RE.fullmatch(expected_release) is None:
+        raise CommissioningEvidenceError("invalid-expected-release")
+    if _CONFIG_RE.fullmatch(expected_config) is None:
+        raise CommissioningEvidenceError("invalid-expected-config")
+    return _validate_attack_proof(
+        proof,
+        node_id=node_id,
+        attack=ATTACK_CONTRACTS[attack_id],
+        release_id=expected_release,
+        config_id=expected_config,
+    )
 
 
 def _canonical_bytes(value: Mapping[str, object]) -> bytes:
@@ -573,6 +610,21 @@ def _read_evidence(path: Path) -> Mapping[str, object]:
     return _mapping(value, "evidence-root-invalid")
 
 
+def verify_commissioning_evidence_file(
+    path: Path,
+    *,
+    expected_release: str,
+    expected_config: str,
+) -> dict[str, object]:
+    """Load and verify one bounded commissioning envelope from disk."""
+
+    return verify_commissioning_evidence(
+        _read_evidence(path),
+        expected_release=expected_release,
+        expected_config=expected_config,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -612,6 +664,9 @@ __all__ = [
     "ProductionNodeContract",
     "build_commissioning_plan",
     "verify_commissioning_evidence",
+    "verify_attack_proof",
+    "verify_commissioning_evidence_file",
+    "verify_normal_turn",
 ]
 
 
