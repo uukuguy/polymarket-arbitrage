@@ -2,15 +2,34 @@ hypotheses:
 - id: H-060
   description: A rolling qualification freshness pause can resume without resetting
     its epoch only when an explicit within-SLO freshness fact names the exact product
-    that caused the pause; unrelated products and generic recovery events cannot unlock it.
+    that caused the pause; unrelated products and generic recovery events cannot unlock
+    it.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Preserve truthful effective-time accumulation across ordinary product
     staleness while preventing cross-product or generic recovery facts from manufacturing
     eligibility.
   cost_h: 0.5
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-08-31T05:10:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 65
+    run: 20260830-204529-h-060
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-059
   description: A sequential qualification consumer can treat a full bounded source
     page as a backlog hint, yield for cancellation, and immediately read the next
