@@ -68,6 +68,7 @@
 - **H-058** [confirmed]: A single fenced Opportunity publisher can replace serial certified Quote-batch loading with bounded ordered waves, preserving frozen input order, lease heartbeat, interruption drain, and one terminal pointer publication.
 - **H-059** [confirmed]: A sequential qualification consumer can treat a full bounded source page as a backlog hint, yield for cancellation, and immediately read the next page while reserving its polling cadence for an idle source.
 - **H-060** [confirmed]: A rolling qualification freshness pause can resume without resetting its epoch only when an explicit within-SLO freshness fact names the exact product that caused the pause; unrelated products and generic recovery events cannot unlock it.
+- **H-061** [pending]: A certified Structure generation can parent recurring immutable Quote and Opportunity runs through an authoritative lineage relation and one serialized 300-second admission boundary, keeping executable freshness within 900 seconds without overlapping Gamma source windows or widening the SLO.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

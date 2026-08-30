@@ -1,4 +1,17 @@
 hypotheses:
+- id: H-061
+  description: A certified Structure generation can parent recurring immutable Quote
+    and Opportunity runs through an authoritative lineage relation and one serialized
+    300-second admission boundary, keeping executable freshness within 900 seconds
+    without overlapping Gamma source windows or widening the SLO.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Decouple the roughly 35-minute complete universe traversal from the
+    executable Quote clock so ordinary staleness pauses recover on the same qualification
+    epoch and the production feed remains continuously refreshable.
+  cost_h: 4.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-31T05:25:00+08:00'
 - id: H-060
   description: A rolling qualification freshness pause can resume without resetting
     its epoch only when an explicit within-SLO freshness fact names the exact product
