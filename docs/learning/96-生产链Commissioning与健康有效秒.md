@@ -256,3 +256,21 @@ commissioning 的 `source-receipt-gap` 攻击刻意持有最后一个真实 prod
 超过自己的持久化 progress/lease/retry policy，已有 progress-stall、worker-exit 或 retry-budget
 路径会单独接管；barrier 本身不发明第二套 timeout。这样慢任务不会被任意外层时钟误杀，真正
 失效的 producer 又不会永久静默。
+
+### Quote batch 缺失时，incident 应该由 certifier 还是 producer 持有？
+
+由缺失 receipt 的 producer 持有。Quote certifier 的 barrier 同时检查每个
+`m1_quote_batch_receipts` 和对应 batch job 的 `succeeded`；条件不齐时 certifier 保持
+`waiting`，根本不应被 claim。如果为了“让 certifier 报警”而强行唤醒它，就绕过了正在验证的
+fan-in fence，还会产生两个相互竞争的重试时钟。
+
+`quote-batch-incomplete` commissioning 因此先让一个真实 batch 成功，再让另一个带 lease epoch
+的 batch 通过 `finish_retryable_with_incident()` 进入 retryable。这个单事务同时写 retry due-at、
+circuit fingerprint、incident event 和 Dashboard outbox；certifier 仍等待，manifest、pointer 和
+opportunity successor 都必须为零。
+
+到共享 `RuntimeRetryPolicy` 的 due-at 后，新 epoch 才能 claim 同一个 batch。它提交 immutable
+receipt 并用 `record_job_recovery()` 关闭原 incident；最后一条 terminal receipt 在正式事务中释放
+certifier。certifier 再一次性校验全部 receipt，原子提交 manifest、`quote:current` 和下游 job。
+所以故障可见性属于出错节点，完整性门属于消费节点，两者各守一个职责，不需要 Machine restart
+或 barrier 私有 timeout。

@@ -10,7 +10,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from .models import JobLease, QuoteBatchLeg
+from .models import JobLease, QuoteBatchLeg, QuoteBatchSpec
 from .postgres import (
     IncompleteStructureGenerationError,
     PostgresControlPlane,
@@ -2008,6 +2008,371 @@ class SourceReceiptGapCommissioningAdapter:
         )
 
 
+class QuoteBatchIncompleteCommissioningAdapter:
+    """Prove one failed Quote batch blocks publication until fenced recovery."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._batches: tuple[QuoteBatchSpec, ...] = ()
+        self._withheld_lease: JobLease | None = None
+        self._withheld_attempt_id: str | None = None
+        self._retry_due_at: datetime | None = None
+        self._incident_key: str | None = None
+        self._incident_event_id: str | None = None
+        self._replacement: JobLease | None = None
+        self._certifier: JobLease | None = None
+        self._recovered_proof: dict[str, str] | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "quote-batch-incomplete"
+            or identity.node_id != "quote-certify"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _attempt_id(self, lease: JobLease) -> str:
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (lease.job_key, lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("quote-batch-attempt-missing")
+        return str(row[0])
+
+    def _generation_key(self) -> str:
+        if len(self._batches) != 2:
+            raise DisposableCommissioningError("quote-batch-plan-missing")
+        return self._batches[0].generation_key
+
+    def _assert_incomplete_barrier(self) -> tuple[str, str]:
+        generation_key = self._generation_key()
+        withheld = self._need(self._withheld_lease, "withheld-quote-batch-missing")
+        retry_due_at = self._need(self._retry_due_at, "quote-batch-retry-due-missing")
+        incident_key = f"incident:job-retry:{withheld.job_key}"
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_quote_batch_inputs
+                   WHERE job_key LIKE %s),
+                  (SELECT count(*) FROM m1_quote_batch_receipts
+                   WHERE job_key LIKE %s),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s),
+                  (SELECT count(*) FROM m1_generation_manifests
+                   WHERE generation_key = %s),
+                  (SELECT count(*) FROM m1_publication_pointers
+                   WHERE pointer_key = 'quote:current'),
+                  (SELECT count(*) FROM m1_jobs
+                   WHERE job_key = %s)
+                """,
+                (
+                    f"{generation_key}:batch:%",
+                    f"{generation_key}:batch:%",
+                    withheld.job_key,
+                    f"{generation_key}:certify",
+                    generation_key,
+                    f"{generation_key}:opportunity-certify",
+                ),
+            ).fetchone()
+            circuit = connection.execute(
+                """
+                SELECT consecutive_failures, state, next_probe_at
+                FROM m1_job_circuits WHERE job_key = %s
+                """,
+                (withheld.job_key,),
+            ).fetchone()
+            incident = connection.execute(
+                """
+                SELECT incident.incident_key, incident.state, incident.component,
+                       event.incident_event_id, event.kind,
+                       outbox.channel, outbox.state
+                FROM m1_incidents AS incident
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                JOIN m1_alert_outbox AS outbox
+                  ON outbox.incident_event_id = event.incident_event_id
+                WHERE incident.dedupe_key = %s
+                """,
+                (f"job-retry:{withheld.job_key}",),
+            ).fetchone()
+        if shape != (2, 1, "retryable", "waiting", 0, 0, 0):
+            raise DisposableCommissioningError("quote-batch-incomplete-shape")
+        if circuit != (1, "closed", retry_due_at):
+            raise DisposableCommissioningError("quote-batch-retry-circuit-shape")
+        if incident is None or incident[:3] != (incident_key, "open", "quote-batch"):
+            raise DisposableCommissioningError("quote-batch-incident-shape")
+        if incident[4:] != ("attempt-failed", "dashboard", "pending"):
+            raise DisposableCommissioningError("quote-batch-alert-shape")
+        return incident_key, str(incident[3])
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        structure_digest = sha256(f"{identity.experiment_id}:structure".encode()).hexdigest()
+        universe_hash = sha256(f"{identity.experiment_id}:universe".encode()).hexdigest()
+        self._batches = self._control_plane.enqueue_quote_generation(
+            structure_receipt_digest=structure_digest,
+            universe_hash=universe_hash,
+            legs=(
+                _leg(f"{identity.experiment_id}:token-a"),
+                _leg(f"{identity.experiment_id}:token-b"),
+            ),
+            batch_size=1,
+            now=self._started_at,
+        )
+        if len(self._batches) != 2:
+            raise DisposableCommissioningError("quote-batch-plan-shape")
+        first = _claim(self._control_plane, "quote-batch", self._started_at)
+        _record_progress(self._control_plane, first, self._started_at)
+        self._control_plane.record_quote_batch(
+            first,
+            token_range_digest=self._batches[0].token_range_digest,
+            quote_digest=sha256(f"{identity.experiment_id}:quote:0".encode()).hexdigest(),
+            artifact_key=f"quote-batches/{identity.experiment_id}/0.ndjson",
+            artifact_digest=sha256(f"{identity.experiment_id}:artifact:0".encode()).hexdigest(),
+            successful_response_count=1,
+            quoted_at=self._started_at,
+            now=self._started_at + timedelta(seconds=1),
+            terminal=True,
+        )
+        withheld = _claim(
+            self._control_plane,
+            "quote-batch",
+            self._started_at + timedelta(seconds=2),
+        )
+        if withheld.job_key != self._batches[1].job_key:
+            raise DisposableCommissioningError("withheld-quote-batch-identity")
+        _record_progress(
+            self._control_plane,
+            withheld,
+            self._started_at + timedelta(seconds=2),
+        )
+        self._withheld_lease = withheld
+        self._withheld_attempt_id = self._attempt_id(withheld)
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"attempt:{self._withheld_attempt_id}",
+            occurred_at=self._started_at + timedelta(seconds=2),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        withheld = self._need(self._withheld_lease, "withheld-quote-batch-missing")
+        injected_at = self._started_at + timedelta(seconds=3)
+        self._retry_due_at = self._control_plane.finish_retryable_with_incident(
+            withheld,
+            error_class="IncompleteQuoteBatchReceipt",
+            incident_key=f"incident:job-retry:{withheld.job_key}",
+            dedupe_key=f"job-retry:{withheld.job_key}",
+            component="quote-batch",
+            summary="quote batch receipt missing from certification barrier",
+            detail={
+                "job_key": withheld.job_key,
+                "lease_epoch": withheld.lease_epoch,
+                "stage": "commit-receipt",
+                "failure_signature": "quote.batch-receipt-incomplete",
+            },
+            channels=("dashboard",),
+            now=injected_at,
+        )
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{self._withheld_attempt_id}",
+            occurred_at=injected_at,
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._incident_key, self._incident_event_id = self._assert_incomplete_barrier()
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=self._incident_key,
+            occurred_at=self._started_at + timedelta(seconds=4),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_incomplete_barrier()
+        event_id = self._need(self._incident_event_id, "quote-batch-incident-event-missing")
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"incident-event:{event_id}",
+            occurred_at=self._started_at + timedelta(seconds=5),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_incomplete_barrier()
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"barrier:{self._generation_key()}:partial-pointer-absent",
+            occurred_at=self._started_at + timedelta(seconds=6),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        withheld = self._need(self._withheld_lease, "withheld-quote-batch-missing")
+        retry_due_at = self._need(self._retry_due_at, "quote-batch-retry-due-missing")
+        replacement = _claim(self._control_plane, "quote-batch", retry_due_at)
+        if (
+            replacement.job_key != withheld.job_key
+            or replacement.lease_epoch != withheld.lease_epoch + 1
+        ):
+            raise DisposableCommissioningError("quote-batch-replacement-identity")
+        self._replacement = replacement
+        _record_progress(self._control_plane, replacement, retry_due_at)
+        self._control_plane.record_quote_batch(
+            replacement,
+            token_range_digest=self._batches[1].token_range_digest,
+            quote_digest=sha256(f"{identity.experiment_id}:quote:1".encode()).hexdigest(),
+            artifact_key=f"quote-batches/{identity.experiment_id}/1.ndjson",
+            artifact_digest=sha256(f"{identity.experiment_id}:artifact:1".encode()).hexdigest(),
+            successful_response_count=1,
+            quoted_at=retry_due_at,
+            now=retry_due_at + timedelta(seconds=1),
+            terminal=True,
+        )
+        if not self._control_plane.record_job_recovery(
+            replacement,
+            component="quote-batch",
+            channels=("dashboard",),
+            now=retry_due_at + timedelta(seconds=2),
+        ):
+            raise DisposableCommissioningError("quote-batch-incident-not-recovered")
+        certifier = _claim(
+            self._control_plane,
+            "quote-certify",
+            retry_due_at + timedelta(seconds=3),
+        )
+        if certifier.job_key != f"{self._generation_key()}:certify":
+            raise DisposableCommissioningError("quote-certifier-identity")
+        self._certifier = certifier
+        _record_progress(
+            self._control_plane,
+            certifier,
+            retry_due_at + timedelta(seconds=3),
+        )
+        self._control_plane.certify_quote_generation(
+            certifier,
+            generation_key=self._generation_key(),
+            now=retry_due_at + timedelta(seconds=4),
+        )
+        self._recovered_proof = _normal_turn_proof(self._control_plane, certifier)
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
+            occurred_at=retry_due_at + timedelta(seconds=4),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        generation_key = self._generation_key()
+        certifier = self._need(self._certifier, "quote-certifier-missing")
+        proof = self._need(self._recovered_proof, "quote-certifier-proof-missing")
+        replacement = self._need(self._replacement, "quote-batch-replacement-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_quote_batch_inputs
+                   WHERE job_key LIKE %s),
+                  (SELECT count(*) FROM m1_quote_batch_receipts
+                   WHERE job_key LIKE %s),
+                  (SELECT count(*) FROM m1_jobs
+                   WHERE job_key LIKE %s AND state = 'succeeded'),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s),
+                  (SELECT count(*) FROM m1_generation_manifests
+                   WHERE generation_key = %s),
+                  (SELECT count(*) FROM m1_publication_pointers
+                   WHERE pointer_key = 'quote:current' AND generation_key = %s),
+                  (SELECT count(*) FROM m1_jobs
+                   WHERE job_key = %s AND state = 'runnable')
+                """,
+                (
+                    f"{generation_key}:batch:%",
+                    f"{generation_key}:batch:%",
+                    f"{generation_key}:batch:%",
+                    certifier.job_key,
+                    generation_key,
+                    generation_key,
+                    f"{generation_key}:opportunity-certify",
+                ),
+            ).fetchone()
+            incident = connection.execute(
+                """
+                SELECT incident.state, circuit.consecutive_failures, circuit.state,
+                       array_agg(event.kind ORDER BY event.occurred_at, event.kind)
+                FROM m1_incidents AS incident
+                JOIN m1_job_circuits AS circuit
+                  ON incident.dedupe_key = 'job-retry:' || circuit.job_key
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                WHERE circuit.job_key = %s
+                GROUP BY incident.state, circuit.consecutive_failures, circuit.state
+                """,
+                (replacement.job_key,),
+            ).fetchone()
+            attempts = connection.execute(
+                """
+                SELECT count(*), min(state)
+                FROM m1_job_attempts
+                WHERE job_key = %s
+                """,
+                (certifier.job_key,),
+            ).fetchone()
+        if shape != (2, 2, 2, "succeeded", 1, 1, 1):
+            raise DisposableCommissioningError("quote-batch-recovery-shape")
+        if incident != ("resolved", 0, "closed", ["attempt-failed", "recovered"]):
+            raise DisposableCommissioningError("quote-batch-recovery-incident-shape")
+        if attempts != (1, "succeeded"):
+            raise DisposableCommissioningError("quote-certifier-attempt-shape")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=1),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -2563,6 +2928,7 @@ __all__ = [
     "HeartbeatOutageCommissioningAdapter",
     "PreparedNormalTurn",
     "ProgressStallCommissioningAdapter",
+    "QuoteBatchIncompleteCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",
     "SourceReceiptGapCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",

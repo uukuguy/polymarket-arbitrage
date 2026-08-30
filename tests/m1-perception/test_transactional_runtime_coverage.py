@@ -20,6 +20,7 @@ from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
+    QuoteBatchIncompleteCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -994,6 +995,80 @@ def test_source_receipt_gap_adapter_releases_one_complete_materializer_turn(
     assert materializer == ("succeeded", 1, "succeeded")
     assert incidents == (0,)
     assert recovery_actions == (0,)
+
+
+def test_quote_batch_incomplete_adapter_blocks_partial_pointer_then_certifies(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:quote-certify:quote-batch-incomplete",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="quote-certify",
+        attack_id="quote-batch-incomplete",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=QuoteBatchIncompleteCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=61),
+        ),
+        evidence_dir=tmp_path / "quote-certify",
+    )
+
+    assert proof["qualification_impact"] == "block"
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("incident-event:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith(
+        "postgres:m1_publication_pointers:quote:"
+    )
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        shape = connection.execute(
+            """
+            SELECT count(DISTINCT input.job_key),
+                   count(DISTINCT receipt.job_key),
+                   count(DISTINCT batch.job_key) FILTER (WHERE batch.state = 'succeeded'),
+                   count(DISTINCT certifier.job_key)
+                       FILTER (WHERE certifier.state = 'succeeded'),
+                   count(DISTINCT manifest.generation_key),
+                   count(DISTINCT pointer.pointer_key),
+                   count(DISTINCT opportunity.job_key)
+            FROM m1_quote_batch_inputs AS input
+            LEFT JOIN m1_quote_batch_receipts AS receipt
+              ON receipt.job_key = input.job_key
+            LEFT JOIN m1_jobs AS batch ON batch.job_key = input.job_key
+            LEFT JOIN m1_jobs AS certifier
+              ON certifier.job_key = 'quote:' || input.structure_receipt_digest || ':certify'
+            LEFT JOIN m1_generation_manifests AS manifest
+              ON manifest.generation_key = 'quote:' || input.structure_receipt_digest
+            LEFT JOIN m1_publication_pointers AS pointer
+              ON pointer.pointer_key = 'quote:current'
+             AND pointer.generation_key = 'quote:' || input.structure_receipt_digest
+            LEFT JOIN m1_jobs AS opportunity
+              ON opportunity.job_key =
+                 'quote:' || input.structure_receipt_digest || ':opportunity-certify'
+            """
+        ).fetchone()
+        incident = connection.execute(
+            """
+            SELECT incident.state, circuit.consecutive_failures, circuit.state,
+                   array_agg(event.kind ORDER BY event.occurred_at, event.kind)
+            FROM m1_incidents AS incident
+            JOIN m1_job_circuits AS circuit
+              ON incident.dedupe_key = 'job-retry:' || circuit.job_key
+            JOIN m1_incident_events AS event
+              ON event.incident_key = incident.incident_key
+            GROUP BY incident.state, circuit.consecutive_failures, circuit.state
+            """
+        ).fetchone()
+
+    assert shape == (2, 2, 2, 1, 1, 1, 1)
+    assert incident == ("resolved", 0, "closed", ["attempt-failed", "recovered"])
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

@@ -12189,3 +12189,34 @@ until all remaining disposable adapters are ready for one combined release/confi
 attack, using durable input/receipt facts and no private timeout or direct
 database mutation. Keep image rebuild deferred until the remaining disposable
 matrix is ready for one combined exact release/config run.
+
+### SESSION 361 — 2026-08-30 (incomplete Quote batch commissioning)
+
+- [CLIMB H-046] Registered an in-flight production-enablement hypothesis for a
+  missing Quote batch receipt at the certification fan-in boundary.
+- [PRODUCER-OWNED INCIDENT] Two immutable batches are admitted; the first
+  succeeds and the second enters the formal retry/circuit/incident transaction
+  without a receipt. The incident belongs to `quote-batch`, not a force-woken
+  certifier.
+- [NEGATIVE PROOF] Incomplete state is exactly two inputs, one receipt, one
+  retryable producer, one waiting certifier, one open incident and one pending
+  Dashboard alert. Manifest, Quote pointer and opportunity successor remain
+  absent.
+- [POLICY-DUE RECOVERY] At the persisted shared retry due-at, epoch 2 commits
+  the missing receipt, closes the producer incident and releases one certifier.
+  Certification publishes one complete manifest/pointer and one opportunity
+  successor.
+- [NO SECOND CLOCK] Barrier readiness depends only on terminal producer facts.
+  Retry timing belongs to `RuntimeRetryPolicy`; there is no certifier polling
+  timeout, outer kill, Machine restart or private timestamp aging.
+- [HARNESS/ENTRY] Isolated migrated PostgreSQL cleanup, explicit test DSN,
+  exact Make argv and climb profile contracts pass. Ruff passes and
+  production-module Pyright reports zero errors.
+- [BOUNDARY] No production DB/provider, Fly action, SSH, deployment, Docker
+  build, canary, qualification, Colima or global context mutation occurred;
+  Docker context remained `orbstack`.
+
+[NEXT] Commit Plan 05.6-234 without protected user files, pass the exact-HEAD
+guard and confirm H-046 through climb. Then implement the next disposable
+adapter, preferring `quote-admission-missing-shard`; defer image rebuild until
+all remaining disposable attacks can share one exact release/config run.

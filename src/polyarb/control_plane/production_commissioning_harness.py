@@ -14,6 +14,7 @@ from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
+    QuoteBatchIncompleteCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -37,6 +38,7 @@ _RETRY_BUDGET_ATTACK_ID: Final[str] = "retry-budget-exhaustion"
 _HEARTBEAT_OUTAGE_ATTACK_ID: Final[str] = "heartbeat-outage"
 _WORKER_EXIT_ATTACK_ID: Final[str] = "worker-exit"
 _SOURCE_RECEIPT_GAP_ATTACK_ID: Final[str] = "source-receipt-gap"
+_QUOTE_BATCH_INCOMPLETE_ATTACK_ID: Final[str] = "quote-batch-incomplete"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -235,6 +237,24 @@ def run_source_receipt_gap_commissioning(
     )
 
 
+def run_quote_batch_incomplete_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove the incomplete Quote batch barrier on its sole certifier target."""
+
+    return _run_commissioning(
+        attack_id=_QUOTE_BATCH_INCOMPLETE_ATTACK_ID,
+        adapter_factory=QuoteBatchIncompleteCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("quote-certify",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +265,7 @@ def _parser() -> argparse.ArgumentParser:
         "heartbeat-outage",
         "worker-exit",
         "source-receipt-gap",
+        "quote-batch-incomplete",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -263,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "heartbeat-outage": run_heartbeat_outage_commissioning,
         "worker-exit": run_worker_exit_commissioning,
         "source-receipt-gap": run_source_receipt_gap_commissioning,
+        "quote-batch-incomplete": run_quote_batch_incomplete_commissioning,
     }
     try:
         result = runners[args.command](
@@ -282,6 +304,7 @@ __all__ = [
     "main",
     "run_heartbeat_outage_commissioning",
     "run_progress_stall_commissioning",
+    "run_quote_batch_incomplete_commissioning",
     "run_retry_budget_commissioning",
     "run_source_receipt_gap_commissioning",
     "run_stale_owner_commissioning",
