@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Event
@@ -58,14 +59,18 @@ class TransactionalOpportunityCertifier:
         worker_id: str = "opportunity-certifier",
         now: Callable[[], datetime],
         lease_seconds: int = 120,
+        projection_max_concurrency: int = 1,
     ) -> None:
         if not bucket or not worker_id or lease_seconds <= 0:
             raise ValueError("bucket, worker_id, and lease_seconds must be positive")
+        if not 1 <= projection_max_concurrency <= 32:
+            raise ValueError("projection_max_concurrency must be between 1 and 32")
         self._control_plane = control_plane
         self._object_client = object_client
         self._bucket = bucket
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
+        self._projection_max_concurrency = projection_max_concurrency
         self._now = now
         self._stop_requested = Event()
 
@@ -227,69 +232,35 @@ class TransactionalOpportunityCertifier:
             all_quotes = []
             quoted_at_ms = 0
             total_batches = len(batches)
-            for batch_index, (legs, receipt, quoted_at) in enumerate(batches, start=1):
+            reference_reader = getattr(self._control_plane, "quote_batch_input_reference", None)
+            reference_fn = (
+                cast(Callable[[str], tuple[str, str, int] | None], reference_reader)
+                if callable(reference_reader)
+                else None
+            )
+            for wave_start in range(0, total_batches, self._projection_max_concurrency):
                 if self._stop_requested.is_set():
                     raise ServiceStopRequested("opportunity-certify service stop requested")
-                reference_reader = getattr(self._control_plane, "quote_batch_input_reference", None)
-                reference_fn = (
-                    cast(Callable[[str], tuple[str, str, int] | None], reference_reader)
-                    if callable(reference_reader)
-                    else None
-                )
-                reference = (
+                wave = batches[wave_start : wave_start + self._projection_max_concurrency]
+                loaded = (
                     cast(
-                        tuple[str, str, int] | None,
+                        tuple[tuple[tuple[Any, ...], tuple[Any, ...], int], ...],
                         _runtime_sync_call(
                             runtime,
-                            lambda: cast(
-                                Callable[[str], tuple[str, str, int] | None], reference_fn
-                            )(receipt.job_key),
+                            lambda: self._load_projection_wave(wave, reference_fn),
                         ),
                     )
-                    if runtime is not None and reference_fn is not None
-                    else reference_fn(receipt.job_key)
-                    if reference_fn is not None
-                    else None
-                )
-                if reference is not None:
-                    input_key, input_digest, leg_count = reference
-                    input_payload = (
-                        _runtime_sync_call(
-                            runtime,
-                            lambda: self._read_object(input_key, label="quote-input-artifact"),
-                        )
-                        if runtime is not None
-                        else self._read_object(input_key, label="quote-input-artifact")
-                    )
-                    try:
-                        parsed_input = parse_quote_batch_input_bytes(
-                            input_payload, expected_sha256=input_digest
-                        )
-                    except QuoteArtifactError as error:
-                        raise ValueError("quote-input-artifact-invalid") from error
-                    if (
-                        parsed_input.job_key != receipt.job_key
-                        or len(parsed_input.legs) != leg_count
-                    ):
-                        raise ValueError("quote-input-artifact-identity-mismatch")
-                    legs = parsed_input.legs
-                payload = (
-                    _runtime_sync_call(
-                        runtime,
-                        lambda: self._read_object(receipt.artifact_key),
-                    )
                     if runtime is not None
-                    else self._read_object(receipt.artifact_key)
+                    else self._load_projection_wave(wave, reference_fn)
                 )
-                all_legs.extend(legs)
-                all_quotes.extend(
-                    parse_quote_batch_bytes(payload, expected_digest=receipt.artifact_digest)
-                )
-                quoted_at_ms = max(quoted_at_ms, int(quoted_at.timestamp() * 1_000))
+                for legs, quotes, batch_quoted_at_ms in loaded:
+                    all_legs.extend(legs)
+                    all_quotes.extend(quotes)
+                    quoted_at_ms = max(quoted_at_ms, batch_quoted_at_ms)
                 if runtime is not None:
                     runtime.progress(
                         stage="compute-opportunities",
-                        current=batch_index,
+                        current=wave_start + len(wave),
                         total=max(total_batches, 1),
                     )
             if runtime is not None:
@@ -361,6 +332,44 @@ class TransactionalOpportunityCertifier:
                     terminal=True,
                 )
             raise
+
+    def _load_projection_wave(
+        self,
+        wave: Sequence[tuple[Sequence[Any], Any, datetime]],
+        reference_fn: Callable[[str], tuple[str, str, int] | None] | None,
+    ) -> tuple[tuple[tuple[Any, ...], tuple[Any, ...], int], ...]:
+        """Read one bounded wave while preserving frozen batch order."""
+
+        def load_batch(
+            item: tuple[Sequence[Any], Any, datetime],
+        ) -> tuple[tuple[Any, ...], tuple[Any, ...], int]:
+            legs, receipt, quoted_at = item
+            if self._stop_requested.is_set():
+                raise ServiceStopRequested("opportunity-certify service stop requested")
+            reference = None if reference_fn is None else reference_fn(receipt.job_key)
+            if reference is not None:
+                input_key, input_digest, leg_count = reference
+                input_payload = self._read_object(input_key, label="quote-input-artifact")
+                try:
+                    parsed_input = parse_quote_batch_input_bytes(
+                        input_payload, expected_sha256=input_digest
+                    )
+                except QuoteArtifactError as error:
+                    raise ValueError("quote-input-artifact-invalid") from error
+                if parsed_input.job_key != receipt.job_key or len(parsed_input.legs) != leg_count:
+                    raise ValueError("quote-input-artifact-identity-mismatch")
+                legs = parsed_input.legs
+            if self._stop_requested.is_set():
+                raise ServiceStopRequested("opportunity-certify service stop requested")
+            payload = self._read_object(receipt.artifact_key)
+            quotes = parse_quote_batch_bytes(payload, expected_digest=receipt.artifact_digest)
+            return tuple(legs), tuple(quotes), int(quoted_at.timestamp() * 1_000)
+
+        with ThreadPoolExecutor(
+            max_workers=min(self._projection_max_concurrency, len(wave)),
+            thread_name_prefix="opportunity-projection",
+        ) as executor:
+            return tuple(executor.map(load_batch, wave))
 
     def _read_object(self, key: str, *, label: str = "quote-artifact") -> bytes:
         response = self._object_client.get_object(Bucket=self._bucket, Key=key)

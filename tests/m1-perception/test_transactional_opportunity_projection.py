@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from polyarb.control_plane import opportunity_worker as opportunity_worker_module
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
 from polyarb.control_plane.opportunity_worker import (
@@ -448,6 +450,131 @@ def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> No
     ).run_once()
 
     assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0
+
+
+def test_opportunity_certifier_loads_batches_in_bounded_ordered_waves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quoted_at = datetime(2030, 1, 1, tzinfo=UTC)
+    batch_count = 24
+    payloads: dict[str, bytes] = {}
+    batches = []
+    for index in range(batch_count):
+        token = f"token-{index:02d}"
+        payload = (
+            b'{"structure_receipt_digest":"'
+            + b"a" * 64
+            + b'","token_range_digest":"'
+            + b"b" * 64
+            + b'","universe_hash":"'
+            + b"c" * 64
+            + b'"}\n'
+            + (
+                '{"best_ask_price":0.5,"best_ask_size":1,'
+                '"terminal_state":"executable","yes_token_id":"'
+                f'{token}"}}\n'
+            ).encode()
+        )
+        key = f"quotes/{index:02d}"
+        payloads[key] = payload
+        legs = (
+            QuoteBatchLeg(
+                f"group-{index:02d}",
+                f"market-{index:02d}",
+                f"condition-{index:02d}",
+                f"slug-{index:02d}",
+                token,
+                f"event-{index:02d}",
+                f"membership-{index:02d}",
+            ),
+        )
+        receipt = QuoteBatchReceipt(
+            f"job-{index:02d}",
+            "d" * 64,
+            key,
+            hashlib.sha256(payload).hexdigest(),
+            1,
+        )
+        batches.append((legs, receipt, quoted_at))
+
+    captured: dict[str, object] = {}
+
+    def build_rows(**kwargs: object):
+        captured.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(opportunity_worker_module, "build_opportunity_rows", build_rows)
+
+    class ControlPlane:
+        def claim_job(self, **_kwargs):
+            return type(
+                "Lease",
+                (),
+                {
+                    "job_key": "quote:job:opportunity-certify",
+                    "input_identity": "quote:" + "a" * 64,
+                },
+            )()
+
+        def current_quote_projection_inputs(self):
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, tuple(batches)
+
+        def publish_opportunity_projection(self, **kwargs):
+            self.published = kwargs
+            return "e" * 64
+
+    class Client:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def get_object(self, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.01)
+                payload = payloads[str(kwargs["Key"])]
+                return {"Body": type("Body", (), {"read": lambda self: payload})()}
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    client = Client()
+    result = TransactionalOpportunityCertifier(
+        control_plane=ControlPlane(),
+        object_client=client,
+        bucket="bucket",
+        now=lambda: quoted_at,
+        projection_max_concurrency=6,
+    ).run_once()
+
+    assert result.outcome == "certified:" + "e" * 64
+    assert client.max_active == 6
+    assert [leg.yes_token_id for leg in captured["legs"]] == [
+        f"token-{index:02d}" for index in range(batch_count)
+    ]
+    assert [quote["yes_token_id"] for quote in captured["quotes"]] == [
+        f"token-{index:02d}" for index in range(batch_count)
+    ]
+    assert not any(
+        thread.name.startswith("opportunity-projection") for thread in threading.enumerate()
+    )
+
+
+@pytest.mark.parametrize("max_concurrency", [0, 33])
+def test_opportunity_certifier_rejects_unbounded_projection_concurrency(
+    max_concurrency: int,
+) -> None:
+    with pytest.raises(ValueError, match="projection_max_concurrency"):
+        TransactionalOpportunityCertifier(
+            control_plane=object(),  # type: ignore[arg-type]
+            object_client=object(),  # type: ignore[arg-type]
+            bucket="bucket",
+            now=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+            projection_max_concurrency=max_concurrency,
+        )
 
 
 def test_opportunity_certifier_reports_projection_stages() -> None:

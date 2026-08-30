@@ -1318,6 +1318,7 @@ def _transactional_scheduler(
             bucket=bucket,
             worker_id=f"{worker_id}:opportunity-certifier",
             now=lambda: datetime.now(UTC),
+            projection_max_concurrency=Settings().clob_batch_max_concurrency,
         ),
         max_turns=max_turns,
         structure_materializer_turns=structure_materializer_turns,
