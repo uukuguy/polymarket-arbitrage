@@ -22,6 +22,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     ProgressStallCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
+    WorkerExitCommissioningAdapter,
     complete_normal_turn,
     prepare_normal_turn,
 )
@@ -744,6 +745,90 @@ def test_heartbeat_outage_adapter_renews_and_completes_the_same_attempt(
         True,
         True,
         True,
+        True,
+    )
+    assert recovery_started == (1,)
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_worker_exit_adapter_reclaims_only_after_expiry_and_fences_old_owner(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{job_type}:worker-exit",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=job_type,
+        attack_id="worker-exit",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=WorkerExitCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 50),
+        ),
+        evidence_dir=tmp_path / job_type,
+    )
+
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("action:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        attempts = connection.execute(
+            """
+            SELECT lease_epoch, state, error_class
+            FROM m1_job_attempts
+            WHERE job_key = (
+                SELECT target_id FROM m1_recovery_actions WHERE action_id = %s
+            )
+            ORDER BY lease_epoch
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchall()
+        action = connection.execute(
+            """
+            SELECT action_type, state, result_code
+            FROM m1_recovery_actions WHERE action_id = %s
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchone()
+        incident = connection.execute(
+            """
+            SELECT i.severity, i.state, i.resolved_at IS NOT NULL,
+                   e.detail->>'reason_code',
+                   (e.detail->>'qualification_breaking')::boolean
+            FROM m1_incidents AS i
+            JOIN m1_incident_events AS e ON e.incident_key = i.incident_key
+            WHERE i.incident_key = %s AND e.kind = 'recovery-started'
+            """,
+            (str(proof["detector_fact_id"]).removeprefix("incident:"),),
+        ).fetchone()
+        recovery_started = connection.execute(
+            """
+            SELECT count(*) FROM m1_job_runtime_events
+            WHERE kind = 'job.recovery-started'
+              AND detail->>'reason_code' = 'job.heartbeat-missing'
+            """
+        ).fetchone()
+
+    assert attempts == [
+        (1, "retryable", "RecoveryLeaseExpired"),
+        (2, "succeeded", None),
+    ]
+    assert action == (
+        "reclaim-job",
+        "completed",
+        "succeeded",
+    )
+    assert incident == (
+        "critical",
+        "resolved",
+        True,
+        "job.heartbeat-missing",
         True,
     )
     assert recovery_started == (1,)

@@ -220,3 +220,21 @@ commissioning 因此刻意不调用 worker heartbeat，而只把虚拟观测时�
 `finished_at` 是 PostgreSQL 真正提交 ledger 时的 `clock_timestamp()`。把两者强行判等会
 混淆确定性故障时间和真实事务完成时间。证据应分别验证“何时按策略续租”和“动作确实
 完成”，而不是制造一条假的全局时钟。
+
+### worker 退出后，为什么必须等 lease 到期，又为什么不重置 24 小时？
+
+worker 进程消失不等于它过去持有的写权限立即失效。lease 到期前，旧 owner 仍是数据库
+承认的 current owner；controller 此时只能记录 `job.heartbeat-missing-fence`，不能让另一个
+worker 抢写。到期后，`reclaim-job` 在同一事务里把旧 attempt 标成
+`RecoveryLeaseExpired/retryable`、清除 owner，并写入 retry/recovery 事实。随后旧 owner
+再走真实 terminal API 必须收到 `StaleLeaseError`，新 worker 才能取得 epoch 2。
+
+这类故障很严重，但不会让过去的健康数据变假。runtime 的历史字段
+`qualification_breaking=true` 会使 incident 映射为 `incident.p1-slo`；在资格状态机里它属于
+`BLOCKING_REASONS`，暂停累计并保留已有健康秒。不要把这个字段名误解为 epoch invalidate。
+真正作废历史的 `BREAKING_REASONS` 仍只有 stale fence 成功写入、integrity conflict、
+progress regression 和 release/config/policy/role identity 漂移。
+
+因此 worker-exit 的完整闭环是：到期前 fence → 到期后 reclaim → 旧写拒绝 → 新 epoch
+业务成功 → incident recovered → 同一资格 epoch 恢复累计。若缺任一步，只能保持 block，
+不能用“进程已经重启”冒充生产恢复。

@@ -12044,3 +12044,32 @@ them on one release/config before any production canary or qualification.
 [NEXT] Commit the H-043 confirmation state. Implement and confirm the final
 shared eight-node `worker-exit` reclaim adapter, then build one combined exact
 image and rerun all shared attacks under the same release/config identity.
+
+### SESSION 356 — 2026-08-30 (worker-exit reclaim commissioning)
+
+- [CLIMB H-044] Registered the final shared eight-node hypothesis for a worker
+  that exits after claiming and progressing a real production transaction.
+- [NO PREMATURE TAKEOVER] At lease deadline minus one microsecond, every node
+  must classify `job.heartbeat-missing-fence` with no action. No private clock,
+  direct lease aging or process observation bypasses the database fence.
+- [EXACT RECLAIM] At deadline plus one microsecond, the reconciler schedules the
+  critical `job.heartbeat-missing -> reclaim-job` action. The real executor
+  moves epoch 1 to `RecoveryLeaseExpired/retryable` and clears its owner.
+- [STALE NEGATIVE PROOF] The exited owner's real terminal transaction is
+  explicitly retried and rejected with zero succeeded attempt/event effects.
+- [BUSINESS RECOVERY] A new worker claims epoch 2, completes the exact node
+  transaction, emits runtime/business facts and resolves the incident. No
+  process or Machine restart authority is involved.
+- [QUALIFICATION SEMANTICS] The critical recovery event maps to P1 block, not
+  epoch invalidation; previous healthy seconds remain. Only the existing
+  truth/fence/integrity/identity closed set invalidates history.
+- [EIGHT-NODE/HARNESS] Eight real-PostgreSQL variants plus the migrated isolated
+  harness, zero-residue cleanup and Make/climb contracts pass. Ruff and source
+  Pyright pass.
+- [BOUNDARY] OrbStack remained global context; no production DB/provider, Fly
+  action, SSH, deployment, Colima or global Docker mutation occurred.
+
+[NEXT] Commit Plan 05.6-231 without protected user files, pass exact-HEAD guard
+and confirm H-044. Then build one immutable OrbStack image and execute stale-
+owner, progress-stall, retry-budget, heartbeat-outage and worker-exit together
+under the same release/config; do not start production canaries or qualification.

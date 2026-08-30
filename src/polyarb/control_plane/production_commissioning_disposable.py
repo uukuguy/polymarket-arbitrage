@@ -608,6 +608,342 @@ class HeartbeatOutageCommissioningAdapter:
         )
 
 
+class WorkerExitCommissioningAdapter:
+    """Prove lease-bound worker loss reclaim and successor business recovery."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._prepared: PreparedNormalTurn | None = None
+        self._attempt_id_value: str | None = None
+        self._profile: RuntimeDeadlineProfile | None = None
+        self._channels: tuple[str, ...] | None = None
+        self._last_heartbeat_at: datetime | None = None
+        self._lease_expires_at: datetime | None = None
+        self._detected_at: datetime | None = None
+        self._controller: RuntimeControllerLease | None = None
+        self._action: RecoveryActionRecord | None = None
+        self._replacement: JobLease | None = None
+        self._recovered_proof: dict[str, str] | None = None
+        self._recovery_event_id: str | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if identity.attack_id != "worker-exit":
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _attempt_id(self, lease: JobLease) -> str:
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (lease.job_key, lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("attempt-fact-missing")
+        return str(row[0])
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = prepare_normal_turn(
+            self._control_plane,
+            node_id=identity.node_id,
+            experiment_id=identity.experiment_id,
+            now=self._started_at,
+        )
+        self._prepared = prepared
+        self._attempt_id_value = self._attempt_id(prepared.lease)
+        candidates = read_runtime_reconcile_states(
+            self._control_plane._connection_factory,  # noqa: SLF001
+            controller_id=f"commissioning:worker-exit:{identity.node_id}",
+            now=self._started_at,
+            target_id=prepared.lease.job_key,
+            sample_limit=1,
+        )
+        if len(candidates) != 1:
+            raise DisposableCommissioningError("persisted-runtime-profile-missing")
+        runtime = candidates[0].runtime_state
+        self._profile = runtime.profile
+        self._channels = candidates[0].channels
+        self._last_heartbeat_at = runtime.last_heartbeat_at
+        self._lease_expires_at = runtime.lease_expires_at
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"attempt:{self._attempt_id_value}",
+            occurred_at=runtime.last_heartbeat_at,
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        last_heartbeat_at = self._need(
+            self._last_heartbeat_at, "last-heartbeat-missing"
+        )
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{self._attempt_id_value}",
+            occurred_at=last_heartbeat_at + timedelta(microseconds=1),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "preflight-missing")
+        profile = self._need(self._profile, "runtime-profile-missing")
+        lease_expires_at = self._need(
+            self._lease_expires_at, "lease-deadline-missing"
+        )
+        before_expiry = lease_expires_at - timedelta(microseconds=1)
+        before_candidates = read_runtime_reconcile_states(
+            self._control_plane._connection_factory,  # noqa: SLF001
+            controller_id=f"commissioning:worker-exit:{identity.node_id}",
+            now=before_expiry,
+            target_id=prepared.lease.job_key,
+            sample_limit=1,
+        )
+        if len(before_candidates) != 1:
+            raise DisposableCommissioningError("pre-expiry-candidate-missing")
+        before = RuntimeReconciler().evaluate(
+            before_candidates[0].runtime_state,
+            now=before_expiry,
+        )
+        if before.action is not None or before.reason_code != "job.heartbeat-missing-fence":
+            raise DisposableCommissioningError(
+                f"worker-exit-reclaimed-before-expiry:{before.reason_code}"
+            )
+
+        detected_at = lease_expires_at + timedelta(microseconds=1)
+        controller = claim_controller(
+            self._control_plane._connection_factory,  # noqa: SLF001
+            controller_id=f"commissioning:worker-exit:{identity.node_id}",
+            owner_id=f"commissioning:reclaim-controller:{identity.node_id}",
+            lease_seconds=profile.lease_seconds,
+            now=detected_at,
+        )
+        candidates = read_runtime_reconcile_states(
+            self._control_plane._connection_factory,  # noqa: SLF001
+            controller_id=controller.controller_id,
+            now=detected_at,
+            target_id=prepared.lease.job_key,
+            sample_limit=1,
+        )
+        if len(candidates) != 1:
+            raise DisposableCommissioningError("expired-worker-candidate-missing")
+        candidate = candidates[0]
+        decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=detected_at)
+        if (
+            decision.action is not RecoveryActionType.RECLAIM_JOB
+            or decision.reason_code != "job.heartbeat-missing"
+            or decision.incident_severity != "critical"
+            or not decision.qualification_breaking
+        ):
+            raise DisposableCommissioningError(
+                f"worker-exit-misclassified:{decision.reason_code}"
+            )
+        action = schedule_action(
+            self._control_plane._connection_factory,  # noqa: SLF001
+            controller=controller,
+            decision=decision,
+            incident_key=candidate.incident_key,
+            component=candidate.component,
+            target_type=candidate.target_type,
+            target_id=candidate.target_id,
+            recovery_episode_key=candidate.runtime_state.recovery_episode_key,
+            expected_attempt_id=candidate.runtime_state.attempt_id,
+            expected_lease_epoch=candidate.runtime_state.lease_epoch,
+            recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
+            cooldown_seconds=candidate.cooldown_seconds,
+            channels=candidate.channels,
+            now=detected_at,
+        )
+        if action.state != "pending" or action.incident_key != candidate.incident_key:
+            raise DisposableCommissioningError("worker-exit-recovery-not-scheduled")
+        self._detected_at = detected_at
+        self._controller = controller
+        self._action = action
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"incident:{candidate.incident_key}",
+            occurred_at=detected_at,
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        profile = self._need(self._profile, "runtime-profile-missing")
+        detected_at = self._need(self._detected_at, "detection-time-missing")
+        controller = self._need(self._controller, "controller-missing")
+        action = self._need(self._action, "recovery-action-missing")
+        started_at = detected_at + timedelta(microseconds=1)
+        result = RecoveryExecutor(
+            connection_factory=self._control_plane._connection_factory,  # noqa: SLF001
+            control_plane=self._control_plane,
+            controller=controller,
+            worker_id=f"commissioning:reclaim-worker:{identity.node_id}",
+            action_lease_seconds=profile.heartbeat_seconds,
+            heartbeat_lease_seconds=profile.heartbeat_seconds,
+        ).run_once(
+            now=started_at,
+            expected_action_id=action.action_id,
+        )
+        if result is None or result.action_id != action.action_id or result.outcome != "succeeded":
+            raise DisposableCommissioningError("worker-exit-reclaim-failed")
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"action:{action.action_id}",
+            occurred_at=started_at,
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "preflight-missing")
+        detected_at = self._need(self._detected_at, "detection-time-missing")
+        cleanup_at = detected_at + timedelta(microseconds=2)
+        try:
+            prepared.complete(lease=prepared.lease, now=cleanup_at)
+        except StaleLeaseError:
+            pass
+        else:
+            raise DisposableCommissioningError("exited-worker-not-fenced")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                """
+                SELECT j.state, j.lease_owner, a.state, a.error_class,
+                       count(e.event_id)
+                FROM m1_jobs AS j
+                JOIN m1_job_attempts AS a
+                  ON a.job_key = j.job_key AND a.lease_epoch = j.lease_epoch
+                LEFT JOIN m1_job_runtime_events AS e
+                  ON e.attempt_id = a.attempt_id AND e.kind = 'job.succeeded'
+                WHERE j.job_key = %s
+                GROUP BY j.state, j.lease_owner, a.state, a.error_class
+                """,
+                (prepared.lease.job_key,),
+            ).fetchone()
+        if state != (
+            "retryable",
+            None,
+            "retryable",
+            "RecoveryLeaseExpired",
+            0,
+        ):
+            raise DisposableCommissioningError("worker-exit-cleanup-not-fenced")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"attempt:{self._attempt_id_value}",
+            occurred_at=cleanup_at,
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "preflight-missing")
+        profile = self._need(self._profile, "runtime-profile-missing")
+        detected_at = self._need(self._detected_at, "detection-time-missing")
+        replacement = self._control_plane.claim_job(
+            worker_id=f"commissioning:replacement-worker:{identity.node_id}",
+            job_types=(identity.node_id,),
+            lease_seconds=profile.lease_seconds,
+            now=detected_at + timedelta(microseconds=3),
+        )
+        if (
+            replacement is None
+            or replacement.job_key != prepared.lease.job_key
+            or replacement.lease_epoch != prepared.lease.lease_epoch + 1
+        ):
+            raise DisposableCommissioningError("replacement-claim-mismatch")
+        self._replacement = replacement
+        completed_at = detected_at + timedelta(seconds=5)
+        self._recovered_proof = prepared.complete(lease=replacement, now=completed_at)
+        recovered = self._control_plane.record_job_recovery(
+            replacement,
+            component=identity.node_id,
+            channels=self._need(self._channels, "recovery-channels-missing"),
+            now=completed_at + timedelta(seconds=1),
+        )
+        if not recovered:
+            raise DisposableCommissioningError("worker-exit-incident-not-resolved")
+        action = self._need(self._action, "recovery-action-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            event = connection.execute(
+                """
+                SELECT incident_event_id FROM m1_incident_events
+                WHERE incident_key = %s AND kind = 'recovered'
+                ORDER BY occurred_at DESC LIMIT 1
+                """,
+                (action.incident_key,),
+            ).fetchone()
+        if event is None:
+            raise DisposableCommissioningError("worker-exit-recovery-event-missing")
+        self._recovery_event_id = str(event[0])
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovery_event_id}",
+            occurred_at=completed_at + timedelta(seconds=1),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        proof = self._need(self._recovered_proof, "recovery-proof-missing")
+        replacement = self._need(self._replacement, "replacement-missing")
+        action = self._need(self._action, "recovery-action-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                """
+                SELECT i.state, i.resolved_at IS NOT NULL, a.state, a.result_code
+                FROM m1_incidents AS i
+                JOIN m1_recovery_actions AS a ON a.incident_key = i.incident_key
+                WHERE i.incident_key = %s AND a.action_id = %s
+                """,
+                (action.incident_key, action.action_id),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT lease_epoch FROM m1_job_attempts WHERE attempt_id = %s",
+                (proof["attempt_id"],),
+            ).fetchone()
+        if state != ("resolved", True, "completed", "succeeded"):
+            raise DisposableCommissioningError("worker-exit-recovery-not-closed")
+        if attempt != (replacement.lease_epoch,):
+            raise DisposableCommissioningError("worker-exit-successor-proof-mismatch")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=2),
+        )
+
+
 class ProgressStallCommissioningAdapter:
     """Prove live-lease progress-stall cancellation and successor recovery."""
 
@@ -1898,6 +2234,7 @@ __all__ = [
     "ProgressStallCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",
+    "WorkerExitCommissioningAdapter",
     "complete_normal_turn",
     "prepare_normal_turn",
 ]

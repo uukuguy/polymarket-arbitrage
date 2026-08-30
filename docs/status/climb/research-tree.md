@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 48
-- Next action: rank next pending hypothesis
+- Next action: implement and evaluate H-044 worker-exit commissioning
 
 ## In flight
 
-- None
+- H-044
 
 ## Hypothesis pool
 
@@ -51,6 +51,7 @@
 - **H-041** [confirmed]: A live leased attempt held after durable progress can be classified only by the shared progress deadline, open one warning incident, execute one exactly fenced cancel action, and let a successor epoch complete the real node transaction and resolve that incident across all eight production nodes.
 - **H-042** [confirmed]: Three identical typed failures can exhaust each node's shared retry budget into one deduplicated circuit incident, after which only a policy-due fenced probe action releases one successor epoch whose real business success closes the circuit and incident.
 - **H-043** [confirmed]: A scoped heartbeat transport outage can be classified while the exact lease remains current, schedule one non-breaking fenced heartbeat action, renew the same attempt under its persisted policy, and let that attempt complete its real business transaction across all eight production nodes.
+- **H-044** [in-flight]: A worker that exits after claiming a real node can remain fenced until its persisted lease boundary, then one exact reclaim action can retire the old attempt, reject its stale terminal write, and let a replacement epoch complete the business transaction across all eight production nodes.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
