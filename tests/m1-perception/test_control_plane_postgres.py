@@ -48,6 +48,7 @@ from polyarb.control_plane.postgres import (
     RuntimeEventConflictError,
     RuntimeProgressConflictError,
     StaleLeaseError,
+    StructureSuccessorBusyError,
 )
 from polyarb.control_plane.qualification import (
     QualificationDecision,
@@ -2815,6 +2816,181 @@ def test_due_quote_refresh_admits_distinct_run_on_current_structure_once_per_buc
             """
         ).fetchone()
     assert pointer == (recurring_generation,)
+
+
+def test_quote_refresh_defers_to_leased_structure_certifier_and_only_new_parent_admits(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    old_structure_digest = "a" * 64
+    old_structure = f"structure:{old_structure_digest}"
+    old_quote = f"quote:{old_structure_digest}"
+    universe_hash = "b" * 64
+    _seed_structure_parent(
+        control_plane,
+        structure_digest=old_structure_digest,
+        now=now - timedelta(minutes=10),
+    )
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_jobs (
+                job_key, job_type, input_identity, state, created_at, updated_at
+            ) VALUES
+                ('old-quote-admit', 'quote-admit', 'old-admit',
+                 'succeeded', %s, %s),
+                ('old-quote-certify', 'quote-certify', 'old-certify',
+                 'succeeded', %s, %s)
+            """,
+            (now, now, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES (%s, 'old-quote-certify', %s, 'old-quote', %s, 1, %s)
+            """,
+            (old_quote, universe_hash, "c" * 64, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_generation_inputs (
+                generation_key, structure_generation_key, universe_hash,
+                cadence_seconds, cadence_bucket, admitted_at
+            ) VALUES (%s, %s, %s, NULL, NULL, %s)
+            """,
+            (old_quote, old_structure, universe_hash, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_admission_inputs (
+                job_key, generation_key, bundle_key, bundle_digest,
+                quote_generation_key, admitted_at
+            ) VALUES ('old-quote-admit', %s, 'old-bundle', %s, %s, %s)
+            """,
+            (old_structure, old_structure_digest, old_quote, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_publication_pointers (
+                pointer_key, generation_key, expected_generation_key,
+                lease_epoch, published_at
+            ) VALUES ('quote:current', %s, NULL, 1, %s)
+            """,
+            (old_quote, now),
+        )
+
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"new-parent"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    normalizer = control_plane.claim_job(
+        worker_id="new-parent-normalizer",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert normalizer is not None
+    control_plane.complete_structure_range(
+        normalizer,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/new-parent.ndjson",
+        artifact_digest="d" * 64,
+        record_count=1,
+        now=now,
+    )
+    certifier = control_plane.claim_job(
+        worker_id="new-parent-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": "structure-ranges/new-parent.ndjson",
+                    "artifact_digest": "d" * 64,
+                    "record_count": 1,
+                },
+            ),
+        )
+    ).hexdigest()
+
+    decision = control_plane.admit_due_quote_refresh(cadence_seconds=300, now=now)
+
+    assert decision.state == "busy"
+    control_plane.certify_structure_generation(
+        certifier,
+        generation_key=spec.generation_key,
+        artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+        artifact_digest=manifest_digest,
+        now=now,
+    )
+    with control_plane._connection_factory() as connection:
+        active = connection.execute(
+            """
+            SELECT admission.generation_key, admission.quote_generation_key
+            FROM m1_quote_admission_inputs AS admission
+            JOIN m1_jobs AS job ON job.job_key = admission.job_key
+            WHERE job.state IN ('waiting', 'runnable', 'retryable', 'leased', 'checkpointed')
+            """
+        ).fetchall()
+    assert active == [(spec.generation_key, f"quote:{bundle.sha256}")]
+
+
+def test_structure_certification_waits_when_older_quote_successor_already_won_lock(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    generation_key = f"structure:{'e' * 64}"
+    certifier_key = f"{generation_key}:certify"
+    control_plane.enqueue_job(
+        job_key=certifier_key,
+        job_type="structure-certify",
+        input_identity=generation_key,
+        now=now,
+    )
+    control_plane.enqueue_job(
+        job_key="quote:older:admit",
+        job_type="quote-admit",
+        input_identity="older-quote-successor",
+        now=now,
+    )
+    certifier = control_plane.claim_job(
+        worker_id="structure-race-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+
+    with pytest.raises(StructureSuccessorBusyError):
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=generation_key,
+            artifact_key="structure-manifests/race.ndjson",
+            artifact_digest="f" * 64,
+            now=now,
+        )
+
+    with control_plane._connection_factory() as connection:
+        state = connection.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            (certifier_key,),
+        ).fetchone()
+    assert state == ("leased",)
 
 
 def test_quote_batch_input_survives_admission_for_worker_takeover(

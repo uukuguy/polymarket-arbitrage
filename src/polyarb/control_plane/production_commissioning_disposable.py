@@ -5035,20 +5035,52 @@ class PublicationPointerConflictCommissioningAdapter:
                 error_class="PublicationRaceStaging",
                 now=self._started_at + timedelta(seconds=1),
             )
-        current = prepare_normal_turn(
-            self._control_plane,
-            node_id=identity.node_id,
-            experiment_id=f"{identity.experiment_id}:current",
-            now=self._started_at + timedelta(seconds=10),
-        )
-        if identity.node_id == "structure-certify":
-            current.complete(now=self._started_at + timedelta(seconds=15))
-        else:
-            with self._control_plane._connection_factory() as connection:  # noqa: SLF001
-                connection.execute(
-                    "UPDATE m1_jobs SET next_attempt_at = %s WHERE job_key = %s",
-                    (self._started_at + timedelta(seconds=32), stale.lease.job_key),
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            suspended = connection.execute(
+                """
+                SELECT job_key, state FROM m1_jobs
+                WHERE job_type IN (
+                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
                 )
+                  AND state IN (
+                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                  )
+                FOR UPDATE
+                """
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE m1_jobs SET state = 'succeeded'
+                WHERE job_type IN (
+                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                )
+                  AND state IN (
+                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                  )
+                """
+            )
+        try:
+            current = prepare_normal_turn(
+                self._control_plane,
+                node_id=identity.node_id,
+                experiment_id=f"{identity.experiment_id}:current",
+                now=self._started_at + timedelta(seconds=10),
+            )
+            if identity.node_id == "structure-certify":
+                current.complete(now=self._started_at + timedelta(seconds=15))
+            else:
+                with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+                    connection.execute(
+                        "UPDATE m1_jobs SET next_attempt_at = %s WHERE job_key = %s",
+                        (self._started_at + timedelta(seconds=32), stale.lease.job_key),
+                    )
+        finally:
+            with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+                for job_key, state in suspended:
+                    connection.execute(
+                        "UPDATE m1_jobs SET state = %s WHERE job_key = %s",
+                        (state, job_key),
+                    )
         self._stale = stale
         self._stale_active_lease = stale.lease
         self._current = current

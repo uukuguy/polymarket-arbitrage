@@ -86,6 +86,10 @@ class StructureParityMismatchError(IncompleteStructureGenerationError):
     """A complete Structure generation conflicts with its frozen source counts."""
 
 
+class StructureSuccessorBusyError(IncompleteStructureGenerationError):
+    """Structure certification must wait for an older executable successor."""
+
+
 class PublicationPointerConflictError(ControlPlaneError):
     """A stale publication candidate no longer names the current lineage."""
 
@@ -1774,12 +1778,17 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT 1 FROM m1_jobs
-                WHERE job_type IN (
-                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                WHERE (
+                    job_type IN (
+                        'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                    )
+                    AND state IN (
+                        'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                    )
+                ) OR (
+                    job_type = 'structure-certify'
+                    AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
                 )
-                  AND state IN (
-                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
-                  )
                 LIMIT 1
                 """
             )
@@ -5031,6 +5040,26 @@ class PostgresControlPlane:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("m1:quote-generation-admission",),
+            )
+            cursor.execute(
+                """
+                SELECT 1 FROM m1_jobs
+                WHERE job_type IN (
+                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                )
+                  AND state IN (
+                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                  )
+                LIMIT 1
+                """
+            )
+            if cursor.fetchone() is not None:
+                raise StructureSuccessorBusyError(
+                    "Structure certification is waiting for the current executable successor"
+                )
             cursor.execute(
                 """
                 SELECT job_key, bundle_digest, component, ordinal, range_digest, admitted_at
