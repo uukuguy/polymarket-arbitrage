@@ -1,0 +1,1 @@
+{"attack_id":"heartbeat-outage","config_id":"sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90","execution_scope":"disposable-exact-image","experiment_id":"commission:quote-admit:heartbeat-outage","node_id":"quote-admit","qualification_impact":"pause","release_id":"1b432ad52279afff72ce10b4bec50daad2f04ea3"}

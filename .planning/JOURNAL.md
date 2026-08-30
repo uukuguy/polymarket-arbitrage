@@ -12097,3 +12097,40 @@ under the same release/config; do not start production canaries or qualification
 through command-scoped OrbStack, independently inspect its release identity,
 then run all five shared attacks against isolated PostgreSQL and preserve the 40
 release/config-bound proofs with zero-residue and secret scans.
+
+### SESSION 358 — 2026-08-30 (exact-v27 shared 40-proof matrix)
+
+- [ORBSTACK BUILD] Built and pushed build-only image
+  `m1-runtime-v27-1b432ad5` for exact release `1b432ad5...`; registry digest is
+  `sha256:43f08545...`. No deploy or Machine creation occurred.
+- [INDEPENDENT IMAGE CHECK] An isolated registry-auth directory pulled the
+  image into OrbStack. Inspect proved amd64/linux, non-root `polyarb`, exact
+  revision label and image ID `8fa52d77...`; the image recomputed the expected
+  observe-only/empty-allowlist config `sha256:f79dc5...`.
+- [SHARED MATRIX] The exact image executed stale-owner, progress-stall,
+  retry-budget, heartbeat-outage and worker-exit against all eight production
+  transaction nodes. Independent inspection passed 40/40 proofs with one
+  release/config and complete detector/action/recovery/business identities.
+- [QUALIFICATION SEMANTICS] Heartbeat and stale-owner proofs pause healthy
+  accumulation; progress stall, retry-budget exhaustion and worker exit block
+  while preserving accrued seconds. No proof widened invalidation semantics.
+- [ZERO RESIDUE] Independent pre-teardown SQL returned zero temporary databases
+  and zero migration-created capability roles. The 360 lifecycle files passed
+  shape, SHA-256 copy and secret scans; one execution manifest completes the
+  preserved 361-file tree.
+- [CLEANUP] The named PostgreSQL container and internal network were removed
+  after evidence preservation. Their test data is not recoverable. Isolated
+  registry auth and the temporary source evidence were moved to Trash; global
+  Docker context stayed `orbstack`.
+- [SHELL NOTE] A redundant post-copy SQL-print command lost its two displayed
+  values because zsh globbed nested `count(*)`. The earlier independent `0/0`
+  query is the cleanup evidence; no blank value was promoted as proof.
+- [BOUNDARY] No production DB/provider, Fly Machine, SSH, deployment, canary or
+  qualification was touched. The final envelope remains blocked on 22
+  node-specific disposable proofs and four scoped production-canary proofs.
+
+[NEXT] Commit Plan 05.6-232 evidence without protected user files, confirm
+planning/hash integrity, then implement the next node-specific disposable
+attack adapter beginning with `source-receipt-gap`. Do not rebuild another
+image until the remaining disposable adapters can be rerun together under one
+later immutable release/config; do not start production canaries or qualification.

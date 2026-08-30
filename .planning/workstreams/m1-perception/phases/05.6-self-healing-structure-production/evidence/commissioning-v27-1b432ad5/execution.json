@@ -1,0 +1,32 @@
+{
+  "attack_count": 5,
+  "attack_ids": [
+    "heartbeat-outage",
+    "progress-stall",
+    "retry-budget-exhaustion",
+    "stale-owner-terminal-write",
+    "worker-exit"
+  ],
+  "config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+  "database_cleanup": {
+    "migration_role_count": 0,
+    "temporary_database_count": 0
+  },
+  "evidence_file_count": 360,
+  "executed_at": "2026-08-30T03:04:20Z",
+  "execution_scope": "disposable-exact-image",
+  "image": {
+    "architecture": "amd64",
+    "digest": "sha256:43f08545cd9dae2c6f9a9f41ea50444a9b11b07bcf7e4c928b11c273174a4897",
+    "id": "sha256:8fa52d77fb59e84af63e1ffc8ddb91eff1e167406e7f106d9461694b2f25a73b",
+    "os": "linux",
+    "repository": "registry.fly.io/polyarb-control-worker-m1",
+    "size_bytes": 751314345,
+    "tag": "m1-runtime-v27-1b432ad5",
+    "user": "polyarb"
+  },
+  "node_count": 8,
+  "proof_count": 40,
+  "release_id": "1b432ad52279afff72ce10b4bec50daad2f04ea3",
+  "status": "pass"
+}
