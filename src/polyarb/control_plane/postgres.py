@@ -85,6 +85,10 @@ class StructureParityMismatchError(IncompleteStructureGenerationError):
     """A complete Structure generation conflicts with its frozen source counts."""
 
 
+class PublicationPointerConflictError(ControlPlaneError):
+    """A stale publication candidate no longer names the current lineage."""
+
+
 class SoakEvidenceConflictError(ControlPlaneError):
     """A cloud soak run or observation conflicts with immutable evidence."""
 
@@ -94,6 +98,61 @@ class RuntimeEventConflictError(ControlPlaneError):
 
 
 _FAILURE_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_POINTER_LINEAGE_MARKER = ":pointer="
+_POINTER_LINEAGE_NONE = "none"
+_POINTER_LINEAGE_UNSET = object()
+
+
+def _quote_certification_identity(
+    generation_key: str,
+    universe_hash: str,
+    expected_generation_key: str | None,
+) -> str:
+    expected = _POINTER_LINEAGE_NONE if expected_generation_key is None else expected_generation_key
+    return f"{generation_key}:{universe_hash}{_POINTER_LINEAGE_MARKER}{expected}"
+
+
+def _parse_quote_certification_identity(
+    input_identity: str,
+) -> tuple[str, str, str | None, bool]:
+    base, marker, expected = input_identity.partition(_POINTER_LINEAGE_MARKER)
+    try:
+        generation_key, universe_hash = base.rsplit(":", maxsplit=1)
+    except ValueError as error:
+        raise JobIdentityConflict("quote certifier has malformed input identity") from error
+    if not generation_key or not universe_hash:
+        raise JobIdentityConflict("quote certifier has malformed input identity")
+    if not marker:
+        return generation_key, universe_hash, None, False
+    if not expected:
+        raise JobIdentityConflict("quote certifier has empty pointer lineage")
+    expected_generation = None if expected == _POINTER_LINEAGE_NONE else expected
+    if expected_generation is not None and not expected_generation.startswith("quote:"):
+        raise JobIdentityConflict("quote certifier has malformed pointer lineage")
+    return generation_key, universe_hash, expected_generation, True
+
+
+def _frozen_quote_certification_identity(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    generation_key: str,
+    universe_hash: str,
+    expected_generation_key: str | None,
+) -> str:
+    job_key = f"{generation_key}:certify"
+    cursor.execute("SELECT input_identity FROM m1_jobs WHERE job_key = %s", (job_key,))
+    existing = cursor.fetchone()
+    if existing is None:
+        return _quote_certification_identity(
+            generation_key, universe_hash, expected_generation_key
+        )
+    input_identity = str(existing["input_identity"])
+    frozen_generation, frozen_universe, _expected, _fenced = (
+        _parse_quote_certification_identity(input_identity)
+    )
+    if frozen_generation != generation_key or frozen_universe != universe_hash:
+        raise JobIdentityConflict(f"job key {job_key!r} names another input")
+    return input_identity
 
 
 def _retry_failure_signature(error_class: str) -> str:
@@ -2609,6 +2668,14 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers "
+                "WHERE pointer_key = 'quote:current' FOR UPDATE"
+            )
+            pointer = cursor.fetchone()
+            expected_generation_key = (
+                None if pointer is None else str(pointer["generation_key"])
+            )
             for batch in batches:
                 self._enqueue_job_cursor(
                     cursor,
@@ -2660,7 +2727,12 @@ class PostgresControlPlane:
                 cursor,
                 job_key=f"{generation_key}:certify",
                 job_type="quote-certify",
-                input_identity=f"{generation_key}:{universe_hash}",
+                input_identity=_frozen_quote_certification_identity(
+                    cursor,
+                    generation_key=generation_key,
+                    universe_hash=universe_hash,
+                    expected_generation_key=expected_generation_key,
+                ),
                 now=now,
                 initial_state=JobState.WAITING,
             )
@@ -3463,11 +3535,22 @@ class PostgresControlPlane:
                     f"quote batch {batch.job_key!r} names another immutable input"
                 )
         generation_key = batches[0].generation_key
+        cursor.execute(
+            "SELECT generation_key FROM m1_publication_pointers "
+            "WHERE pointer_key = 'quote:current' FOR UPDATE"
+        )
+        pointer = cursor.fetchone()
+        expected_generation_key = None if pointer is None else str(pointer["generation_key"])
         self._enqueue_job_cursor(
             cursor,
             job_key=f"{generation_key}:certify",
             job_type="quote-certify",
-            input_identity=f"{generation_key}:{batches[0].universe_hash}",
+            input_identity=_frozen_quote_certification_identity(
+                cursor,
+                generation_key=generation_key,
+                universe_hash=batches[0].universe_hash,
+                expected_generation_key=expected_generation_key,
+            ),
             now=now,
             initial_state=JobState.WAITING,
         )
@@ -4933,10 +5016,12 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if lease.job_type != "quote-certify" or lease.job_key != f"{generation_key}:certify":
             raise ValueError("Quote certification requires its matching quote-certify lease")
-        try:
-            lease_generation_key, universe_hash = lease.input_identity.rsplit(":", maxsplit=1)
-        except ValueError as error:
-            raise JobIdentityConflict("quote certifier has malformed input identity") from error
+        (
+            lease_generation_key,
+            universe_hash,
+            expected_generation_key,
+            has_lineage_fence,
+        ) = _parse_quote_certification_identity(lease.input_identity)
         if lease_generation_key != generation_key or not universe_hash:
             raise JobIdentityConflict("quote certifier identity does not match its generation")
         structure_digest = generation_key.removeprefix("quote:")
@@ -5043,6 +5128,10 @@ class PostgresControlPlane:
             )
             current = cursor.fetchone()
             if current is None:
+                if has_lineage_fence and expected_generation_key is not None:
+                    raise PublicationPointerConflictError(
+                        "Quote publication predecessor is no longer current"
+                    )
                 cursor.execute(
                     """
                     INSERT INTO m1_publication_pointers (
@@ -5053,6 +5142,14 @@ class PostgresControlPlane:
                     (generation_key, lease.lease_epoch, now),
                 )
             elif str(current["generation_key"]) != generation_key:
+                current_generation_key = str(current["generation_key"])
+                if (
+                    not has_lineage_fence
+                    or current_generation_key != expected_generation_key
+                ):
+                    raise PublicationPointerConflictError(
+                        "Quote publication predecessor is no longer current"
+                    )
                 cursor.execute(
                     """
                     UPDATE m1_publication_pointers
@@ -5062,10 +5159,10 @@ class PostgresControlPlane:
                     """,
                     (
                         generation_key,
-                        current["generation_key"],
+                        current_generation_key,
                         lease.lease_epoch,
                         now,
-                        current["generation_key"],
+                        current_generation_key,
                     ),
                 )
                 if cursor.rowcount != 1:
@@ -5147,7 +5244,13 @@ class PostgresControlPlane:
             )
             return str(manifest["artifact_digest"])
 
-    def publish_structure_shadow(self, *, generation_key: str, now: datetime) -> str:
+    def publish_structure_shadow(
+        self,
+        *,
+        generation_key: str,
+        now: datetime,
+        expected_generation_key: str | None | object = _POINTER_LINEAGE_UNSET,
+    ) -> str:
         """Move only the transactional shadow pointer to a certified generation."""
         self._validate_nonempty(generation_key=generation_key)
         self._validate_aware(now, "now")
@@ -5177,6 +5280,10 @@ class PostgresControlPlane:
             )
             current = cursor.fetchone()
             if current is None:
+                if expected_generation_key not in {_POINTER_LINEAGE_UNSET, None}:
+                    raise PublicationPointerConflictError(
+                        "Structure shadow predecessor is no longer current"
+                    )
                 cursor.execute(
                     """
                     INSERT INTO m1_publication_pointers (
@@ -5187,6 +5294,14 @@ class PostgresControlPlane:
                     (generation_key, now),
                 )
             elif str(current["generation_key"]) != generation_key:
+                current_generation_key = str(current["generation_key"])
+                if (
+                    expected_generation_key is _POINTER_LINEAGE_UNSET
+                    or expected_generation_key != current_generation_key
+                ):
+                    raise PublicationPointerConflictError(
+                        "Structure shadow predecessor is no longer current"
+                    )
                 cursor.execute(
                     """
                     UPDATE m1_publication_pointers
@@ -5194,7 +5309,7 @@ class PostgresControlPlane:
                         lease_epoch = lease_epoch + 1, published_at = %s
                     WHERE pointer_key = 'structure:current:shadow' AND generation_key = %s
                     """,
-                    (generation_key, current["generation_key"], now, current["generation_key"]),
+                    (generation_key, current_generation_key, now, current_generation_key),
                 )
                 if cursor.rowcount != 1:
                     raise StaleLeaseError("Structure shadow pointer changed during publication")
@@ -6981,9 +7096,12 @@ class PostgresControlPlane:
         channels: Sequence[str],
         qualification_impact: str = "blocked",
         reason_code: str = "failure.schema",
+        severity: str = "critical",
+        incident_kind: str = "escalated",
+        qualification_breaking: bool = True,
         now: datetime,
     ) -> str:
-        """Atomically quarantine immutable bad input and surface operator action."""
+        """Atomically quarantine one non-retryable defect and surface operator action."""
         self._validate_aware(now, "now")
         self._validate_nonempty(
             error_class=error_class,
@@ -6996,10 +7114,22 @@ class PostgresControlPlane:
             raise ValueError("channels must contain non-empty values")
         if len(set(channels)) != len(channels):
             raise ValueError("channels must be unique")
-        if qualification_impact not in {"blocked", "invalidated"}:
-            raise ValueError("qualification_impact must be blocked or invalidated")
-        if reason_code not in {"failure.schema", "integrity.conflict"}:
-            raise ValueError("reason_code is not an allowed quarantine reason")
+        semantic = (
+            qualification_impact,
+            reason_code,
+            severity,
+            incident_kind,
+            qualification_breaking,
+        )
+        if semantic not in {
+            ("blocked", "failure.schema", "critical", "escalated", True),
+            ("invalidated", "integrity.conflict", "critical", "escalated", True),
+            ("delayed", "publication.superseded", "warning", "detected", False),
+        }:
+            raise ValueError("quarantine incident semantic is not allowed")
+        detail_reason = detail.get("reason_code")
+        if detail_reason is not None and detail_reason != reason_code:
+            raise ValueError("incident detail reason_code conflicts with terminal fact")
         failure_fingerprint, failure_signature = _retry_failure_identity(
             component=component,
             error_class=error_class,
@@ -7128,15 +7258,15 @@ class PostgresControlPlane:
                 incident_key=incident_key,
                 dedupe_key=dedupe_key,
                 component=component,
-                severity="critical",
+                severity=severity,
                 summary=summary,
-                kind="escalated",
+                kind=incident_kind,
                 detail={
                     **detail,
                     "error_class": error_class,
                     "failure_fingerprint": failure_fingerprint,
                     "failure_signature": failure_signature,
-                    "qualification_breaking": True,
+                    "qualification_breaking": qualification_breaking,
                 },
                 idempotency_key=f"input-quarantine:{lease.job_key}:{lease.lease_epoch}",
                 channels=channels,
@@ -8460,7 +8590,15 @@ class PostgresControlPlane:
                 "WHERE pointer_key='quote:current' FOR UPDATE"
             )
             pointer = cursor.fetchone()
-            if pointer is None or str(pointer["generation_key"]) != quote_generation_key:
+            if pointer is None:
+                raise IncompleteQuoteGenerationError(
+                    "opportunity projection requires current certified Quote"
+                )
+            if str(pointer["generation_key"]) != quote_generation_key:
+                if lease is not None:
+                    raise PublicationPointerConflictError(
+                        "opportunity candidate no longer names current Quote"
+                    )
                 raise IncompleteQuoteGenerationError(
                     "opportunity projection requires current certified Quote"
                 )

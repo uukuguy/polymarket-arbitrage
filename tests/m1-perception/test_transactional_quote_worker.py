@@ -15,7 +15,11 @@ from polyarb.control_plane.models import (
     QuoteBatchLeg,
     QuoteBatchSpec,
 )
-from polyarb.control_plane.postgres import IncompleteQuoteGenerationError, StaleLeaseError
+from polyarb.control_plane.postgres import (
+    IncompleteQuoteGenerationError,
+    PublicationPointerConflictError,
+    StaleLeaseError,
+)
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import (
     QuoteBatchWorkerResult,
@@ -595,6 +599,38 @@ def test_quote_certifier_incomplete_barrier_uses_durable_retry_circuit() -> None
     assert result.outcome == "retryable"
     assert control_plane.retry["component"] == "quote-certify"
     assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
+def test_quote_certifier_pointer_conflict_is_visible_and_never_retried() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.superseded: dict[str, object] | None = None
+
+        def claim_job(self, **_kwargs):
+            return _runtime_quote_certifier_lease()
+
+        def certify_quote_generation(self, _lease, **_kwargs):
+            raise PublicationPointerConflictError("stale quote lineage")
+
+        def finish_quarantined_with_incident(self, _lease, **kwargs):
+            self.superseded = kwargs
+
+        def finish_retryable_with_incident(self, *_args, **_kwargs):
+            raise AssertionError("superseded publication must not consume retry budget")
+
+    control_plane = ControlPlane()
+    result = TransactionalQuoteCertifier(
+        control_plane=control_plane,
+        worker_id="quote-certifier",
+        now=lambda: NOW,
+    ).run_once()
+
+    assert result.outcome == "superseded"
+    assert control_plane.superseded is not None
+    assert control_plane.superseded["reason_code"] == "publication.superseded"
+    assert control_plane.superseded["qualification_impact"] == "delayed"
+    assert control_plane.superseded["severity"] == "warning"
+    assert control_plane.superseded["qualification_breaking"] is False
 
 
 def test_quote_certifier_service_stop_uses_interruption_not_defect_retry() -> None:

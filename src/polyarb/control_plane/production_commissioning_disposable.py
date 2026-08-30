@@ -12,10 +12,11 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from .models import JobLease, QuoteBatchLeg, QuoteBatchSpec
+from .models import JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
 from .postgres import (
     IncompleteStructureGenerationError,
     PostgresControlPlane,
+    PublicationPointerConflictError,
     StaleLeaseError,
 )
 from .production_commissioning_runner import AttackIdentity, AttackStageReceipt
@@ -3547,6 +3548,299 @@ class StructureParityMismatchCommissioningAdapter:
         )
 
 
+class PublicationPointerConflictCommissioningAdapter:
+    """Race one stale publisher against a newer lineage on each pointer node."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._stale: PreparedNormalTurn | None = None
+        self._stale_active_lease: JobLease | None = None
+        self._current: PreparedNormalTurn | None = None
+        self._stale_generation: str | None = None
+        self._current_generation: str | None = None
+        self._detector_id: str | None = None
+        self._incident_event_id: str | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if identity.attack_id != "publication-pointer-conflict" or identity.node_id not in {
+            "structure-certify",
+            "quote-certify",
+            "opportunity-certify",
+        }:
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _generation(self, prepared: PreparedNormalTurn) -> str:
+        if prepared.lease.job_type == "opportunity-certify":
+            return prepared.lease.input_identity
+        return prepared.lease.job_key.removesuffix(":certify")
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale = prepare_normal_turn(
+            self._control_plane,
+            node_id=identity.node_id,
+            experiment_id=f"{identity.experiment_id}:stale",
+            now=self._started_at,
+        )
+        if identity.node_id == "structure-certify":
+            stale.complete(now=self._started_at + timedelta(seconds=5))
+            stale_generation = self._generation(stale)
+            self._control_plane.publish_structure_shadow(
+                generation_key=stale_generation,
+                expected_generation_key=None,
+                now=self._started_at + timedelta(seconds=6),
+            )
+        else:
+            self._control_plane.finish(
+                stale.lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._started_at + timedelta(seconds=100),
+                error_class="PublicationRaceStaging",
+                now=self._started_at + timedelta(seconds=1),
+            )
+        current = prepare_normal_turn(
+            self._control_plane,
+            node_id=identity.node_id,
+            experiment_id=f"{identity.experiment_id}:current",
+            now=self._started_at + timedelta(seconds=10),
+        )
+        if identity.node_id == "structure-certify":
+            current.complete(now=self._started_at + timedelta(seconds=15))
+        else:
+            with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+                connection.execute(
+                    "UPDATE m1_jobs SET next_attempt_at = %s WHERE job_key = %s",
+                    (self._started_at + timedelta(seconds=32), stale.lease.job_key),
+                )
+        self._stale = stale
+        self._stale_active_lease = stale.lease
+        self._current = current
+        self._stale_generation = self._generation(stale)
+        self._current_generation = self._generation(current)
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"candidate:{self._stale_generation}:expected-predecessor",
+            occurred_at=self._started_at + timedelta(seconds=30),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale_generation = self._need(self._stale_generation, "stale-generation-missing")
+        current_generation = self._need(self._current_generation, "current-generation-missing")
+        current = self._need(self._current, "current-turn-missing")
+        if identity.node_id == "structure-certify":
+            self._control_plane.publish_structure_shadow(
+                generation_key=current_generation,
+                expected_generation_key=stale_generation,
+                now=self._started_at + timedelta(seconds=31),
+            )
+        else:
+            current.complete(now=self._started_at + timedelta(seconds=31))
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"pointer:{identity.node_id}:{current_generation}",
+            occurred_at=self._started_at + timedelta(seconds=31),
+        )
+
+    def _quarantine_stale(self, identity: AttackIdentity, lease: JobLease) -> None:
+        self._control_plane.finish_quarantined_with_incident(
+            lease,
+            error_class="PublicationPointerConflictError",
+            incident_key=f"incident:publication-superseded:{lease.job_key}",
+            dedupe_key=f"publication-superseded:{lease.job_key}",
+            component=identity.node_id,
+            summary=f"{identity.node_id} stale publication superseded",
+            detail={
+                "job_key": lease.job_key,
+                "lease_epoch": lease.lease_epoch,
+                "reason_code": "publication.superseded",
+            },
+            channels=("dashboard",),
+            qualification_impact="delayed",
+            reason_code="publication.superseded",
+            severity="warning",
+            incident_kind="detected",
+            qualification_breaking=False,
+            now=self._started_at + timedelta(seconds=32),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale = self._need(self._stale, "stale-turn-missing")
+        stale_generation = self._need(self._stale_generation, "stale-generation-missing")
+        active_lease = stale.lease
+        if identity.node_id != "structure-certify":
+            replacement = self._control_plane.claim_job(
+                worker_id=f"commissioning:stale-publisher:{identity.node_id}",
+                job_types=(identity.node_id,),
+                lease_seconds=120,
+                now=self._started_at + timedelta(seconds=32),
+            )
+            if replacement is None or replacement.job_key != stale.lease.job_key:
+                raise DisposableCommissioningError("stale-publisher-reclaim-missing")
+            active_lease = replacement
+            self._stale_active_lease = replacement
+        try:
+            if identity.node_id == "structure-certify":
+                self._control_plane.publish_structure_shadow(
+                    generation_key=stale_generation,
+                    expected_generation_key=None,
+                    now=self._started_at + timedelta(seconds=32),
+                )
+            else:
+                stale.complete(
+                    lease=active_lease,
+                    now=self._started_at + timedelta(seconds=32),
+                )
+        except PublicationPointerConflictError:
+            pass
+        else:
+            raise DisposableCommissioningError("stale-pointer-publication-not-rejected")
+        if identity.node_id == "structure-certify":
+            self._detector_id = f"cas:{stale_generation}:rejected"
+        else:
+            self._quarantine_stale(identity, active_lease)
+            with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+                row = connection.execute(
+                    """
+                    SELECT runtime.event_id, event.incident_event_id
+                    FROM m1_job_runtime_events AS runtime
+                    JOIN m1_incidents AS incident
+                      ON incident.dedupe_key = 'publication-superseded:' || runtime.job_key
+                    JOIN m1_incident_events AS event USING (incident_key)
+                    WHERE runtime.job_key = %s AND runtime.kind = 'job.terminal-failed'
+                    """,
+                    (active_lease.job_key,),
+                ).fetchone()
+            if row is None:
+                raise DisposableCommissioningError("pointer-conflict-warning-chain-missing")
+            self._detector_id = f"event:{row[0]}"
+            self._incident_event_id = str(row[1])
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=self._need(self._detector_id, "pointer-detector-missing"),
+            occurred_at=self._started_at + timedelta(seconds=32),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        current_generation = self._need(self._current_generation, "current-generation-missing")
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"lineage-preserved:{current_generation}",
+            occurred_at=self._started_at + timedelta(seconds=33),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale = self._need(self._stale, "stale-turn-missing")
+        expected_state = "succeeded" if identity.node_id == "structure-certify" else "quarantined"
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                "SELECT state FROM m1_jobs WHERE job_key = %s",
+                (stale.lease.job_key,),
+            ).fetchone()
+            circuits = connection.execute(
+                "SELECT count(*) FROM m1_job_circuits WHERE job_key = %s",
+                (stale.lease.job_key,),
+            ).fetchone()
+        if state != (expected_state,) or circuits != (0,):
+            raise DisposableCommissioningError("pointer-conflict-cleanup-shape")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"postgres:m1_job_circuits:{stale.lease.job_key}:absent",
+            occurred_at=self._started_at + timedelta(seconds=34),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        current = self._need(self._current, "current-turn-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key = %s AND kind = 'job.succeeded'
+                """,
+                (current.lease.job_key,),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("current-pointer-success-missing")
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{row[0]}",
+            occurred_at=self._started_at + timedelta(seconds=35),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        current_generation = self._need(self._current_generation, "current-generation-missing")
+        if identity.node_id == "structure-certify":
+            pointer_table = "m1_publication_pointers"
+            pointer_key = "structure:current:shadow"
+        elif identity.node_id == "quote-certify":
+            pointer_table = "m1_publication_pointers"
+            pointer_key = "quote:current"
+        else:
+            pointer_table = "m1_opportunity_publication_pointers"
+            pointer_key = "opportunity:current"
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            pointer = connection.execute(
+                f"SELECT generation_key FROM {pointer_table} WHERE pointer_key = %s",  # noqa: S608
+                (pointer_key,),
+            ).fetchone()
+            matching_success = connection.execute(
+                """
+                SELECT count(*) FROM m1_job_runtime_events AS event
+                JOIN m1_jobs AS job USING (job_key)
+                WHERE event.kind = 'job.succeeded' AND job.job_key = %s
+                """,
+                (self._need(self._current, "current-turn-missing").lease.job_key,),
+            ).fetchone()
+        if pointer != (current_generation,) or matching_success != (1,):
+            raise DisposableCommissioningError("pointer-conflict-postcondition")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"pointer:{pointer_key}:{current_generation}",
+            occurred_at=self._started_at + timedelta(seconds=36),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -4102,6 +4396,7 @@ __all__ = [
     "HeartbeatOutageCommissioningAdapter",
     "NormalizationPayloadCorruptCommissioningAdapter",
     "PreparedNormalTurn",
+    "PublicationPointerConflictCommissioningAdapter",
     "ProgressStallCommissioningAdapter",
     "QuoteAdmissionMissingShardCommissioningAdapter",
     "QuoteBatchIncompleteCommissioningAdapter",

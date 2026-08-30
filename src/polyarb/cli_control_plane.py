@@ -2316,6 +2316,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             current = control_plane.publish_structure_shadow(
                 generation_key=args.generation_key,
                 now=datetime.now(UTC),
+                expected_generation_key=(
+                    None if before is None else str(before["generation_key"])
+                ),
             )
             _write(
                 {

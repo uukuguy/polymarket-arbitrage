@@ -688,8 +688,11 @@ def test_structure_shadow_publish_reports_previous_and_current_identity(
         def structure_shadow_pointer(self):
             return {"generation_key": "structure:" + "b" * 64}
 
-        def publish_structure_shadow(self, *, generation_key: str, now):
+        def publish_structure_shadow(
+            self, *, generation_key: str, now, expected_generation_key: str | None
+        ):
             assert generation_key == globals_generation_key
+            assert expected_generation_key == "structure:" + "b" * 64
             return generation_key
 
     globals_generation_key = generation_key

@@ -136,6 +136,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
             "job.lease-at-risk",
             "job.lease-expired",
             "job.progress-stalled",
+            "publication.superseded",
             "recovery.budget-exhausted",
             "recovery.stale-fence",
             "service-stop",

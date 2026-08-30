@@ -21,6 +21,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     NormalizationPayloadCorruptCommissioningAdapter,
     ProgressStallCommissioningAdapter,
+    PublicationPointerConflictCommissioningAdapter,
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
@@ -1273,6 +1274,40 @@ def test_structure_parity_mismatch_adapter_invalidates_and_preserves_pointer(
         0,
         0,
     )
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    ("structure-certify", "quote-certify", "opportunity-certify"),
+)
+def test_publication_pointer_conflict_adapter_preserves_current_lineage(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    node_id: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{node_id}:publication-pointer-conflict",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=node_id,
+        attack_id="publication-pointer-conflict",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=PublicationPointerConflictCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=66),
+        ),
+        evidence_dir=tmp_path / node_id,
+    )
+
+    assert proof["qualification_impact"] == "pause"
+    assert str(proof["detector_fact_id"]).startswith(("event:", "cas:"))
+    assert str(proof["recovery_action_id"]).startswith("lineage-preserved:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("pointer:")
+    assert proof["cleanup_verified"] is True
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

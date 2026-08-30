@@ -12412,3 +12412,36 @@ shared R2 timeout adapters.
 implement `publication-pointer-conflict` as the next disposable truth-boundary
 attack; keep shared R2 timeout adapters and the combined exact-image run
 deferred until their contracts are explicit.
+
+### SESSION 369 — 2026-08-30 (publication pointer lineage CAS)
+
+- [CLIMB H-050] Registered the three-node publication pointer conflict
+  hypothesis.
+- [ROOT CAUSE] Existing Quote publication used `SELECT ... FOR UPDATE`, but the
+  late old transaction read the new current after waiting and then overwrote it.
+  Lock serialization did not encode generation lineage.
+- [FROZEN PREDECESSOR] Quote admission now stores the observed current pointer
+  in the immutable certifier identity. Publication succeeds only when current
+  still equals that predecessor. Idempotent replay retains the original fence;
+  legacy unfenced candidates cannot replace an existing pointer.
+- [UNIFORM CAS] Explicit Structure shadow publication passes its observed
+  predecessor into the same transaction. Opportunity work verifies its lease
+  still names current Quote before reading/publishing projection truth.
+- [VISIBLE SUPERSESSION] Quote/Opportunity workers use an exact warning
+  quarantine: terminal `publication.superseded`, delayed/non-breaking
+  qualification impact, critical data path left running, and zero retry
+  circuit. Repeating old work cannot make it current.
+- [DISPOSABLE ATTACK] Three real PostgreSQL node runs race stale Structure,
+  Quote and Opportunity publishers behind a newer lineage. All reject the old
+  mutation and retain one current pointer with exactly its matching success
+  fact.
+- [ENTRY/TEACHING] Added isolated harness, Make target, climb gates, Plan 238
+  summary and the lineage-CAS learning FAQ.
+- [BOUNDARY] Local disposable PostgreSQL only; no production provider/DB,
+  Fly/SSH/deploy, Docker build/context mutation, Colima, canary or qualification
+  operation occurred.
+
+[NEXT] Commit Plan 05.6-238 without protected user files, pass exact-HEAD and
+full related regression, then confirm H-050 through climb cycle 55. Continue
+with shared `r2-read-timeout` and `r2-write-timeout` disposable adapters before
+one combined exact-image rebuild.

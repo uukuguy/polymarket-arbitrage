@@ -44,6 +44,7 @@ from polyarb.control_plane.postgres import (
     IncompleteQuoteGenerationError,
     IncompleteStructureGenerationError,
     PostgresControlPlane,
+    PublicationPointerConflictError,
     RuntimeEventConflictError,
     RuntimeProgressConflictError,
     StaleLeaseError,
@@ -2443,7 +2444,6 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
     finally:
         connection.close()
 
-
 def test_quote_batch_input_survives_admission_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -3348,6 +3348,59 @@ def test_structure_shadow_pointer_requires_certified_manifest_and_preserves_lega
     assert legacy == (0,)
 
 
+def test_structure_shadow_pointer_rejects_stale_expected_predecessor(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    first = "structure:" + "1" * 64
+    second = "structure:" + "2" * 64
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        for generation_key in (first, second):
+            connection.execute(
+                """
+                INSERT INTO m1_jobs (
+                    job_key, job_type, input_identity, state, created_at, updated_at
+                ) VALUES (%s, 'structure-certify', %s, 'succeeded', %s, %s)
+                """,
+                (f"{generation_key}:certify", generation_key, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO m1_generation_manifests (
+                    generation_key, producer_job_key, input_digest, artifact_key,
+                    artifact_digest, record_count, published_at
+                ) VALUES (%s, %s, %s, %s, %s, 1, %s)
+                """,
+                (
+                    generation_key,
+                    f"{generation_key}:certify",
+                    "a" * 64,
+                    f"structure-manifests/{generation_key[-1]}/manifest.ndjson",
+                    generation_key[-1] * 64,
+                    now,
+                ),
+            )
+
+    assert control_plane.publish_structure_shadow(
+        generation_key=first,
+        expected_generation_key=None,
+        now=now,
+    ) == first
+    assert control_plane.publish_structure_shadow(
+        generation_key=second,
+        expected_generation_key=first,
+        now=now + timedelta(seconds=1),
+    ) == second
+    with pytest.raises(PublicationPointerConflictError):
+        control_plane.publish_structure_shadow(
+            generation_key=first,
+            expected_generation_key=None,
+            now=now + timedelta(seconds=2),
+        )
+
+    assert control_plane.structure_shadow_pointer()["generation_key"] == second
+
+
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -4034,6 +4087,15 @@ def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
             assert cursor.fetchone() == (batches[0].generation_key,)
     finally:
         connection.close()
+
+    replayed = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-1"), _leg("token-2")),
+        batch_size=1,
+        now=now + timedelta(seconds=4),
+    )
+    assert replayed == batches
     quote_status = control_plane.operational_snapshot(now=clock[0])["quote"]
     assert quote_status["batch_job_states"] == {"succeeded": 2}
     assert quote_status["certifier_job_states"] == {"succeeded": 1}
@@ -4164,6 +4226,96 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
             )
     finally:
         connection.close()
+
+
+def test_quote_pointer_lineage_rejects_late_older_certifier(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    older = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="1" * 64,
+        universe_hash="a" * 64,
+        token_ids=("old-token",),
+        batch_size=1,
+        now=now,
+    )[0]
+    newer = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="2" * 64,
+        universe_hash="b" * 64,
+        token_ids=("new-token",),
+        batch_size=1,
+        now=now + timedelta(seconds=1),
+    )[0]
+    for ordinal, batch in enumerate((older, newer), start=1):
+        batch_now = now + timedelta(seconds=ordinal + 1)
+        lease = control_plane.claim_job(
+            worker_id=f"batch-{ordinal}",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=batch_now,
+        )
+        assert lease is not None and lease.job_key == batch.job_key
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=str(ordinal) * 64,
+            artifact_key=f"quote-batches/{ordinal}/batch.ndjson",
+            artifact_digest=str(ordinal) * 64,
+            successful_response_count=1,
+            quoted_at=batch_now,
+            now=batch_now,
+        )
+        control_plane.finish(lease, state=JobState.SUCCEEDED, now=batch_now)
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE m1_jobs SET state = 'waiting' WHERE job_key = %s",
+            (f"{older.generation_key}:certify",),
+        )
+    newer_lease = control_plane.claim_job(
+        worker_id="newer-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=5),
+    )
+    assert newer_lease is not None and newer_lease.job_key == f"{newer.generation_key}:certify"
+    control_plane.certify_quote_generation(
+        newer_lease,
+        generation_key=newer.generation_key,
+        now=now + timedelta(seconds=6),
+    )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s WHERE job_key = %s",
+            (now + timedelta(seconds=7), f"{older.generation_key}:certify"),
+        )
+    older_lease = control_plane.claim_job(
+        worker_id="older-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=7),
+    )
+    assert older_lease is not None
+    with pytest.raises(PublicationPointerConflictError):
+        control_plane.certify_quote_generation(
+            older_lease,
+            generation_key=older.generation_key,
+            now=now + timedelta(seconds=8),
+        )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        pointer = connection.execute(
+            "SELECT generation_key FROM m1_publication_pointers WHERE pointer_key='quote:current'"
+        ).fetchone()
+        successes = connection.execute(
+            "SELECT event.job_key FROM m1_job_runtime_events AS event "
+            "JOIN m1_jobs AS job USING (job_key) "
+            "WHERE event.kind='job.succeeded' AND job.job_type='quote-certify' "
+            "ORDER BY event.job_key"
+        ).fetchall()
+    assert pointer == (newer.generation_key,)
+    assert successes == [(newer_lease.job_key,)]
 
 
 def test_quote_certifier_success_event_rolls_back_manifest_and_pointer(
@@ -8667,9 +8819,15 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
 
 
 @pytest.mark.parametrize(
-    ("finish_options", "expected_impact", "expected_reason"),
+    (
+        "finish_options",
+        "expected_impact",
+        "expected_reason",
+        "expected_severity",
+        "expected_kind",
+    ),
     [
-        ({}, "blocked", "failure.schema"),
+        ({}, "blocked", "failure.schema", "critical", "escalated"),
         (
             {
                 "qualification_impact": "invalidated",
@@ -8677,6 +8835,21 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
             },
             "invalidated",
             "integrity.conflict",
+            "critical",
+            "escalated",
+        ),
+        (
+            {
+                "qualification_impact": "delayed",
+                "reason_code": "publication.superseded",
+                "severity": "warning",
+                "incident_kind": "detected",
+                "qualification_breaking": False,
+            },
+            "delayed",
+            "publication.superseded",
+            "warning",
+            "detected",
         ),
     ],
 )
@@ -8685,6 +8858,8 @@ def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
     finish_options: dict[str, object],
     expected_impact: str,
     expected_reason: str,
+    expected_severity: str,
+    expected_kind: str,
 ) -> None:
     now = _now()
     lease = _seed_claimed_job(
@@ -8771,8 +8946,8 @@ def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
         assert cursor.fetchone() == (
             event_id,
             "open",
-            "critical",
-            "escalated",
+            expected_severity,
+            expected_kind,
             "structure-shards/corrupt/rows.ndjson",
             "dashboard",
             "pending",

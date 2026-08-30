@@ -24,6 +24,7 @@ from .models import JobLease, JobState, QuoteBatchSpec
 from .postgres import (
     IncompleteQuoteGenerationError,
     PostgresControlPlane,
+    PublicationPointerConflictError,
     StaleLeaseError,
 )
 from .quote_artifact import (
@@ -651,6 +652,36 @@ class TransactionalQuoteCertifier:
                     terminal=True,
                 )
             raise
+        except PublicationPointerConflictError:
+            current_lease = lease if runtime is None else runtime.current_lease
+
+            def finish() -> object:
+                return self._control_plane.finish_quarantined_with_incident(
+                    current_lease,
+                    error_class="PublicationPointerConflictError",
+                    incident_key=f"incident:publication-superseded:{lease.job_key}",
+                    dedupe_key=f"publication-superseded:{lease.job_key}",
+                    component="quote-certify",
+                    summary="quote-certify stale publication superseded",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "reason_code": "publication.superseded",
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    qualification_impact="delayed",
+                    reason_code="publication.superseded",
+                    severity="warning",
+                    incident_kind="detected",
+                    qualification_breaking=False,
+                    now=self._now(),
+                )
+
+            if runtime is None:
+                finish()
+            else:
+                _runtime_sync_call(runtime, finish, terminal=True)
+            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="superseded")
         except IncompleteQuoteGenerationError as error:
             failure_class = type(error).__name__
             failure_fingerprint = retry_failure_fingerprint(error, component="quote-certify")

@@ -11,6 +11,7 @@ from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCer
 from polyarb.control_plane.postgres import (
     IncompleteQuoteGenerationError,
     OpportunityProjectionCurrentError,
+    PublicationPointerConflictError,
     StaleLeaseError,
 )
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
@@ -103,7 +104,14 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
     class ControlPlane:
         def claim_job(self, **kwargs):
             self.claim = kwargs
-            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+            return type(
+                "Lease",
+                (),
+                {
+                    "job_key": "quote:job:opportunity-certify",
+                    "input_identity": "quote:" + "a" * 64,
+                },
+            )()
 
         def finish(self, *args, **kwargs):
             self.finished = kwargs
@@ -135,7 +143,14 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
 def test_certifier_skips_r2_when_current_quote_is_already_projected() -> None:
     class ControlPlane:
         def claim_job(self, **kwargs):
-            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+            return type(
+                "Lease",
+                (),
+                {
+                    "job_key": "quote:job:opportunity-certify",
+                    "input_identity": "quote:" + "a" * 64,
+                },
+            )()
 
         def finish(self, *args, **kwargs):
             self.finished = kwargs
@@ -196,6 +211,50 @@ def test_opportunity_incomplete_input_uses_durable_retry_circuit() -> None:
     assert result.outcome == "retryable"
     assert control_plane.retry["component"] == "opportunity-certify"
     assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
+def test_opportunity_pointer_conflict_is_visible_and_never_retried() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.superseded: dict[str, object] | None = None
+
+        def claim_job(self, **_kwargs):
+            return JobLease(
+                job_key="quote:old:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity="quote:old",
+                lease_owner="opportunity-worker",
+                lease_epoch=4,
+                lease_expires_at=now,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def current_quote_projection_inputs(self):
+            raise PublicationPointerConflictError("stale opportunity lineage")
+
+        def finish_quarantined_with_incident(self, _lease, **kwargs):
+            self.superseded = kwargs
+
+        def finish_retryable_with_incident(self, *_args, **_kwargs):
+            raise AssertionError("superseded publication must not consume retry budget")
+
+    control_plane = ControlPlane()
+    result = TransactionalOpportunityCertifier(
+        control_plane=control_plane,
+        object_client=object(),
+        bucket="bucket",
+        now=lambda: now,
+    ).run_once()
+
+    assert result.outcome == "superseded"
+    assert control_plane.superseded is not None
+    assert control_plane.superseded["reason_code"] == "publication.superseded"
+    assert control_plane.superseded["qualification_impact"] == "delayed"
+    assert control_plane.superseded["severity"] == "warning"
+    assert control_plane.superseded["qualification_breaking"] is False
 
 
 def test_opportunity_service_stop_uses_interruption_not_defect_retry() -> None:
@@ -274,7 +333,14 @@ def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> No
 
     class ControlPlane:
         def claim_job(self, **kwargs):
-            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+            return type(
+                "Lease",
+                (),
+                {
+                    "job_key": "quote:job:opportunity-certify",
+                    "input_identity": "quote:" + "a" * 64,
+                },
+            )()
 
         def current_quote_projection_inputs(self):
             receipt = QuoteBatchReceipt(

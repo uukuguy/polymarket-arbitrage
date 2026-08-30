@@ -14,6 +14,7 @@ from polyarb.control_plane.production_commissioning_harness import (
     run_heartbeat_outage_commissioning,
     run_normalization_payload_corrupt_commissioning,
     run_progress_stall_commissioning,
+    run_publication_pointer_conflict_commissioning,
     run_quote_admission_missing_shard_commissioning,
     run_quote_batch_incomplete_commissioning,
     run_retry_budget_commissioning,
@@ -648,6 +649,51 @@ def test_structure_parity_mismatch_harness_runs_target_and_cleans_database_and_r
         root
         / "attacks/structure-certify/structure-parity-mismatch/proof.json"
     ).is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+        roles = connection.execute(
+            """
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability'
+            )
+            ORDER BY rolname
+            """
+        ).fetchall()
+    assert databases == []
+    assert roles == []
+
+
+def test_publication_pointer_conflict_harness_runs_three_targets_and_cleans_database_and_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_publication_pointer_conflict_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+    )
+
+    assert result == {
+        "attack_id": "publication-pointer-conflict",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 3,
+        "proof_count": 3,
+        "status": "pass",
+    }
+    for node_id in ("structure-certify", "quote-certify", "opportunity-certify"):
+        assert (
+            root / f"attacks/{node_id}/publication-pointer-conflict/proof.json"
+        ).is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"

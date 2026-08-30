@@ -318,3 +318,21 @@ commissioning 在 `src/polyarb/control_plane/production_commissioning_disposable
 shadow generation，再对一次性数据库中的候选 generation 注入冻结计数冲突。证据
 要求同时成立：候选 manifest 没有进入权威表、没有 downstream admission、没有 retry
 circuit、critical alert 可见，且 prior pointer 没有移动。
+
+### 为什么 `SELECT ... FOR UPDATE` 仍然防不住旧 generation 回拨指针？
+
+行锁只能保证两个发布事务不同时写，不能证明后一个事务的 generation 比前一个
+新。旧 certifier 如果晚到，会先等新事务释放锁，然后读到新 current，最后“合法地”把它
+更新回旧 generation。这是 serialization，不是 lineage compare-and-swap。
+
+Quote 候选现在在准入事务中把当时 current 冻结到 certifier `input_identity`，核心编解码在
+`src/polyarb/control_plane/postgres.py:106`。发布只允许 `current == frozen predecessor`；重放同一
+generation 时又会保留原冻结 identity，避免幂等重放被当成新候选。Structure 的显式
+shadow 发布同样必须传入读取到的预期前任（`postgres.py:5247`）；Opportunity lease 必须仍绑定
+current Quote。
+
+冲突并不进入 backoff/circuit：旧工作无论重试多少次都不应再成为 current。Quote 和
+Opportunity worker 在 `quote_worker.py:655` 与 `opportunity_worker.py:153` 把它终止为
+superseded，同时写 warning incident 和 `publication.superseded` terminal fact；当前 generation 继续服务。
+commissioning 对三个指针节点逐一注入旧发布竞争（`production_commissioning_disposable.py:3551`），
+要求最终只有一个 current，且它精确匹配新 generation 的 success fact。
