@@ -12445,3 +12445,25 @@ deferred until their contracts are explicit.
 full related regression, then confirm H-050 through climb cycle 55. Continue
 with shared `r2-read-timeout` and `r2-write-timeout` disposable adapters before
 one combined exact-image rebuild.
+
+### SESSION 370 — 2026-08-30 (H-050 Publication lineage confirmed)
+
+- [EXACT HEAD] Commit `eee75214` passed the exact-revision build-only contract;
+  runtime image inputs matched HEAD, with no image build or push.
+- [CLIMB H-050] Cycle 55 passed all nine production-enablement gates at 100%;
+  integration passed 153 cases and `disaster_pattern=false`.
+- [LINEAGE SAFETY] Late Structure, Quote and Opportunity publishers were
+  rejected against their frozen predecessors. The current pointer and its
+  matching success fact remained authoritative in every disposable attack.
+- [AVAILABILITY] Superseded Quote/Opportunity work terminates as visible
+  warning quarantine with delayed/non-breaking qualification impact and zero
+  retry circuit; it cannot stop the last known-good production chain.
+- [ONLINE TARGET] `target evaluation not configured` denotes only the absent
+  external leaderboard target and does not weaken the confirmed local verdict.
+- [BOUNDARY] No production mutation/provider call, Fly/SSH/deploy, Docker build
+  or context change, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-050 confirmation state without protected user files. Audit the
+shared R2 read/write timeout contracts and implement deterministic disposable
+fault adapters; do not introduce an arbitrary whole-run timeout. Rebuild the
+exact runtime image only after both timeout families are locally closed.

@@ -4,12 +4,12 @@
 
 ## Session
 
-- Last cycle: 54
-- Next action: prove lineage CAS rejects stale publication pointers
+- Last cycle: 55
+- Next action: rank next pending hypothesis
 
 ## In flight
 
-- H-050
+- None
 
 ## Hypothesis pool
 
@@ -57,7 +57,7 @@
 - **H-047** [confirmed]: Translating a manifest-named missing Structure shard into one safe typed Quote admission incident can identify the exact unavailable artifact, prevent partial batch admission, and let the policy-due fenced retry admit the complete generation after that artifact is restored.
 - **H-048** [confirmed]: A schema-invalid manifest-authorized Structure shard can terminate the exact normalizer attempt through one atomic quarantined state, terminal runtime fact, critical operator incident, and alert while preserving the last certified Structure pointer.
 - **H-049** [confirmed]: A complete Structure generation whose normalized component counts conflict with its frozen source identity can atomically quarantine the certifier, emit a terminal integrity fact and critical alert, invalidate qualification, and preserve the prior certified pointer without entering the retry circuit.
-- **H-050** [in-flight]: Freezing each publication candidate's expected predecessor and enforcing one lineage compare-and-swap can reject stale Structure, Quote, and Opportunity publishers, surface a non-retryable warning, and preserve one current pointer with only its matching success fact.
+- **H-050** [confirmed]: Freezing each publication candidate's expected predecessor and enforcing one lineage compare-and-swap can reject stale Structure, Quote, and Opportunity publishers, surface a non-retryable warning, and preserve one current pointer with only its matching success fact.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -120,3 +120,4 @@
 - 20260830-035827-h-047: 100.0 (confirmed)
 - 20260830-042141-h-048: 100.0 (confirmed)
 - 20260830-093028-h-049: 100.0 (confirmed)
+- 20260830-095921-h-050: 100.0 (confirmed)
