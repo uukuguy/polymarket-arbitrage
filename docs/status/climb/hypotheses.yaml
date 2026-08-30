@@ -55,9 +55,22 @@ hypotheses:
     directories without fabricating production facts or adding an outer timeout.
   cost_h: 0.5
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T17:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 43
+    run: 20260830-004322-h-039
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
