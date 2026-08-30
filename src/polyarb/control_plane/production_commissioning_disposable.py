@@ -13,6 +13,8 @@ from typing import Any
 from botocore.exceptions import ReadTimeoutError
 from psycopg.types.json import Jsonb
 
+from polyarb.clients.clob_client import ClobRateLimitError
+
 from .models import JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
 from .opportunity_worker import TransactionalOpportunityCertifier
 from .postgres import (
@@ -4282,6 +4284,7 @@ class _CommissioningBooksReader:
 
     def __init__(self) -> None:
         self.missing = False
+        self.rate_limited = False
         self.calls = 0
 
     async def get_books(
@@ -4293,6 +4296,8 @@ class _CommissioningBooksReader:
         self.calls += 1
         if projection != "full" or len(token_ids) != 1:
             raise DisposableCommissioningError("clob-missing-leg-request-shape")
+        if self.rate_limited:
+            raise ClobRateLimitError()
         if self.missing:
             return []
         return [
@@ -4525,6 +4530,91 @@ class ClobMissingLegCommissioningAdapter:
             stage="verified",
             receipt_id=f"postgres:m1_quote_batch_receipts:{job_key}:coverage=1/1",
             occurred_at=self._now + timedelta(seconds=1),
+        )
+
+
+class Clob429CommissioningAdapter(ClobMissingLegCommissioningAdapter):
+    """Exercise a body-free typed CLOB 429 through the real Quote worker."""
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if identity.attack_id != "clob-429" or identity.node_id != "quote-batch":
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "clob-429-job-missing")
+        self._reader.rate_limited = True
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"provider:clob:status-429:{job_key}",
+            occurred_at=self._started_at + timedelta(seconds=1),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "clob-429-job-missing")
+        self._now = self._started_at + timedelta(seconds=2)
+        try:
+            asyncio.run(self._worker("fault").run_once())
+        except ClobRateLimitError as error:
+            if error.status_code != 429 or str(error) != "clob-rate-limited":
+                raise DisposableCommissioningError("clob-429-error-shape") from error
+        else:
+            raise DisposableCommissioningError("clob-429-not-rejected")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            attempt = connection.execute(
+                """
+                SELECT state, error_class FROM m1_job_attempts
+                WHERE job_key=%s ORDER BY lease_epoch DESC LIMIT 1
+                """,
+                (job_key,),
+            ).fetchone()
+            event = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key=%s AND kind='job.retryable-failed'
+                ORDER BY occurred_at DESC LIMIT 1
+                """,
+                (job_key,),
+            ).fetchone()
+            job = connection.execute(
+                "SELECT next_attempt_at FROM m1_jobs WHERE job_key=%s",
+                (job_key,),
+            ).fetchone()
+        if (
+            attempt != ("retryable", "ClobRateLimitError")
+            or event is None
+            or job is None
+            or job[0] is None
+        ):
+            raise DisposableCommissioningError("clob-429-detection-shape")
+        self._failure_event_id = str(event[0])
+        self._retry_due_at = job[0].astimezone(UTC)
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{self._failure_event_id}",
+            occurred_at=self._now,
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        if self._objects._objects:  # noqa: SLF001 - prove no partial provider output
+            raise DisposableCommissioningError("clob-429-partial-artifact")
+        self._reader.rate_limited = False
+        due = self._need(self._retry_due_at, "clob-429-retry-due-missing")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id="provider:clob:rate-limit-cleared",
+            occurred_at=due + timedelta(microseconds=1),
         )
 
 
@@ -5428,6 +5518,7 @@ def _postcondition_fact(connection: Any, lease: JobLease) -> str:
 
 __all__ = [
     "DisposableCommissioningError",
+    "Clob429CommissioningAdapter",
     "ClobMissingLegCommissioningAdapter",
     "HeartbeatOutageCommissioningAdapter",
     "NormalizationPayloadCorruptCommissioningAdapter",

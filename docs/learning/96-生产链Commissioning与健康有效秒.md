@@ -405,3 +405,18 @@ commissioning 也修正了边界归属：旧 `perception_chaos.py` 的 `candidat
 旧 canary 证据转个字段就冒充新链证明。`clob-missing-leg` 改为 exact-image disposable
 攻击：真实 worker + 真实迁移 PostgreSQL 先拒绝 0/1 覆盖，再按中央 policy due-at 用
 同一 immutable batch 完成 1/1 恢复，最终只有一个 receipt。
+
+### CLOB 429 为什么要转成新错误类，不直接保存 SDK exception？
+
+`PolyApiException` 同时表示 429、其它 HTTP 错误和部分 transport wrapper；仅保存这个类名，
+runtime 无法判断应该等待 provider 还是调查请求缺陷。反过来保存 SDK `error_msg` 也不安全，
+因为它可能包含 provider body、URL 或 token identity。
+
+`ClobReaderClient` 现在只在 `status_code == 429` 时转换成 `ClobRateLimitError`。该错误只暴露
+常量 429 和固定文本，原 SDK exception 只作为 in-memory cause，不进入 durable detail。
+`quote-batch` 仍通过同一 `finish_retryable_with_incident()` 链写失败，backoff 完全来自
+`RuntimeRetryPolicy`，没有新的 429 秒数开关。
+
+commissioning 在真实 worker 边界注入一次该 typed error：失败 epoch 无 R2 对象、无 Quote
+receipt；清理后由 policy-due replacement 重读同一 immutable batch，完成 1/1 覆盖并只写一个
+receipt。这比把旧 SQLite `candidate` 429 证据别名成新 `quote-batch` 证据更严格。

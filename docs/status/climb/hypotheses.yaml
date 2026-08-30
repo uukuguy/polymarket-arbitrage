@@ -1,4 +1,17 @@
 hypotheses:
+- id: H-055
+  description: A CLOB HTTP 429 can become a body-free typed provider boundary,
+    leave one Quote batch durably retryable with no R2 or receipt side effect,
+    then recover the same immutable input at the shared policy due-at.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Make rate limiting distinguishable from generic SDK failure
+    without leaking provider bodies or inventing a private backoff, while proving
+    one clean recovered Quote receipt on the new PostgreSQL DAG.
+  cost_h: 1.0
+  ranking: 1.0
+  status: testing
+  created_at: '2026-08-30T21:30:00+08:00'
+  results: []
 - id: H-054
   description: The transactional Quote worker must reject a CLOB response that omits
     any requested token before R2 or receipt publication, then recover the same immutable

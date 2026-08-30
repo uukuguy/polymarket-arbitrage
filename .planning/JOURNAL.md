@@ -12691,3 +12691,24 @@ and CLOB 429 without importing legacy SQLite evidence.
 with the remaining Gamma timeout, Gamma malformed-page and CLOB 429 contracts:
 implement and commission only their PostgreSQL new-DAG provider boundaries,
 never bridge the legacy SQLite chaos evidence.
+
+### SESSION 380 — 2026-08-30 (typed CLOB 429 recovery closed)
+
+- [REAL DEFECT] CLOB 429 reached the new Quote worker only as generic
+  `PolyApiException`; persisting its class lost the provider-rate-limit type,
+  while persisting its message could leak response body or request identity.
+- [FIX] `ClobReaderClient` converts only HTTP 429 into body-free
+  `ClobRateLimitError`. The original SDK exception remains an in-memory cause;
+  shared retry policy remains the sole backoff authority.
+- [COMMISSIONING] Real `quote-batch` worker plus migrated PostgreSQL proved one
+  typed retryable failure with no R2/receipt, then same-input recovery at the
+  central due-at with one 1/1 Quote receipt and a resolved incident.
+- [SCOPE] `clob-429` now has truthful disposable exact-image evidence on the
+  new DAG; old SQLite `candidate` evidence was not bridged.
+- [ORBSTACK] Global context remained `orbstack`; no Colima/global mutation.
+- [BOUNDARY] No production provider/DB, Fly/SSH/deploy, Machine, canary, or
+  qualification mutation occurred.
+
+[NEXT] Commit Plan 05.6-244 without protected user files, run exact-HEAD and
+climb H-055. Then implement Gamma timeout and malformed-page at the PostgreSQL
+`structure-fetch` boundary using real worker recovery and config-bound proof.

@@ -225,7 +225,7 @@ ATTACK_CONTRACTS: Mapping[str, AttackContract] = MappingProxyType(
                 detector="quote-batch records a typed provider failure",
                 recovery_action="apply durable backoff and retry the batch",
                 postcondition="a newer complete quote-batch receipt is committed",
-                execution_scope="production-canary",
+                execution_scope="disposable-exact-image",
             ),
             _attack(
                 "clob-missing-leg",

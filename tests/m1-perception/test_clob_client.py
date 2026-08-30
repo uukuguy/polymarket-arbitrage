@@ -23,7 +23,7 @@ import pytest
 from py_clob_client.clob_types import BookParams
 from py_clob_client.exceptions import PolyApiException
 
-from polyarb.clients.clob_client import ClobReaderClient
+from polyarb.clients.clob_client import ClobRateLimitError, ClobReaderClient
 from polyarb.config import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -210,6 +210,27 @@ async def test_propagates_sdk_exceptions() -> None:
     with patch.object(client._client, "get_order_books", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="boom"):
             await client.get_books(["t1"])
+
+
+async def test_get_books_translates_429_without_retaining_provider_body() -> None:
+    client = ClobReaderClient(Settings())
+    response = httpx.Response(
+        429,
+        json={"error": "secret-provider-body"},
+        request=httpx.Request("GET", "https://clob.invalid/books?token=secret-token"),
+    )
+
+    with patch.object(
+        client._client,
+        "get_order_books",
+        side_effect=PolyApiException(resp=response),
+    ):
+        with pytest.raises(ClobRateLimitError) as raised:
+            await client.get_books(["secret-token"])
+
+    assert raised.value.status_code == 429
+    assert isinstance(raised.value.__cause__, PolyApiException)
+    assert "secret" not in str(raised.value)
 
 
 async def test_logs_sdk_transport_cause_without_exposing_request_content() -> None:

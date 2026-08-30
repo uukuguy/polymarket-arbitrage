@@ -47,6 +47,15 @@ from py_clob_client.http_helpers import helpers as clob_http_helpers
 from polyarb.config import Settings
 
 
+class ClobRateLimitError(RuntimeError):
+    """A body-free, machine-readable CLOB 429 boundary."""
+
+    status_code = 429
+
+    def __init__(self) -> None:
+        super().__init__("clob-rate-limited")
+
+
 def _chunked(seq: list[str], size: int) -> list[list[str]]:
     """Split ``seq`` into chunks of ``size`` (last may be shorter). Empty → []."""
     return [seq[i : i + size] for i in range(0, len(seq), size)]
@@ -218,6 +227,8 @@ class ClobReaderClient:
                 try:
                     raw_books = self._client.get_order_books(params)
                 except PolyApiException as error:
+                    if error.status_code == 429:
+                        raise ClobRateLimitError() from error
                     transport_kind = _transport_error_kind(error)
                     if transport_kind is not None:
                         logger.warning(
