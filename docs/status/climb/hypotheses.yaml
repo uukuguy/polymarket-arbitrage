@@ -29,6 +29,23 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 70
+    run: 20260830-235304-h-063
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-062
   description: A recurring Quote certifier whose direct wake is skipped by a busy
     successor row can recover solely from durable batch receipts keyed by the independent

@@ -12874,3 +12874,26 @@ widen freshness SLOs, or manually mutate job state.
 [NEXT] Run `make climb-cycle hypothesis=H-063`, complete the merge-readiness
 review and full regression from the branch, then prepare the clean mainline
 integration with the evidence above.
+
+### SESSION 389 — 2026-08-31 (merge-readiness gates closed)
+
+- [REVIEW FIX] Corrected the local `PostgresControlPlane` factory annotation to
+  its actual context-manager contract and replaced a stale raw-connection daemon
+  mock with a pool-boundary regression. Focused daemon tests, Ruff and changed
+  production-file Pyright pass with zero diagnostics.
+- [FINAL GATE] H-063 cycle 70 reran after that source change: all nine gates
+  passed at 100%, including the 194-scenario isolated PostgreSQL recovery matrix;
+  `disaster_pattern=false`.
+- [LOCAL HYGIENE] Terminated only three stale diagnostics created by earlier
+  interrupted local commands (one pytest and two `flyctl ssh` status reads). No
+  production resources, Docker context, or main worktree files were changed.
+- [MAINLINE HANDOFF] `main` is the exact merge base and can fast-forward from
+  `2d337d28` to `3ba7d28a`, but its checkout has uncommitted user changes
+  overlapping `.planning/HANDOFF.json`, `.superpowers/sdd/task-2-report.md`,
+  `src/polyarb/control_plane/postgres.py`, and
+  `src/polyarb/control_plane/quote_admission.py`. Preserve and reconcile those
+  edits before moving the shared `main` ref.
+
+[NEXT] With the main worktree made clean or its overlapping changes explicitly
+reconciled, run `git merge --ff-only feat/m1-self-healing` from the main checkout
+and retain the branch evidence/commits intact.
