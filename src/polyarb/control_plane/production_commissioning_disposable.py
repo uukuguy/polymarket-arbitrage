@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -24,6 +26,33 @@ class DisposableCommissioningError(RuntimeError):
     """A disposable database did not produce the required real durable fact."""
 
 
+@dataclass(frozen=True)
+class PreparedNormalTurn:
+    """A real domain transaction held immediately before its terminal boundary."""
+
+    control_plane: PostgresControlPlane
+    lease: JobLease
+    _commit: Callable[[JobLease, datetime], None]
+
+    def complete(self, *, now: datetime, lease: JobLease | None = None) -> dict[str, str]:
+        """Commit with the supplied owner and return only database-backed proof IDs."""
+
+        active_lease = lease or self.lease
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-now")
+        if (
+            active_lease.job_key != self.lease.job_key
+            or active_lease.job_type != self.lease.job_type
+            or active_lease.input_identity != self.lease.input_identity
+        ):
+            raise DisposableCommissioningError("replacement-identity-mismatch")
+        now = now.astimezone(UTC)
+        if active_lease.lease_epoch != self.lease.lease_epoch:
+            _record_progress(self.control_plane, active_lease, now - timedelta(seconds=1))
+        self._commit(active_lease, now)
+        return _normal_turn_proof(self.control_plane, active_lease)
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -39,6 +68,24 @@ def complete_normal_turn(
 ) -> dict[str, str]:
     """Complete one real domain transaction and return database-backed proof IDs."""
 
+    prepared = prepare_normal_turn(
+        control_plane,
+        node_id=node_id,
+        experiment_id=experiment_id,
+        now=now,
+    )
+    return prepared.complete(now=now + timedelta(seconds=30))
+
+
+def prepare_normal_turn(
+    control_plane: PostgresControlPlane,
+    *,
+    node_id: str,
+    experiment_id: str,
+    now: datetime,
+) -> PreparedNormalTurn:
+    """Prepare one real transaction and stop immediately before its fenced commit."""
+
     if node_id not in RUNTIME_STAGE_REGISTRY:
         raise DisposableCommissioningError("unknown-node")
     if not experiment_id or "\x00" in experiment_id or len(experiment_id) > 200:
@@ -46,17 +93,20 @@ def complete_normal_turn(
     if now.tzinfo is None or now.utcoffset() is None:
         raise DisposableCommissioningError("invalid-now")
     now = now.astimezone(UTC)
-    completers = {
-        "structure-fetch": _complete_structure_fetch,
-        "structure-materialize": _complete_structure_materialize,
-        "structure-normalize": _complete_structure_normalize,
-        "structure-certify": _complete_structure_certify,
-        "quote-admit": _complete_quote_admit,
-        "quote-batch": _complete_quote_batch,
-        "quote-certify": _complete_quote_certify,
-        "opportunity-certify": _complete_opportunity_certify,
+    preparers = {
+        "structure-fetch": _prepare_structure_fetch,
+        "structure-materialize": _prepare_structure_materialize,
+        "structure-normalize": _prepare_structure_normalize,
+        "structure-certify": _prepare_structure_certify,
+        "quote-admit": _prepare_quote_admit,
+        "quote-batch": _prepare_quote_batch,
+        "quote-certify": _prepare_quote_certify,
+        "opportunity-certify": _prepare_opportunity_certify,
     }
-    lease = completers[node_id](control_plane, experiment_id, now)
+    return preparers[node_id](control_plane, experiment_id, now)
+
+
+def _normal_turn_proof(control_plane: PostgresControlPlane, lease: JobLease) -> dict[str, str]:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
         attempt = connection.execute(
             """
@@ -161,27 +211,34 @@ def _generation(control_plane: PostgresControlPlane, tag: str, now: datetime):
     return specs[0], bundle
 
 
-def _complete_structure_fetch(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_structure_fetch(
+    cp: PostgresControlPlane, tag: str, now: datetime
+) -> PreparedNormalTurn:
     window = f"commissioning:{tag}:source"
     cp.admit_structure_source_window(window_key=window, now=now)
     lease = _claim(cp, "structure-fetch", now)
     _record_progress(cp, lease, now)
-    _require(
-        cp.record_structure_source_page(
-            lease,
-            artifact_key=f"structure-source/{tag}.json",
-            artifact_digest=sha256(tag.encode()).hexdigest(),
-            next_cursor=None,
-            completed=True,
-            record_count=1,
-            now=now + timedelta(seconds=2),
-        ),
-        "source-successor-missing",
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        _require(
+            cp.record_structure_source_page(
+                active_lease,
+                artifact_key=f"structure-source/{tag}.json",
+                artifact_digest=sha256(tag.encode()).hexdigest(),
+                next_cursor=None,
+                completed=True,
+                record_count=1,
+                now=completed_at,
+            ),
+            "source-successor-missing",
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_structure_materialize(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_structure_materialize(
+    cp: PostgresControlPlane, tag: str, now: datetime
+) -> PreparedNormalTurn:
     window = f"commissioning:{tag}:materialize"
     cp.admit_structure_source_window(window_key=window, now=now)
     source = _claim(cp, "structure-fetch", now)
@@ -197,39 +254,50 @@ def _complete_structure_materialize(cp: PostgresControlPlane, tag: str, now: dat
     )
     lease = _claim(cp, "structure-materialize", now)
     bundle = StructureBundleArtifact.from_bytes(f'{{"kind":"{tag}"}}\n'.encode())
-    _record_progress(cp, lease, now)
-    specs = cp.admit_structure_source_bundle(
-        lease,
-        identity=_identity(
-            tag,
-            window,
-            cp.structure_source_window_digest(window),
-            "gamma-source-window-events-v3-sharded",
-        ),
-        bundle=bundle,
-        ranges=(("events", "", ""),),
-        now=now + timedelta(seconds=2),
+    identity = _identity(
+        tag,
+        window,
+        cp.structure_source_window_digest(window),
+        "gamma-source-window-events-v3-sharded",
     )
-    _require(len(specs) == 1, "materialize-successor-missing")
-    return lease
+    _record_progress(cp, lease, now)
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        specs = cp.admit_structure_source_bundle(
+            active_lease,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=completed_at,
+        )
+        _require(len(specs) == 1, "materialize-successor-missing")
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_structure_normalize(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_structure_normalize(
+    cp: PostgresControlPlane, tag: str, now: datetime
+) -> PreparedNormalTurn:
     spec, _bundle = _generation(cp, tag, now)
     lease = _claim(cp, "structure-normalize", now)
     _record_progress(cp, lease, now)
-    cp.complete_structure_range(
-        lease,
-        range_digest=spec.range_digest,
-        artifact_key=f"structure-ranges/{tag}.ndjson",
-        artifact_digest=sha256(f"{tag}:range-artifact".encode()).hexdigest(),
-        record_count=1,
-        now=now + timedelta(seconds=2),
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.complete_structure_range(
+            active_lease,
+            range_digest=spec.range_digest,
+            artifact_key=f"structure-ranges/{tag}.ndjson",
+            artifact_digest=sha256(f"{tag}:range-artifact".encode()).hexdigest(),
+            record_count=1,
+            now=completed_at,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_structure_certify(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_structure_certify(
+    cp: PostgresControlPlane, tag: str, now: datetime
+) -> PreparedNormalTurn:
     spec, bundle = _generation(cp, tag, now)
     range_digest = sha256(f"{tag}:range-artifact".encode()).hexdigest()
     range_lease = _claim(cp, "structure-normalize", now)
@@ -260,17 +328,20 @@ def _complete_structure_certify(cp: PostgresControlPlane, tag: str, now: datetim
             ),
         )
     ).hexdigest()
-    cp.certify_structure_generation(
-        lease,
-        generation_key=spec.generation_key,
-        artifact_key=f"structure-manifests/{manifest}/manifest.ndjson",
-        artifact_digest=manifest,
-        now=now + timedelta(seconds=2),
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.certify_structure_generation(
+            active_lease,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{manifest}/manifest.ndjson",
+            artifact_digest=manifest,
+            now=completed_at,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
     structure = sha256(f"{tag}:structure".encode()).hexdigest()
     universe = sha256(f"{tag}:universe".encode()).hexdigest()
     generation = f"structure:{structure}"
@@ -313,19 +384,22 @@ def _complete_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> 
         )
         for batch in batches
     }
-    cp.admit_quote_generation(
-        lease,
-        structure_receipt_digest=structure,
-        universe_hash=universe,
-        legs=legs,
-        batch_size=1,
-        input_artifacts=artifacts,
-        now=now + timedelta(seconds=2),
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.admit_quote_generation(
+            active_lease,
+            structure_receipt_digest=structure,
+            universe_hash=universe,
+            legs=legs,
+            batch_size=1,
+            input_artifacts=artifacts,
+            now=completed_at,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
     batch = cp.enqueue_quote_generation(
         structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
@@ -335,21 +409,24 @@ def _complete_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> 
     )[0]
     lease = _claim(cp, "quote-batch", now)
     _record_progress(cp, lease, now)
-    cp.record_quote_batch(
-        lease,
-        token_range_digest=batch.token_range_digest,
-        quote_digest=sha256(f"{tag}:quote".encode()).hexdigest(),
-        artifact_key=f"quote-batches/{tag}.ndjson",
-        artifact_digest=sha256(f"{tag}:artifact".encode()).hexdigest(),
-        successful_response_count=1,
-        quoted_at=now,
-        now=now + timedelta(seconds=2),
-        terminal=True,
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.record_quote_batch(
+            active_lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=sha256(f"{tag}:quote".encode()).hexdigest(),
+            artifact_key=f"quote-batches/{tag}.ndjson",
+            artifact_digest=sha256(f"{tag}:artifact".encode()).hexdigest(),
+            successful_response_count=1,
+            quoted_at=completed_at,
+            now=completed_at,
+            terminal=True,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
-def _complete_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
     batches = cp.enqueue_quote_generation(
         structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
@@ -358,9 +435,9 @@ def _complete_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) -
         now=now,
     )
     for index, batch in enumerate(batches):
-        lease = _claim(cp, "quote-batch", now + timedelta(seconds=index))
+        batch_lease = _claim(cp, "quote-batch", now + timedelta(seconds=index))
         cp.record_quote_batch(
-            lease,
+            batch_lease,
             token_range_digest=batch.token_range_digest,
             quote_digest=sha256(f"{tag}:quote:{index}".encode()).hexdigest(),
             artifact_key=f"quote-batches/{tag}-{index}.ndjson",
@@ -373,15 +450,21 @@ def _complete_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) -
     at = now + timedelta(seconds=len(batches))
     lease = _claim(cp, "quote-certify", at)
     _record_progress(cp, lease, at)
-    cp.certify_quote_generation(
-        lease, generation_key=batches[0].generation_key, now=at + timedelta(seconds=1)
-    )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.certify_quote_generation(
+            active_lease,
+            generation_key=batches[0].generation_key,
+            now=completed_at,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
 def _structure_prerequisite(cp: PostgresControlPlane, tag: str, now: datetime) -> tuple[str, str]:
-    lease = _complete_structure_certify(cp, f"{tag}:structure", now)
-    generation = lease.job_key.removesuffix(":certify")
+    prepared = _prepare_structure_certify(cp, f"{tag}:structure", now)
+    prepared.complete(now=now + timedelta(seconds=5))
+    generation = prepared.lease.job_key.removesuffix(":certify")
     with cp._connection_factory() as connection:  # noqa: SLF001
         row = connection.execute(
             "SELECT bundle_digest FROM m1_structure_generation_inputs WHERE generation_key=%s",
@@ -415,32 +498,39 @@ def _quote_prerequisite(cp: PostgresControlPlane, tag: str, structure: str, now:
     return batch.generation_key
 
 
-def _complete_opportunity_certify(cp: PostgresControlPlane, tag: str, now: datetime) -> JobLease:
+def _prepare_opportunity_certify(
+    cp: PostgresControlPlane, tag: str, now: datetime
+) -> PreparedNormalTurn:
     structure_generation, structure_digest = _structure_prerequisite(cp, tag, now)
     quote_generation = _quote_prerequisite(cp, tag, structure_digest, now + timedelta(seconds=10))
-    lease = _claim(cp, "opportunity-certify", now + timedelta(seconds=20))
-    _record_progress(cp, lease, now + timedelta(seconds=20))
-    cp.publish_opportunity_projection(
-        quote_generation_key=quote_generation,
-        structure_generation_key=structure_generation,
-        rows=(
-            {
-                "group_id": f"{tag}-group",
-                "event_id": f"{tag}-event",
-                "membership_hash": f"{tag}-membership",
-                "bundle_cost": 0.91,
-                "gross_edge_bps": 900.0,
-                "max_bundle_size": 4.0,
-                "legs": [{"yes_token_id": f"{tag}-token", "ask_price": 0.91, "ask_size": 4.0}],
-                "structure_observed_at_ms": 1,
-                "quote_started_at_ms": 2,
-                "quote_quoted_at_ms": 3,
-            },
-        ),
-        now=now + timedelta(seconds=22),
-        lease=lease,
+    claimed_at = now + timedelta(seconds=20)
+    lease = _claim(cp, "opportunity-certify", claimed_at)
+    _record_progress(cp, lease, claimed_at)
+    rows = (
+        {
+            "group_id": f"{tag}-group",
+            "event_id": f"{tag}-event",
+            "membership_hash": f"{tag}-membership",
+            "bundle_cost": 0.91,
+            "gross_edge_bps": 900.0,
+            "max_bundle_size": 4.0,
+            "legs": [{"yes_token_id": f"{tag}-token", "ask_price": 0.91, "ask_size": 4.0}],
+            "structure_observed_at_ms": 1,
+            "quote_started_at_ms": 2,
+            "quote_quoted_at_ms": 3,
+        },
     )
-    return lease
+
+    def commit(active_lease: JobLease, completed_at: datetime) -> None:
+        cp.publish_opportunity_projection(
+            quote_generation_key=quote_generation,
+            structure_generation_key=structure_generation,
+            rows=rows,
+            now=completed_at,
+            lease=active_lease,
+        )
+
+    return PreparedNormalTurn(cp, lease, commit)
 
 
 def _postcondition_fact(connection: Any, lease: JobLease) -> str:
@@ -513,4 +603,9 @@ def _postcondition_fact(connection: Any, lease: JobLease) -> str:
     return f"postgres:{table}:{row[0]}"
 
 
-__all__ = ["DisposableCommissioningError", "complete_normal_turn"]
+__all__ = [
+    "DisposableCommissioningError",
+    "PreparedNormalTurn",
+    "complete_normal_turn",
+    "prepare_normal_turn",
+]

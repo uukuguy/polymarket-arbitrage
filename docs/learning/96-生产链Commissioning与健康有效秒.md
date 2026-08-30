@@ -134,3 +134,14 @@ runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma�
 只有三者同时存在，才能排除“状态写成成功但业务事实缺失”和“业务成功但
 监控链静默”。`postcondition_fact_id` 还必须按当前 lease/job identity 精确查询，
 不能用“表里随便有一行”充当该回合的证据。
+
+### stale owner 为什么要重用同一个 terminal transaction？
+
+如果攻击只直接调用一个“检查 epoch 不相等”的小函数，它不能证明真实业务提交
+的 SQL 顺序里没有绕过围栏。`PreparedNormalTurn` 会把八种节点停在它们各自的
+terminal API 之前；攻击通过正式 `claim_job` 在租约到期后获取新 epoch，然后让旧
+和新 owner 分别调同一个 commit 闭包。旧 owner 必须得到 `StaleLeaseError`，而且
+旧 epoch 的 succeeded attempt/event 均为 0；新 owner 才能产生终态与业务后置条件。
+
+这个测试不直接 `UPDATE lease_expires_at`，因为那会绕过我们正在验证的 claim/
+attempt 接管链。虚拟 `now` 是 control-plane API 既有的确定性输入，不是新的 timeout。

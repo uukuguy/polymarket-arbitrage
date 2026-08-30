@@ -2620,3 +2620,19 @@ success is not user receipt/read evidence.
 - This fixture creates no production authority and adds no outer experiment
   timeout. It is the reusable preparation boundary for the forthcoming
   heartbeat, progress, worker-exit, stale-owner and retry-budget attacks.
+
+### §2.80 Stale-owner attacks must execute the real terminal boundary (2026-08-30)
+
+- Every node-specific normal turn is now separable into prerequisite/claim
+  preparation and the exact terminal domain transaction. This avoids a second
+  synthetic fence path that could disagree with production SQL ordering.
+- Takeover uses `claim_job` with an observation after the persisted expiry; it
+  does not directly age or rewrite the lease row. The database creates the
+  replacement attempt and increments the epoch through its normal authority.
+- The superseded lease then invokes the same captured transaction and must
+  raise `StaleLeaseError`. PostgreSQL is queried afterward to prove that the old
+  epoch has neither a succeeded attempt nor a `job.succeeded` event.
+- Only the replacement lease may commit, and its returned attempt ID must map
+  back to the replacement epoch before its business postcondition is accepted.
+  All eight runtime nodes pass this contract. Runner lifecycle receipts remain
+  a separate next step; no final attack proof has yet been claimed.

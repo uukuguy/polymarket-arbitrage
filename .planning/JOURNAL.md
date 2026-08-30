@@ -11716,3 +11716,22 @@ adding heartbeat, progress, worker-exit and retry-budget attacks.
 [NEXT] Commit Plan 05.6-221, rerun H-037 on the repaired exact HEAD, preserve
 both cycle 40 and its confirming successor, then begin the eight-node stale-owner
 attack adapter.
+
+### SESSION 343 — 2026-08-30 (eight-node stale-owner terminal fencing)
+
+- [CLIMB H-037] The repaired exact-HEAD cycle 41 passed all five gates at 100;
+  cycle 40 remains as the 80-point selector-drift failure. H-037 is confirmed.
+- [CLIMB H-038] Split every disposable node transaction into prepare and exact
+  terminal phases. `complete_normal_turn` remains the one-call compatibility
+  path over this two-phase primitive.
+- [REAL TAKEOVER] All eight nodes reclaim through `claim_job` after the durable
+  lease boundary. No direct database aging/state mutation or new timeout is used.
+- [FENCE PROOF] The old lease executes the same real terminal API and is rejected.
+  PostgreSQL proves zero old-epoch succeeded attempts/events; only the replacement
+  epoch produces the terminal attempt, runtime success and business postcondition.
+- [BOUNDARY] The 41-case runtime suite, Ruff and Pyright pass. This is not yet a
+  seven-stage runner artifact and is not counted as completed commissioning proof.
+
+[NEXT] Commit Plan 05.6-222 and confirm H-038 through climb. Then connect the
+stale-owner primitive to `run_disposable_attack` so eight append-only lifecycle
+proof directories can be produced inside the exact image.

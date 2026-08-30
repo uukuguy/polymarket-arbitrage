@@ -16,8 +16,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
-from polyarb.control_plane.postgres import PostgresControlPlane
-from polyarb.control_plane.production_commissioning_disposable import complete_normal_turn
+from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
+from polyarb.control_plane.production_commissioning_disposable import (
+    complete_normal_turn,
+    prepare_normal_turn,
+)
 from polyarb.control_plane.recovery_store import _runtime_deadline_profile
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
 from polyarb.control_plane.runtime_deadlines import (
@@ -469,6 +472,74 @@ def test_disposable_commissioning_normal_turn_references_real_durable_facts(
     assert proof["terminal_fact_id"] == f"attempt:{proof['attempt_id']}"
     assert proof["postcondition_fact_id"].startswith("postgres:")
     assert proof["succeeded_at"].endswith("+00:00")
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_disposable_commissioning_stale_owner_is_fenced_and_replacement_completes(
+    control_plane: PostgresControlPlane,
+    job_type: str,
+) -> None:
+    started_at = NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1)
+    prepared = prepare_normal_turn(
+        control_plane,
+        node_id=job_type,
+        experiment_id=f"stale-owner:{job_type}",
+        now=started_at,
+    )
+    replacement = control_plane.claim_job(
+        worker_id=f"commissioning:replacement:{job_type}",
+        job_types=(job_type,),
+        lease_seconds=120,
+        now=prepared.lease.lease_expires_at + timedelta(microseconds=1),
+    )
+
+    assert replacement is not None
+    assert replacement.job_key == prepared.lease.job_key
+    assert replacement.lease_epoch == prepared.lease.lease_epoch + 1
+    with pytest.raises(StaleLeaseError):
+        prepared.complete(
+            lease=prepared.lease,
+            now=replacement.lease_expires_at - timedelta(seconds=2),
+        )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        stale_attempts = connection.execute(
+            """
+            SELECT count(*) FROM m1_job_attempts
+            WHERE job_key = %s AND lease_epoch = %s AND state = 'succeeded'
+            """,
+            (prepared.lease.job_key, prepared.lease.lease_epoch),
+        ).fetchone()
+        stale_events = connection.execute(
+            """
+            SELECT count(*) FROM m1_job_runtime_events
+            WHERE job_key = %s AND lease_epoch = %s AND kind = %s
+            """,
+            (
+                prepared.lease.job_key,
+                prepared.lease.lease_epoch,
+                RuntimeEventKind.SUCCEEDED.value,
+            ),
+        ).fetchone()
+
+    assert stale_attempts == (0,)
+    assert stale_events == (0,)
+
+    proof = prepared.complete(
+        lease=replacement,
+        now=replacement.lease_expires_at - timedelta(seconds=1),
+    )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        replacement_attempt = connection.execute(
+            "SELECT lease_epoch FROM m1_job_attempts WHERE attempt_id = %s",
+            (proof["attempt_id"],),
+        ).fetchone()
+
+    assert proof["attempt_id"]
+    assert replacement_attempt == (replacement.lease_epoch,)
+    assert proof["terminal_fact_id"] == f"attempt:{proof['attempt_id']}"
+    assert proof["postcondition_fact_id"].startswith("postgres:")
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:
