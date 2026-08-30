@@ -14,6 +14,7 @@ from polyarb.control_plane.models import (
     JobState,
     QuoteBatchLeg,
     QuoteBatchSpec,
+    QuoteRunIdentity,
 )
 from polyarb.control_plane.postgres import (
     IncompleteQuoteGenerationError,
@@ -31,6 +32,49 @@ from polyarb.control_plane.quote_worker import (
 from polyarb.control_plane.runtime_contract import ServiceStopRequested
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def test_quote_run_identity_is_canonical_and_scopes_batches_to_the_run() -> None:
+    identity = QuoteRunIdentity.create(
+        structure_generation_key=f"structure:{'a' * 64}",
+        universe_hash="b" * 64,
+        cadence_seconds=300,
+        cadence_bucket=5_960_404,
+    )
+    repeated = QuoteRunIdentity.create(
+        structure_generation_key=f"structure:{'a' * 64}",
+        universe_hash="b" * 64,
+        cadence_seconds=300,
+        cadence_bucket=5_960_404,
+    )
+    successor = replace(identity, cadence_bucket=5_960_405)
+    batch = QuoteBatchSpec.from_tokens(
+        structure_receipt_digest="a" * 64,
+        quote_generation_digest=identity.digest,
+        universe_hash="b" * 64,
+        ordinal=0,
+        token_ids=("token-a",),
+    )
+
+    assert identity == repeated
+    assert identity != successor
+    assert identity.generation_key == f"quote:{identity.digest}"
+    assert batch.generation_key == identity.generation_key
+    assert batch.input_identity == (
+        f"quote:{identity.digest}:{'a' * 64}:{'b' * 64}:0:{batch.token_range_digest}"
+    )
+
+
+def test_quote_batch_legacy_constructor_keeps_structure_digest_generation() -> None:
+    batch = QuoteBatchSpec.from_tokens(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        ordinal=0,
+        token_ids=("token-a",),
+    )
+
+    assert batch.quote_generation_digest == "a" * 64
+    assert batch.generation_key == f"quote:{'a' * 64}"
 
 
 def test_bounded_sync_call_checks_heartbeat_after_fast_success() -> None:
@@ -103,9 +147,7 @@ def test_quote_batch_pool_drains_healthy_siblings_before_propagating_failure() -
     healthy = _DelayedQuoteLane("quote:batch:healthy")
 
     async def run() -> None:
-        task = asyncio.create_task(
-            TransactionalQuoteBatchPool(lanes=(failing, healthy)).run_once()
-        )
+        task = asyncio.create_task(TransactionalQuoteBatchPool(lanes=(failing, healthy)).run_once())
         await asyncio.gather(failing.started.wait(), healthy.started.wait())
         failing.release.set()
         await asyncio.sleep(0)

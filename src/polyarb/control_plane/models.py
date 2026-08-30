@@ -122,9 +122,7 @@ class StructureSourcePageSpec:
     def market_ids_digest(self) -> str | None:
         if not self.market_ids:
             return None
-        return sha256(
-            json.dumps(self.market_ids, separators=(",", ":")).encode()
-        ).hexdigest()
+        return sha256(json.dumps(self.market_ids, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +142,70 @@ class QuoteBatchLeg:
             _require_identity(getattr(self, field), field)
         if self.slug is not None and not self.slug.strip():
             raise ValueError("slug must be non-empty when present")
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteRunIdentity:
+    """One deterministic executable-price run over certified Structure truth."""
+
+    structure_generation_key: str
+    universe_hash: str
+    cadence_seconds: int
+    cadence_bucket: int
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        structure_generation_key: str,
+        universe_hash: str,
+        cadence_seconds: int,
+        cadence_bucket: int,
+    ) -> QuoteRunIdentity:
+        return cls(
+            structure_generation_key=structure_generation_key,
+            universe_hash=universe_hash,
+            cadence_seconds=cadence_seconds,
+            cadence_bucket=cadence_bucket,
+        )
+
+    def __post_init__(self) -> None:
+        prefix = "structure:"
+        digest = self.structure_generation_key.removeprefix(prefix)
+        if (
+            not self.structure_generation_key.startswith(prefix)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("structure_generation_key must name a lowercase sha256 digest")
+        if len(self.universe_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in self.universe_hash
+        ):
+            raise ValueError("universe_hash must be a lowercase sha256 digest")
+        if (
+            isinstance(self.cadence_seconds, bool)
+            or self.cadence_seconds <= 0
+            or isinstance(self.cadence_bucket, bool)
+            or self.cadence_bucket < 0
+        ):
+            raise ValueError("quote run cadence identity is invalid")
+
+    @property
+    def digest(self) -> str:
+        payload = {
+            "cadence_bucket": self.cadence_bucket,
+            "cadence_seconds": self.cadence_seconds,
+            "policy_version": "transactional-quote-run-v1",
+            "structure_generation_key": self.structure_generation_key,
+            "universe_hash": self.universe_hash,
+        }
+        return sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @property
+    def generation_key(self) -> str:
+        return f"quote:{self.digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +243,12 @@ class StructureRangeReceipt:
     def __post_init__(self) -> None:
         _require_identity(self.job_key, "job_key")
         if self.component not in {
-            "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+            "events",
+            "event_tags",
+            "memberships",
+            "group_truth",
+            "markets",
+            "issues",
         }:
             raise ValueError("invalid Structure component")
         for field in ("bundle_digest", "range_digest", "artifact_digest"):
@@ -216,16 +283,19 @@ class StructureRangeSpec:
         range_end: str,
     ) -> StructureRangeSpec:
         if not bundle_key or component not in {
-            "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+            "events",
+            "event_tags",
+            "memberships",
+            "group_truth",
+            "markets",
+            "issues",
         }:
             raise ValueError("invalid Structure range identity")
         if len(bundle_digest) != 64 or ordinal < 0:
             raise ValueError("invalid Structure range digest or ordinal")
         if range_end and range_start >= range_end:
             raise ValueError("Structure range end must follow its start")
-        range_digest = sha256(
-            f"{component}\n{range_start}\n{range_end}".encode()
-        ).hexdigest()
+        range_digest = sha256(f"{component}\n{range_start}\n{range_end}".encode()).hexdigest()
         return cls(
             bundle_key=bundle_key,
             bundle_digest=bundle_digest,
@@ -258,7 +328,23 @@ class QuoteBatchSpec:
     ordinal: int
     token_ids: tuple[str, ...]
     token_range_digest: str
+    quote_generation_digest: str = ""
     legs: tuple[QuoteBatchLeg, ...] = ()
+
+    def __post_init__(self) -> None:
+        generation_digest = self.quote_generation_digest or self.structure_receipt_digest
+        object.__setattr__(self, "quote_generation_digest", generation_digest)
+        for field in (
+            "structure_receipt_digest",
+            "universe_hash",
+            "token_range_digest",
+            "quote_generation_digest",
+        ):
+            value = getattr(self, field)
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"{field} must be a lowercase sha256 digest")
+        if self.ordinal < 0 or not self.token_ids:
+            raise ValueError("Quote batch ordinal and tokens are invalid")
 
     @classmethod
     def from_tokens(
@@ -268,6 +354,7 @@ class QuoteBatchSpec:
         universe_hash: str,
         ordinal: int,
         token_ids: tuple[str, ...],
+        quote_generation_digest: str | None = None,
     ) -> QuoteBatchSpec:
         for field, value in (
             ("structure_receipt_digest", structure_receipt_digest),
@@ -281,12 +368,18 @@ class QuoteBatchSpec:
         if not normalized or any(not token_id for token_id in normalized):
             raise ValueError("token_ids must contain non-empty values")
         token_range_digest = sha256("\n".join(normalized).encode()).hexdigest()
+        generation_digest = quote_generation_digest or structure_receipt_digest
+        if len(generation_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in generation_digest
+        ):
+            raise ValueError("quote_generation_digest must be a lowercase sha256 digest")
         return cls(
             structure_receipt_digest=structure_receipt_digest,
             universe_hash=universe_hash,
             ordinal=ordinal,
             token_ids=normalized,
             token_range_digest=token_range_digest,
+            quote_generation_digest=generation_digest,
         )
 
     @classmethod
@@ -297,6 +390,7 @@ class QuoteBatchSpec:
         universe_hash: str,
         ordinal: int,
         legs: tuple[QuoteBatchLeg, ...],
+        quote_generation_digest: str | None = None,
     ) -> QuoteBatchSpec:
         """Build a range while preserving the exact market mapping for takeover."""
         by_token: dict[str, QuoteBatchLeg] = {}
@@ -310,6 +404,7 @@ class QuoteBatchSpec:
             universe_hash=universe_hash,
             ordinal=ordinal,
             token_ids=tuple(by_token),
+            quote_generation_digest=quote_generation_digest,
         )
         return cls(
             structure_receipt_digest=base.structure_receipt_digest,
@@ -317,12 +412,13 @@ class QuoteBatchSpec:
             ordinal=base.ordinal,
             token_ids=base.token_ids,
             token_range_digest=base.token_range_digest,
+            quote_generation_digest=base.quote_generation_digest,
             legs=normalized_legs,
         )
 
     @property
     def generation_key(self) -> str:
-        return f"quote:{self.structure_receipt_digest}"
+        return f"quote:{self.quote_generation_digest}"
 
     @property
     def job_key(self) -> str:
@@ -330,6 +426,11 @@ class QuoteBatchSpec:
 
     @property
     def input_identity(self) -> str:
+        if self.quote_generation_digest != self.structure_receipt_digest:
+            return (
+                f"quote:{self.quote_generation_digest}:{self.structure_receipt_digest}:"
+                f"{self.universe_hash}:{self.ordinal}:{self.token_range_digest}"
+            )
         return (
             f"quote:{self.structure_receipt_digest}:{self.universe_hash}:"
             f"{self.ordinal}:{self.token_range_digest}"

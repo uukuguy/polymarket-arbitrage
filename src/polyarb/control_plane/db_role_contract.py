@@ -77,6 +77,7 @@ QUALIFICATION_ALLOWED = {
     "m1_qualification_certificates": frozenset({"SELECT"}),
     "m1_publication_pointers": frozenset({"SELECT"}),
     "m1_generation_manifests": frozenset({"SELECT"}),
+    "m1_quote_generation_inputs": frozenset({"SELECT"}),
     "m1_opportunity_publication_pointers": frozenset({"SELECT"}),
     "m1_opportunity_projections": frozenset({"SELECT"}),
     "m1_job_runtime_events": frozenset(),
@@ -190,9 +191,7 @@ def scoped_connection_factory(
         except ValueError as error:
             raise ValueError("POLYARB_DB_POOL_MAX_SIZE must be an integer") from error
     if not 1 <= pool_max_size <= CONTROL_PLANE_DB_POOL_MAX_SIZE:
-        raise ValueError(
-            f"pool_max_size must be between 1 and {CONTROL_PLANE_DB_POOL_MAX_SIZE}"
-        )
+        raise ValueError(f"pool_max_size must be between 1 and {CONTROL_PLANE_DB_POOL_MAX_SIZE}")
     connection_options = "-csearch_path=pg_catalog,public " + deadline_policy.connection_options
     pool: ConnectionPool[Any] = ConnectionPool(
         dsn,
