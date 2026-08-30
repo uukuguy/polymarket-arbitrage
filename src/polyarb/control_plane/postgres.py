@@ -4435,16 +4435,16 @@ class PostgresControlPlane:
             ready_predicate = """
                 EXISTS (
                     SELECT 1 FROM m1_quote_batch_inputs AS input
-                    WHERE certifier.job_key =
-                          'quote:' || input.structure_receipt_digest || ':certify'
+                    WHERE input.job_key LIKE
+                          regexp_replace(certifier.job_key, ':certify$', ':batch:%%')
                 )
                 AND NOT EXISTS (
                     SELECT 1 FROM m1_quote_batch_inputs AS input
                     LEFT JOIN m1_quote_batch_receipts AS receipt
                       ON receipt.job_key = input.job_key
                     LEFT JOIN m1_jobs AS sibling ON sibling.job_key = input.job_key
-                    WHERE certifier.job_key =
-                          'quote:' || input.structure_receipt_digest || ':certify'
+                    WHERE input.job_key LIKE
+                          regexp_replace(certifier.job_key, ':certify$', ':batch:%%')
                       AND (receipt.job_key IS NULL
                            OR sibling.state IS DISTINCT FROM 'succeeded')
                 )

@@ -4560,6 +4560,82 @@ def test_terminal_quote_receipt_skips_busy_certifier_and_repairs_from_durable_fa
     assert certifier.job_key == certifier_job_key
 
 
+def test_recurring_quote_certifier_repairs_lost_wakeup_by_quote_generation(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure_digest = "a" * 64
+    quote_digest = "c" * 64
+    universe_hash = "b" * 64
+    _seed_structure_parent(control_plane, structure_digest=structure_digest, now=now)
+    batch = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=structure_digest,
+        quote_generation_digest=quote_digest,
+        universe_hash=universe_hash,
+        legs=(_leg("recurring-lost-wakeup"),),
+        batch_size=1,
+    )[0]
+    input_digest = "d" * 64
+    with control_plane._connection_factory() as connection, connection.cursor(
+        row_factory=dict_row
+    ) as cursor:
+        control_plane._enqueue_quote_generation_cursor(
+            cursor,
+            batches=(batch,),
+            input_artifacts={
+                batch.job_key: (
+                    f"quote-inputs/{input_digest}/batch.ndjson",
+                    input_digest,
+                    1,
+                )
+            },
+            now=now,
+        )
+
+    lease = control_plane.claim_job(
+        worker_id="recurring-lost-wakeup-batch",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    certifier_job_key = f"quote:{quote_digest}:certify"
+    with control_plane._connection_factory() as blocker, blocker.cursor() as cursor:
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+            (certifier_job_key,),
+        )
+        assert cursor.fetchone() is not None
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(
+                control_plane.record_quote_batch,
+                lease,
+                token_range_digest=batch.token_range_digest,
+                quote_digest="e" * 64,
+                artifact_key="quote-batches/recurring-lost-wakeup.ndjson",
+                artifact_digest="e" * 64,
+                successful_response_count=1,
+                quoted_at=now,
+                now=now,
+                terminal=True,
+            ).result()
+
+    assert (
+        control_plane.repair_ready_certifiers(
+            job_type="quote-certify", now=now + timedelta(seconds=1)
+        )
+        == 1
+    )
+    certifier = control_plane.claim_job(
+        worker_id="recurring-lost-wakeup-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert certifier is not None
+    assert certifier.job_key == certifier_job_key
+
+
 def test_quote_receipt_cannot_wake_certifier_before_producer_is_terminal(
     control_plane: PostgresControlPlane,
 ) -> None:
