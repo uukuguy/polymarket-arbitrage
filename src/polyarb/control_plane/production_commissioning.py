@@ -231,9 +231,9 @@ ATTACK_CONTRACTS: Mapping[str, AttackContract] = MappingProxyType(
                 "clob-missing-leg",
                 ("quote-batch",),
                 injector="omit one requested CLOB book leg",
-                detector="batch validation rejects incomplete market coverage",
-                recovery_action="retry the same immutable batch input",
-                postcondition="receipt proves every requested leg is present",
+                detector="batch records the omitted leg as terminal missing-book evidence",
+                recovery_action="fail closed only the affected opportunity group",
+                postcondition="one receipt is committed without retry incident or circuit",
                 execution_scope="disposable-exact-image",
             ),
             _attack(

@@ -415,23 +415,20 @@ identity；新鲜 lineage 成功投影后，由其成功 lease 关闭同一个 i
 完整链条：陈旧指针 → 无 R2/无 Opportunity 写入 → blocking incident → 新 Structure/Quote 指针 →
 新 Opportunity 唯一发布 → incident recovered。
 
-### CLOB 少返一条 book，为什么不能当成 `missing-book` 正常发布？
+### CLOB 少返一条 book，为什么现在要当成 `missing-book` 终态证据？
 
-`missing-book` 可以表达一个有身份的 book 没有可执行 ask，但 provider 根本没有返回
-某个请求 token 是另一件事：它可能是分页、代理或上游部分响应。如果把两者合并，
-Quote batch 会把“未观测到”伪装成“已观测且不可执行”，然后 certifier 继续发布不完整
-generation。
+2026-08-30 生产回归推翻了先前的假设。一个 500-token 真实批次中 CLOB 返回 419 条；
+首个缺失 token 在 Gamma 中已是 `closed=true` 且 `acceptingOrders=false`。这是市场生命周期的
+正常竞态，不是网络基础设施故障。把它进入 durable retry/circuit 会让其他 419 条有效行情
+一起失败，并且对永久关闭的 token 产生永不可能成功的重试。
 
-现在 `TransactionalQuoteBatchWorker` 在任何 R2 PUT 前比较去重后的 requested token 数与
-provider 实际响应数。少一条就抛出只含计数、不含 token/body 的
-`IncompleteQuoteBatchCoverageError`，通过共享 durable retry/circuit/incident 链处理；失败
-epoch 不得留下 artifact 或 Quote receipt。
+`TransactionalQuoteBatchWorker` 现在保留 provider 实际响应数作为审计计数，同时为未返回
+的有身份 leg 写入 `terminal_state=missing-book`。这不会发布虚假套利：
+`build_opportunity_rows()` 遇到任意非 `executable` leg 就丢弃整个 neg-risk group。因此安全
+边界是“不完整组不产生 Opportunity”，而不是“整个 500-token 批次必须无限重试”。
 
-commissioning 也修正了边界归属：旧 `perception_chaos.py` 的 `candidate` 是 SQLite 旧链，
-不是 PostgreSQL 新 DAG 的 `quote-batch`，且没有 commissioning `config_id` 绑定。所以不能把
-旧 canary 证据转个字段就冒充新链证明。`clob-missing-leg` 改为 exact-image disposable
-攻击：真实 worker + 真实迁移 PostgreSQL 先拒绝 0/1 覆盖，再按中央 policy due-at 用
-同一 immutable batch 完成 1/1 恢复，最终只有一个 receipt。
+`clob-missing-leg` exact-image disposable 攻击现在证明：0/1 provider coverage 只调用一次、
+产生一个包含 `missing-book` 的 receipt，不创建 retry incident 或 circuit，下游依然 fail closed。
 
 ### CLOB 429 为什么要转成新错误类，不直接保存 SDK exception？
 

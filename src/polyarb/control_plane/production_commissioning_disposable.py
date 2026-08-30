@@ -30,10 +30,7 @@ from .quote_admission import (
     TransactionalQuoteAdmitter,
 )
 from .quote_artifact import QuoteBatchArtifact, canonical_quote_batch_bytes
-from .quote_worker import (
-    IncompleteQuoteBatchCoverageError,
-    TransactionalQuoteBatchWorker,
-)
+from .quote_worker import TransactionalQuoteBatchWorker
 from .reconciler import RuntimeReconciler
 from .recovery_executor import RecoveryExecutor
 from .recovery_models import RecoveryActionType
@@ -4601,7 +4598,7 @@ class _CommissioningBooksReader:
 
 
 class ClobMissingLegCommissioningAdapter:
-    """Exercise omitted CLOB coverage through the real Quote batch worker."""
+    """Prove an omitted CLOB book becomes safe terminal evidence, not retry load."""
 
     def __init__(
         self,
@@ -4617,6 +4614,8 @@ class ClobMissingLegCommissioningAdapter:
         self._objects = _DisposableObjectStore()
         self._reader = _CommissioningBooksReader()
         self._job_key: str | None = None
+        # Used only by the typed transient-provider subclass. Missing books
+        # are terminal market evidence and never populate these fields.
         self._retry_due_at: datetime | None = None
         self._failure_event_id: str | None = None
         self._success_event_id: str | None = None
@@ -4679,13 +4678,9 @@ class ClobMissingLegCommissioningAdapter:
         self._require_identity(identity)
         job_key = self._need(self._job_key, "clob-missing-leg-job-missing")
         self._now = self._started_at + timedelta(seconds=2)
-        try:
-            asyncio.run(self._worker("fault").run_once())
-        except IncompleteQuoteBatchCoverageError as error:
-            if error.requested_count != 1 or error.received_count != 0:
-                raise DisposableCommissioningError("clob-missing-leg-count-shape") from error
-        else:
-            raise DisposableCommissioningError("clob-missing-leg-not-rejected")
+        result = asyncio.run(self._worker("fault").run_once())
+        if result.job_key != job_key or result.outcome != "succeeded":
+            raise DisposableCommissioningError("clob-missing-leg-not-terminalized")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             attempt = connection.execute(
                 """
@@ -4697,79 +4692,8 @@ class ClobMissingLegCommissioningAdapter:
             event = connection.execute(
                 """
                 SELECT event_id FROM m1_job_runtime_events
-                WHERE job_key=%s AND kind='job.retryable-failed'
-                ORDER BY occurred_at DESC LIMIT 1
-                """,
-                (job_key,),
-            ).fetchone()
-            job = connection.execute(
-                "SELECT next_attempt_at FROM m1_jobs WHERE job_key=%s",
-                (job_key,),
-            ).fetchone()
-        if (
-            attempt is None
-            or attempt[1:] != ("retryable", "IncompleteQuoteBatchCoverageError")
-            or event is None
-            or job is None
-            or job[0] is None
-        ):
-            raise DisposableCommissioningError("clob-missing-leg-detection-shape")
-        self._failure_event_id = str(event[0])
-        self._retry_due_at = job[0].astimezone(UTC)
-        return AttackStageReceipt(
-            stage="detected",
-            receipt_id=f"event:{self._failure_event_id}",
-            occurred_at=self._now,
-        )
-
-    def start_recovery(
-        self,
-        identity: AttackIdentity,
-        detected: AttackStageReceipt,
-    ) -> AttackStageReceipt:
-        self._require_identity(identity)
-        due = self._need(self._retry_due_at, "clob-missing-leg-retry-due-missing")
-        return AttackStageReceipt(
-            stage="recovery-started",
-            receipt_id=f"durable-retry:{self._need(self._job_key, 'clob-missing-leg-job-missing')}",
-            occurred_at=due,
-        )
-
-    def cleanup(
-        self,
-        identity: AttackIdentity,
-        recovery_started: AttackStageReceipt | None,
-    ) -> AttackStageReceipt:
-        self._require_identity(identity)
-        if self._objects._objects:  # noqa: SLF001 - prove no partial provider output
-            raise DisposableCommissioningError("clob-missing-leg-partial-artifact")
-        self._reader.missing = False
-        due = self._need(self._retry_due_at, "clob-missing-leg-retry-due-missing")
-        return AttackStageReceipt(
-            stage="cleanup",
-            receipt_id="provider:clob:complete-coverage-restored",
-            occurred_at=due + timedelta(microseconds=1),
-        )
-
-    def recover(
-        self,
-        identity: AttackIdentity,
-        recovery_started: AttackStageReceipt,
-        cleanup: AttackStageReceipt,
-    ) -> AttackStageReceipt:
-        self._require_identity(identity)
-        job_key = self._need(self._job_key, "clob-missing-leg-job-missing")
-        self._now = self._need(
-            self._retry_due_at, "clob-missing-leg-retry-due-missing"
-        ) + timedelta(seconds=1)
-        result = asyncio.run(self._worker("recovery").run_once())
-        if result.job_key != job_key or result.outcome != "succeeded":
-            raise DisposableCommissioningError("clob-missing-leg-recovery-outcome")
-        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
-            event = connection.execute(
-                """
-                SELECT event_id FROM m1_job_runtime_events
                 WHERE job_key=%s AND kind='job.succeeded'
+                ORDER BY occurred_at DESC LIMIT 1
                 """,
                 (job_key,),
             ).fetchone()
@@ -4780,14 +4704,62 @@ class ClobMissingLegCommissioningAdapter:
                 """,
                 (job_key,),
             ).fetchone()
-        if event is None or receipt is None or receipt[1] != 1:
-            raise DisposableCommissioningError("clob-missing-leg-recovery-receipt")
+        if (
+            attempt is None
+            or attempt[1:] != ("succeeded", None)
+            or event is None
+            or receipt is None
+            or receipt[1] != 0
+        ):
+            raise DisposableCommissioningError("clob-missing-leg-detection-shape")
         self._success_event_id = str(event[0])
         self._artifact_key = str(receipt[0])
         return AttackStageReceipt(
-            stage="recovered",
-            receipt_id=f"event:{self._success_event_id}",
+            stage="detected",
+            receipt_id=f"event:{self._success_event_id}:terminal-missing-book",
             occurred_at=self._now,
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id="policy:missing-book:fail-closed-group",
+            occurred_at=self._now + timedelta(microseconds=1),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._reader.missing = False
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id="provider:clob:complete-coverage-restored",
+            occurred_at=self._now + timedelta(microseconds=2),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        key = self._need(self._artifact_key, "clob-missing-leg-artifact-key-missing")
+        payload = self._objects.get_object(Key=key)["Body"].read()  # type: ignore[union-attr]
+        if b'"terminal_state":"missing-book"' not in payload:
+            raise DisposableCommissioningError("clob-missing-leg-terminal-evidence-missing")
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"artifact:{key}:terminal-missing-book",
+            occurred_at=self._now + timedelta(microseconds=3),
         )
 
     def verify(
@@ -4800,27 +4772,26 @@ class ClobMissingLegCommissioningAdapter:
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             state = connection.execute(
                 """
-                SELECT job.state, circuit.state, circuit.consecutive_failures,
-                       incident.state,
+                SELECT job.state,
+                       (SELECT count(*) FROM m1_job_circuits WHERE job_key=job.job_key),
+                       (SELECT count(*) FROM m1_incidents
+                        WHERE dedupe_key='job-retry:' || job.job_key),
                        (SELECT count(*) FROM m1_quote_batch_receipts WHERE job_key=job.job_key)
                 FROM m1_jobs AS job
-                JOIN m1_job_circuits AS circuit USING (job_key)
-                JOIN m1_incidents AS incident
-                  ON incident.dedupe_key='job-retry:' || job.job_key
                 WHERE job.job_key=%s
                 """,
                 (job_key,),
             ).fetchone()
-        if state != ("succeeded", "closed", 0, "resolved", 1):
+        if state != ("succeeded", 0, 0, 1):
             raise DisposableCommissioningError("clob-missing-leg-postcondition")
-        if self._reader.calls != 2:
+        if self._reader.calls != 1:
             raise DisposableCommissioningError("clob-missing-leg-call-count")
         key = self._need(self._artifact_key, "clob-missing-leg-artifact-key-missing")
         if not self._objects.contains(key):
             raise DisposableCommissioningError("clob-missing-leg-artifact-missing")
         return AttackStageReceipt(
             stage="verified",
-            receipt_id=f"postgres:m1_quote_batch_receipts:{job_key}:coverage=1/1",
+            receipt_id=f"postgres:m1_quote_batch_receipts:{job_key}:coverage=0/1:terminal",
             occurred_at=self._now + timedelta(seconds=1),
         )
 
@@ -4893,6 +4864,19 @@ class Clob429CommissioningAdapter(ClobMissingLegCommissioningAdapter):
             occurred_at=self._now,
         )
 
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        due = self._need(self._retry_due_at, "clob-429-retry-due-missing")
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"durable-retry:{self._need(self._job_key, 'clob-429-job-missing')}",
+            occurred_at=due,
+        )
+
     def cleanup(
         self,
         identity: AttackIdentity,
@@ -4907,6 +4891,79 @@ class Clob429CommissioningAdapter(ClobMissingLegCommissioningAdapter):
             stage="cleanup",
             receipt_id="provider:clob:rate-limit-cleared",
             occurred_at=due + timedelta(microseconds=1),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "clob-429-job-missing")
+        self._now = self._need(self._retry_due_at, "clob-429-retry-due-missing") + timedelta(
+            seconds=1
+        )
+        result = asyncio.run(self._worker("recovery").run_once())
+        if result.job_key != job_key or result.outcome != "succeeded":
+            raise DisposableCommissioningError("clob-429-recovery-outcome")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            event = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key=%s AND kind='job.succeeded'
+                """,
+                (job_key,),
+            ).fetchone()
+            receipt = connection.execute(
+                """
+                SELECT artifact_key, successful_response_count
+                FROM m1_quote_batch_receipts WHERE job_key=%s
+                """,
+                (job_key,),
+            ).fetchone()
+        if event is None or receipt is None or receipt[1] != 1:
+            raise DisposableCommissioningError("clob-429-recovery-receipt")
+        self._success_event_id = str(event[0])
+        self._artifact_key = str(receipt[0])
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._success_event_id}",
+            occurred_at=self._now,
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "clob-429-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                """
+                SELECT job.state, circuit.state, circuit.consecutive_failures,
+                       incident.state,
+                       (SELECT count(*) FROM m1_quote_batch_receipts WHERE job_key=job.job_key)
+                FROM m1_jobs AS job
+                JOIN m1_job_circuits AS circuit USING (job_key)
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key='job-retry:' || job.job_key
+                WHERE job.job_key=%s
+                """,
+                (job_key,),
+            ).fetchone()
+        if state != ("succeeded", "closed", 0, "resolved", 1):
+            raise DisposableCommissioningError("clob-429-postcondition")
+        if self._reader.calls != 2:
+            raise DisposableCommissioningError("clob-429-call-count")
+        key = self._need(self._artifact_key, "clob-429-artifact-key-missing")
+        if not self._objects.contains(key):
+            raise DisposableCommissioningError("clob-429-artifact-missing")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"postgres:m1_quote_batch_receipts:{job_key}:coverage=1/1",
+            occurred_at=self._now + timedelta(seconds=1),
         )
 
 

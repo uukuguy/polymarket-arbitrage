@@ -893,7 +893,7 @@ m1-production-commissioning-stale-quote-pointer:
 	@test -n "$(expected_config)" || (echo "ERROR: expected_config is required" >&2; exit 2)
 	@uv run python -m polyarb.control_plane.production_commissioning_harness stale-quote-pointer --root "$(evidence_root)" --release-id "$(expected_release)" --config-id "$(expected_config)" --json
 
-## m1-production-commissioning-clob-missing-leg: Prove omitted CLOB coverage cannot publish a Quote batch and a complete retry recovers; isolated migrated loopback database only.
+## m1-production-commissioning-clob-missing-leg: Prove an omitted CLOB book becomes terminal missing-book evidence without retry/circuit while its opportunity group stays fail-closed; isolated migrated loopback database only.
 m1-production-commissioning-clob-missing-leg:
 	@test -n "$$POLYARB_CONTROL_PLANE_TEST_DSN" || (echo "ERROR: explicitly export POLYARB_CONTROL_PLANE_TEST_DSN" >&2; exit 2)
 	@test -n "$(evidence_root)" || (echo "usage: make m1-production-commissioning-clob-missing-leg evidence_root=<dir> expected_release=<40-char-sha> expected_config=<sha256:id>" >&2; exit 2)

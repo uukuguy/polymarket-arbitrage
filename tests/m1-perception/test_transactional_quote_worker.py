@@ -22,7 +22,6 @@ from polyarb.control_plane.postgres import (
 )
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import (
-    IncompleteQuoteBatchCoverageError,
     QuoteBatchWorkerResult,
     TransactionalQuoteBatchPool,
     TransactionalQuoteBatchWorker,
@@ -404,7 +403,7 @@ def test_transactional_worker_marks_only_its_batch_retryable_on_fetch_failure() 
     assert control_plane.retry_incidents[0]["component"] == "quote-batch"
 
 
-def test_transactional_worker_rejects_incomplete_clob_coverage_before_upload() -> None:
+def test_transactional_worker_terminalizes_missing_clob_leg_without_retrying_batch() -> None:
     control_plane = FakeControlPlane(_batch())
     objects = FakeObjectClient()
     worker = TransactionalQuoteBatchWorker(
@@ -416,17 +415,16 @@ def test_transactional_worker_rejects_incomplete_clob_coverage_before_upload() -
         now=lambda: NOW,
     )
 
-    with pytest.raises(IncompleteQuoteBatchCoverageError) as raised:
-        asyncio.run(worker.run_once())
+    result = asyncio.run(worker.run_once())
 
-    assert raised.value.requested_count == 1
-    assert raised.value.received_count == 0
-    assert objects.object == {}
-    assert control_plane.recorded is None
-    assert control_plane.finished == []
-    assert control_plane.retry_incidents[0]["error_class"] == (
-        "IncompleteQuoteBatchCoverageError"
-    )
+    assert result.outcome == "succeeded"
+    assert control_plane.recorded is not None
+    assert control_plane.recorded["successful_response_count"] == 0
+    assert control_plane.finished == [JobState.SUCCEEDED]
+    assert control_plane.retry_incidents == []
+    payload = objects.object["Body"]
+    assert isinstance(payload, bytes)
+    assert b'"terminal_state":"missing-book"' in payload
 
 
 def test_transactional_worker_reports_each_quote_batch_stage() -> None:

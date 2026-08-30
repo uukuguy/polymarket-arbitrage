@@ -43,20 +43,6 @@ class QuoteBatchWorkerError(RuntimeError):
     """The immutable input cannot safely produce a transactional Quote result."""
 
 
-class IncompleteQuoteBatchCoverageError(QuoteBatchWorkerError):
-    """CLOB omitted one or more requested books from a successful response."""
-
-    def __init__(self, *, requested_count: int, received_count: int) -> None:
-        if requested_count <= 0 or received_count < 0 or received_count >= requested_count:
-            raise ValueError("invalid incomplete Quote coverage counts")
-        self.requested_count = requested_count
-        self.received_count = received_count
-        super().__init__(
-            "quote-batch-incomplete-clob-coverage:"
-            f"requested={requested_count}:received={received_count}"
-        )
-
-
 class _ObjectClient(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
 
@@ -537,12 +523,6 @@ class TransactionalQuoteBatchWorker:
             for leg in batch.legs
         )
         successful_count, quotes = _build_terminal_quotes(books, list(batch.token_ids), legs)
-        requested_count = len(set(batch.token_ids))
-        if successful_count != requested_count:
-            raise IncompleteQuoteBatchCoverageError(
-                requested_count=requested_count,
-                received_count=successful_count,
-            )
         payload = canonical_quote_batch_bytes(
             structure_receipt_digest=batch.structure_receipt_digest,
             universe_hash=batch.universe_hash,

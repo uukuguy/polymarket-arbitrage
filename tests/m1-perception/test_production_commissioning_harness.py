@@ -918,7 +918,7 @@ def test_disposable_database_cleans_after_interrupted_attack_body(
     assert roles == []
 
 
-def test_clob_missing_leg_harness_rejects_then_recovers_complete_coverage(
+def test_clob_missing_leg_harness_terminalizes_without_retry_or_circuit(
     monkeypatch: pytest.MonkeyPatch,
     control_plane_test_dsn: str,
     tmp_path: Path,
