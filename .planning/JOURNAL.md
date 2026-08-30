@@ -12337,3 +12337,26 @@ disposable matrix is complete.
 [NEXT] Commit Plan 05.6-236 without protected user files, pass exact-HEAD and
 full related regressions, then confirm H-048 through climb. Continue with
 `structure-parity-mismatch`; keep the combined exact-image run deferred.
+
+### SESSION 366 — 2026-08-30 (H-048 normalization corruption confirmed)
+
+- [EXACT HEAD] Commit `8274f83c` passed the build-only exact-revision guard;
+  no image was built or pushed.
+- [FULL REGRESSION] Structure worker, transactional commissioning, isolated
+  harness, Make contracts, atomic PostgreSQL quarantine and all climb tests
+  passed.
+- [CLIMB H-048] Cycle 53 passed all nine production-enablement gates at 100%;
+  integration passed 140 cases and `disaster_pattern=false`.
+- [CHAIN-TRUTH] An authenticated schema-invalid shard now yields one exact
+  terminal runtime fact, quarantined job/attempt, critical incident and alert
+  in one transaction; zero retry circuit, range receipt or bad manifest is
+  possible, and the prior certified shadow pointer remains current.
+- [ONLINE TARGET] `target evaluation not configured` is only the absent
+  external leaderboard target and does not affect the confirmed local verdict.
+- [BOUNDARY] No production mutation, provider call, Fly/SSH/deploy, Docker
+  build/context change, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-048 confirmation state. Audit `structure-parity-mismatch` next,
+reusing the terminal quarantine/critical incident primitive only if its exact
+certifier integrity semantics agree; do not collapse a true parity violation
+into transient retry.
