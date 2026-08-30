@@ -12563,3 +12563,29 @@ write timeout families; do not deploy.
 active Docker context is OrbStack, then run one command-scoped exact runtime
 image build-only gate for the combined H-051/H-052 release. Never change the
 global context, push, or deploy.
+
+### SESSION 375 — 2026-08-30 (exact v28 timeout-family image)
+
+- [CORRECTION] The build-only entry necessarily includes registry `--push` so
+  the immutable image can be referenced; it never deploys. Earlier wording
+  saying “never push” was corrected before execution.
+- [ORBSTACK BUILD] Command-scoped `--local-only` built and pushed
+  `m1-runtime-v28-0f5dcc53` for exact release `0f5dcc53...`; registry digest is
+  `sha256:c96209be0972b5e71a86c7e5ff419577d0bdce362f2b1b436c5e55d35c761d94`.
+- [INDEPENDENT CHECK] Temporary isolated registry auth plus the explicit
+  verified OrbStack socket pulled the tag. Inspect proved linux/amd64,
+  non-root `polyarb`, exact full revision, image ID `1aa058ca...`, and
+  752,396,051-byte size.
+- [CONTEXT SAFETY] Global Docker context remained `orbstack`; no Colima context,
+  VM, global credential or Machine mutation occurred. Temporary auth was
+  removed on command exit.
+- [PLAN AUDIT] The commissioning contract has 18 attacks. Thirteen disposable
+  harnesses now exist; `stale-quote-pointer` is the sole missing disposable
+  harness. Gamma timeout/malformed and CLOB 429/missing-leg remain four
+  explicit production-canary attacks.
+- [BOUNDARY] No Fly deployment/Machine action, production DB/provider call,
+  canary, SSH, or qualification operation occurred.
+
+[NEXT] Commit Plan 05.6-241 without protected user files. Implement and confirm
+the sole remaining disposable `stale-quote-pointer` attack before considering
+the separately authorized four production canaries.
