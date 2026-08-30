@@ -42,6 +42,11 @@ Structure→Quote→Opportunity 的八个节点逐一 commissioning：跑通正�
 - `src/polyarb/control_plane/production_commissioning_disposable.py:27`：在 disposable
   PostgreSQL 上完成八类真实 domain transaction，并只返回数据库中存在的
   terminal attempt、runtime success event 和因果绑定的业务后置条件 ID。
+- `src/polyarb/control_plane/production_commissioning_harness.py:48`：先验证精确
+  release/config 和显式 loopback test DSN，再按节点运行隔离攻击；CLI 不提供
+  跳过节点的选项。
+- `src/polyarb/control_plane/runtime_fault_matrix.py:139`：fault matrix 与 commissioning
+  共用唯一的临时库创建、Alembic 迁移、authority 校验、删库和角色回收生命周期。
 - `src/polyarb/control_plane/qualification.py:30`：真正作废 epoch 的严重原因闭集。
 - `src/polyarb/control_plane/qualification.py:42`：暂停或阻塞健康秒的原因闭集。
 - `src/polyarb/control_plane/qualification.py:656`：单条事实如何改变资格状态。
@@ -153,3 +158,16 @@ owner 在同一事务里追加一条事件，就自己破坏了被验证的边�
 真实原 attempt、replacement attempt、新 epoch 的 `job.succeeded` event 和业务
 postcondition；“旧 epoch 无 success attempt/event”由 detector 和 cleanup 两次查询证明。
 这是负向事实与正向事实的组合，不是伪造一条业务事件。
+
+### 为什么每个节点要用独立临时数据库？
+
+一个节点的真实 terminal transaction 可能排队下游 job、移动 pointer 或留下
+runtime event。如果八个攻击复用同一个库，后一个攻击就可能误拾前一个攻击的
+successor 或业务事实。现在 harness 每个节点创建一个名称受闭合正则约束的
+`m1_commissioning_<uuid>` 库，用真实 Alembic head 迁移后运行攻击，最后无条件
+终止连接并删库。
+
+迁移会创建 cluster-global role，所以生命周期还需要 advisory lock 和“清理所有权”：
+只有在启动前确认这些 role 不存在，才允许本次实验回收它们。如果发现预存
+role，harness 立即拒绝运行，但绝不会删除别人的集群状态。攻击失败与连接清理
+失败同时发生时，两个异常会一起保留，避免“只看到 close 失败、丢了攻击根因”。

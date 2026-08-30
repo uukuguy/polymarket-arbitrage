@@ -7,7 +7,8 @@ import json
 import os
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -67,7 +68,9 @@ from .runtime_observe import (
 )
 
 _ENV_NAME: Final[str] = "POLYARB_CONTROL_PLANE_TEST_DSN"
-_DATABASE_RE: Final[re.Pattern[str]] = re.compile(r"^runtime_fault_matrix_[0-9a-f]{32}$")
+_DATABASE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:runtime_fault_matrix|m1_commissioning)_[0-9a-f]{32}$"
+)
 _BASE_NOW: Final[datetime] = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 _CLUSTER_LOCK_KEY: Final[int] = 56062061
@@ -122,6 +125,86 @@ class _CaseOutcome:
     qualification_fact_count: int
     observe_decision_count: int
     recovery_actions_created: int
+
+
+@dataclass(frozen=True, slots=True)
+class DisposableControlPlaneDatabase:
+    """One migrated loopback-only database owned by a single test context."""
+
+    database_name: str
+    control_plane: PostgresControlPlane
+
+
+@contextmanager
+def migrated_disposable_control_plane_database() -> Iterator[DisposableControlPlaneDatabase]:
+    """Create, migrate, yield and unconditionally remove one commissioning database."""
+
+    admin_dsn = _validated_test_dsn(os.environ.get(_ENV_NAME, ""))
+    database_name = f"m1_commissioning_{uuid4().hex}"
+    database_dsn = _dsn_with_database(admin_dsn, database_name)
+    maintenance_dsn = _dsn_with_database_unchecked(admin_dsn, "postgres")
+    original: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    created = False
+    locked = False
+    migration_roles_owned = False
+    maintenance = psycopg.connect(
+        maintenance_dsn,
+        autocommit=True,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    )
+    try:
+        _lock_runtime_fault_matrix_cluster(maintenance)
+        locked = True
+        _assert_migration_cluster_roles_absent(maintenance)
+        migration_roles_owned = True
+        _create_empty_isolated_database_with_connection(maintenance, database_name)
+        created = True
+        _run_alembic_upgrade(database_dsn)
+        _verify_migrated_authority(database_dsn)
+        yield DisposableControlPlaneDatabase(
+            database_name=database_name,
+            control_plane=PostgresControlPlane(_connection_factory(database_dsn)),
+        )
+    except BaseException as error:
+        original = error
+    finally:
+        if created:
+            try:
+                _drop_isolated_database_with_connection(maintenance, database_name)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if migration_roles_owned:
+            try:
+                _drop_migration_created_cluster_roles_if_safe(maintenance)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if locked:
+            try:
+                _unlock_runtime_fault_matrix_cluster(maintenance)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        try:
+            maintenance.close()
+        except BaseException as error:
+            cleanup_errors.append(error)
+    if original is not None and cleanup_errors:
+        raise BaseExceptionGroup(
+            "disposable-database-and-cleanup-failed",
+            [original, *cleanup_errors],
+        )
+    if original is not None:
+        raise original
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
+    if cleanup_errors:
+        raise BaseExceptionGroup("disposable-database-cleanup-failed", cleanup_errors)
+
+
+def validated_control_plane_test_dsn() -> str:
+    """Return the explicit loopback test DSN or fail before any mutation."""
+
+    return _validated_test_dsn(os.environ.get(_ENV_NAME, ""))
 
 
 def canonical_fault_matrix_bytes(result: Mapping[str, object]) -> bytes:
@@ -1647,7 +1730,10 @@ def _case_result(
 
 
 __all__ = [
+    "DisposableControlPlaneDatabase",
     "RuntimeFaultMatrixError",
     "canonical_fault_matrix_bytes",
+    "migrated_disposable_control_plane_database",
     "run_fault_matrix",
+    "validated_control_plane_test_dsn",
 ]

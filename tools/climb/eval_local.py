@@ -681,6 +681,10 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "tests/m1-perception/test_control_plane_qualification_identity.py",
         "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
         "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_exercises_real_migrated_authority_paths",
+        "tests/m1-perception/test_production_commissioning_harness.py::test_stale_owner_harness_runs_real_isolated_node_and_cleans_database_and_roles",
+        "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_cleans_after_interrupted_attack_body",
+        "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_never_drops_preexisting_cluster_roles",
+        "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_preserves_attack_and_connection_cleanup_failures",
         "-q",
     ],
     "cli": [
@@ -693,6 +697,7 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "tests/m1-perception/test_makefile_contract.py::test_make_runtime_observe_verify_is_read_only_and_bounded",
         "tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology",
         "tests/m1-perception/test_makefile_contract.py::test_make_fly_topology_audit_exposes_exact_read_only_argv",
+        "tests/m1-perception/test_makefile_contract.py::test_make_stale_owner_commissioning_executes_exact_harness_command",
         "-q",
     ],
     "restart": [

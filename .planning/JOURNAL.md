@@ -11758,3 +11758,29 @@ proof directories can be produced inside the exact image.
 harness that provisions one migrated database per node/attack, invokes this
 adapter, always drops the database after artifact closure and exposes one Make
 entry without an all-run timeout.
+
+### SESSION 345 — 2026-08-30 (isolated exact-image commissioning harness)
+
+- [CLIMB H-039] Cycle 43 passed all five gates at 100 and confirmed the
+  cleanup-safe eight-node stale-owner proof adapter.
+- [CLIMB H-040] Registered an exact-image production-enablement hypothesis for
+  executing that adapter through one newly migrated disposable database per node.
+- [SHARED LIFECYCLE] Commissioning now reuses the runtime fault matrix's loopback
+  DSN validation, cluster lock, Alembic migration, authority checks and cleanup;
+  it does not introduce a second Docker or database orchestration path.
+- [CLEANUP OWNERSHIP] Pre-existing cluster roles fail closed and are never
+  removed. Only roles proven absent before this experiment may be reclaimed.
+- [INTERRUPTION PROOF] Normal completion and simulated attack interruption both
+  leave zero commissioning databases and migration roles. Simultaneous attack
+  and connection-close failures retain both exceptions.
+- [UNIFORM ENTRY] `make m1-production-commissioning-stale-owner` requires an
+  explicit loopback test DSN, evidence root and exact release/config. It has no
+  production DSN fallback, node-skip CLI or all-run timeout.
+- [BOUNDARY] No production database, provider, Fly Machine, SSH, Docker context
+  or deployment was touched. Exact-image execution follows H-040 confirmation.
+
+[NEXT] Commit Plan 05.6-224 without protected user files and confirm H-040
+through the deterministic runtime production-enablement climb gate. Then run all
+eight stale-owner proofs inside the next immutable image built through OrbStack
+only, and extend the shared harness with heartbeat/progress/worker-exit/retry-
+budget attacks before any scoped production canary or qualification epoch.

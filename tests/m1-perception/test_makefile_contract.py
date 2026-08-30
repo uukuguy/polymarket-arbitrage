@@ -656,6 +656,118 @@ def test_make_runtime_fault_matrix_executes_fake_uv_with_explicit_test_dsn(
     ]
 
 
+def test_make_help_lists_stale_owner_commissioning_harness() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "m1-production-commissioning-stale-owner:" in result.stdout
+    assert "isolated migrated loopback databases" in result.stdout
+
+
+def test_make_stale_owner_commissioning_requires_test_dsn_before_fake_uv(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env.pop("POLYARB_CONTROL_PLANE_TEST_DSN", None)
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-stale-owner",
+            "evidence_root=evidence",
+            f"expected_release={'a' * 40}",
+            f"expected_config=sha256:{'b' * 64}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "POLYARB_CONTROL_PLANE_TEST_DSN" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+@pytest.mark.parametrize(
+    ("make_vars", "expected_error"),
+    [
+        ((), "evidence_root=<dir>"),
+        (("evidence_root=evidence",), "expected_release is required"),
+        (
+            ("evidence_root=evidence", f"expected_release={'a' * 40}"),
+            "expected_config is required",
+        ),
+    ],
+)
+def test_make_stale_owner_commissioning_requires_identity_before_fake_uv(
+    tmp_path: Path,
+    make_vars: tuple[str, ...],
+    expected_error: str,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    result = subprocess.run(
+        ["make", "m1-production-commissioning-stale-owner", *make_vars],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+def test_make_stale_owner_commissioning_executes_exact_harness_command(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    release = "a" * 40
+    config = f"sha256:{'b' * 64}"
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-stale-owner",
+            "evidence_root=evidence",
+            f"expected_release={release}",
+            f"expected_config={config}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.production_commissioning_harness",
+            "stale-owner",
+            "--root",
+            "evidence",
+            "--release-id",
+            release,
+            "--config-id",
+            config,
+            "--json",
+        ]
+    ]
+
+
 def test_make_help_lists_rolling_qualification_targets() -> None:
     result = subprocess.run(
         ["make", "help"],
