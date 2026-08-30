@@ -1001,7 +1001,7 @@ hypotheses:
     node-specific commissioning attacks can reuse without mutating production.
   cost_h: 0.5
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T16:00:00+08:00'
   results:
   - session: 2026-07-31-m1-self-healing-structure
@@ -1017,3 +1017,16 @@ hypotheses:
     online: null
     verdict: falsified
     decision_reason: one or more local gates failed
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 41
+    run: 20260830-002318-h-037
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
