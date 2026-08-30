@@ -8906,17 +8906,24 @@ class PostgresControlPlane:
                     "opportunity projection requires current certified Quote"
                 )
             cursor.execute(
-                """SELECT generation_key FROM m1_generation_manifests
-                   WHERE generation_key = ANY(%s)
-                     AND producer_job_key = generation_key || ':certify'""",
-                ([quote_generation_key, structure_generation_key],),
+                """
+                SELECT lineage.structure_generation_key
+                FROM m1_quote_generation_inputs AS lineage
+                JOIN m1_generation_manifests AS quote_manifest
+                  ON quote_manifest.generation_key = lineage.generation_key
+                 AND quote_manifest.producer_job_key = quote_manifest.generation_key || ':certify'
+                JOIN m1_generation_manifests AS structure_manifest
+                  ON structure_manifest.generation_key = lineage.structure_generation_key
+                 AND structure_manifest.producer_job_key =
+                     structure_manifest.generation_key || ':certify'
+                WHERE lineage.generation_key = %s
+                  AND lineage.structure_generation_key = %s
+                """,
+                (quote_generation_key, structure_generation_key),
             )
-            if {str(row["generation_key"]) for row in cursor.fetchall()} != {
-                quote_generation_key,
-                structure_generation_key,
-            }:
+            if cursor.fetchone() is None:
                 raise IncompleteStructureGenerationError(
-                    "opportunity projection requires certified generations"
+                    "opportunity projection requires certified authoritative lineage"
                 )
             if lease is not None:
                 self._append_job_succeeded_cursor(
@@ -9127,13 +9134,11 @@ class PostgresControlPlane:
             _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """SELECT pointer.generation_key,
-                          admission.generation_key AS structure_generation_key,
+                          lineage.structure_generation_key,
                           opportunity.generation_key AS opportunity_generation_key
                    FROM m1_publication_pointers AS pointer
-                   JOIN m1_quote_admission_inputs AS admission
-                     ON admission.generation_key =
-                        'structure:' || substr(pointer.generation_key, 7)
-                    AND admission.job_key = admission.generation_key || ':quote-admit'
+                   JOIN m1_quote_generation_inputs AS lineage
+                     ON lineage.generation_key = pointer.generation_key
                    LEFT JOIN m1_opportunity_publication_pointers AS opportunity
                      ON opportunity.pointer_key = 'opportunity:current'
                    WHERE pointer.pointer_key = 'quote:current'"""

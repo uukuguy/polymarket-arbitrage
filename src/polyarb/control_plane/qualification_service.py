@@ -607,9 +607,10 @@ class PostgresQualificationFactSource:
                        manifest.record_count AS progress_count,
                        manifest.record_count AS successful_count
                 FROM public.m1_publication_pointers AS pointer
+                JOIN public.m1_quote_generation_inputs AS lineage
+                  ON lineage.generation_key = pointer.generation_key
                 JOIN public.m1_generation_manifests AS manifest
-                  ON manifest.generation_key =
-                     'structure:' || substr(pointer.generation_key, 7)
+                  ON manifest.generation_key = lineage.structure_generation_key
                 WHERE pointer.pointer_key = 'quote:current'
                   AND pointer.generation_key ~ '^quote:[0-9a-f]{64}$'
                 ORDER BY manifest.published_at DESC

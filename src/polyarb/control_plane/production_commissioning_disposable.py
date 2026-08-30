@@ -5333,14 +5333,13 @@ def complete_end_to_end_turn(
         now,
     )
     quote_generation = prepared.lease.input_identity
-    structure_digest = quote_generation.removeprefix("quote:")
     with control_plane._connection_factory() as connection:  # noqa: SLF001
         structure_row = connection.execute(
             """
-            SELECT generation_key FROM m1_structure_generation_inputs
-            WHERE bundle_digest = %s
+            SELECT structure_generation_key FROM m1_quote_generation_inputs
+            WHERE generation_key = %s
             """,
-            (structure_digest,),
+            (quote_generation,),
         ).fetchone()
     if structure_row is None:
         raise DisposableCommissioningError("end-to-end-structure-missing")

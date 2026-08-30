@@ -878,8 +878,10 @@ def test_postgres_freshness_observations_use_bounded_wrapper() -> None:
     structure_query = cursor.calls[0][0]
     assert "pointer.pointer_key = 'quote:current'" in structure_query
     assert "pointer.generation_key ~ '^quote:[0-9a-f]{64}$'" in structure_query
-    assert "'structure:' || substr(pointer.generation_key, 7)" in structure_query
-    assert "m1_quote_admission_inputs" not in structure_query
+    assert "m1_quote_generation_inputs" in structure_query
+    assert "lineage.generation_key = pointer.generation_key" in structure_query
+    assert "manifest.generation_key = lineage.structure_generation_key" in structure_query
+    assert "substr(pointer.generation_key" not in structure_query
     assert "pointer.pointer_key = 'structure:current'" not in structure_query
     quote_query = cursor.calls[2][0]
     assert "pointer.generation_key ~ '^quote:[0-9a-f]{64}$'" in quote_query
@@ -894,6 +896,23 @@ def test_postgres_freshness_observations_use_bounded_wrapper() -> None:
         "quote",
         "opportunity",
     ]
+
+
+def test_missing_quote_lineage_emits_structure_evidence_gap() -> None:
+    cursor = _FreshnessCursor([None, None, None])
+    source = PostgresQualificationFactSource(lambda: cast(Any, None))
+
+    source._insert_freshness_observations(cast(Any, cursor), now=NOW)
+
+    writes = [
+        params
+        for statement, params in cursor.calls
+        if "m1_record_qualification_freshness_ingress" in statement
+    ]
+    structure_payload = cast(Any, writes[0][3]).obj
+    assert structure_payload["data_product"] == "structure"
+    assert structure_payload["reason"] == "evidence.gap"
+    assert structure_payload["evidence_complete"] is False
 
 
 def test_qualified_without_certificate_is_sealed_on_next_tick() -> None:

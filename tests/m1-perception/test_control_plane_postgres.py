@@ -5067,6 +5067,13 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
                 (generation_key, job_key, "c" * 64, "artifact", "d" * 64, now),
             )
         connection.execute(
+            """INSERT INTO m1_quote_generation_inputs
+               (generation_key,structure_generation_key,universe_hash,
+                cadence_seconds,cadence_bucket,admitted_at)
+               VALUES (%s,%s,%s,NULL,NULL,%s)""",
+            (quote_generation, structure_generation, "e" * 64, now),
+        )
+        connection.execute(
             """INSERT INTO m1_publication_pointers
                (pointer_key,generation_key,expected_generation_key,lease_epoch,published_at)
                VALUES ('quote:current',%s,NULL,1,%s)""",
@@ -5108,6 +5115,55 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
             now=now,
         )
     assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [row]
+
+    successor_quote = f"quote:{'f' * 64}"
+    successor_job = f"{successor_quote}:certify"
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """INSERT INTO m1_jobs
+               (job_key,job_type,input_identity,state,created_at,updated_at)
+               VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)""",
+            (successor_job, successor_quote, now, now),
+        )
+        connection.execute(
+            """INSERT INTO m1_generation_manifests
+               (generation_key,producer_job_key,input_digest,artifact_key,
+                artifact_digest,record_count,published_at)
+               VALUES (%s,%s,%s,'successor-quote',%s,1,%s)""",
+            (successor_quote, successor_job, "1" * 64, "2" * 64, now),
+        )
+        connection.execute(
+            """INSERT INTO m1_quote_generation_inputs
+               (generation_key,structure_generation_key,universe_hash,
+                cadence_seconds,cadence_bucket,admitted_at)
+               VALUES (%s,%s,%s,300,2,%s)""",
+            (successor_quote, structure_generation, "e" * 64, now),
+        )
+        connection.execute(
+            """UPDATE m1_publication_pointers
+               SET generation_key=%s,expected_generation_key=%s,lease_epoch=2,published_at=%s
+               WHERE pointer_key='quote:current'""",
+            (successor_quote, quote_generation, now),
+        )
+    successor_row = {**row, "group_id": "group-b", "event_id": "event-b"}
+    control_plane.publish_opportunity_projection(
+        quote_generation_key=successor_quote,
+        structure_generation_key=structure_generation,
+        rows=(successor_row,),
+        now=now + timedelta(seconds=1),
+    )
+    assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [
+        successor_row
+    ]
+    with control_plane._connection_factory() as connection:
+        projections = connection.execute(
+            """SELECT generation_key,structure_generation_key
+               FROM m1_opportunity_projections ORDER BY generation_key"""
+        ).fetchall()
+    assert projections == [
+        (quote_generation, structure_generation),
+        (successor_quote, structure_generation),
+    ]
 
 
 def test_current_opportunities_is_one_bounded_data_statement_and_one_client_round() -> None:
@@ -5208,6 +5264,13 @@ def test_opportunity_terminal_success_event_rolls_back_projection_and_pointer(
                 (generation_key, job_key, "c" * 64, "artifact", "d" * 64, now),
             )
         connection.execute(
+            """INSERT INTO m1_quote_generation_inputs
+               (generation_key,structure_generation_key,universe_hash,
+                cadence_seconds,cadence_bucket,admitted_at)
+               VALUES (%s,%s,%s,NULL,NULL,%s)""",
+            (quote_generation, structure_generation, "e" * 64, now),
+        )
+        connection.execute(
             """
             INSERT INTO m1_publication_pointers
                 (pointer_key, generation_key, expected_generation_key, lease_epoch, published_at)
@@ -5288,7 +5351,7 @@ def test_current_quote_projection_inputs_follows_quote_to_structure_admission_co
 ) -> None:
     now = _now()
     structure_generation = "structure:" + "a" * 64
-    quote_generation = "quote:" + "a" * 64
+    quote_generation = "quote:" + "f" * 64
     batch_key = f"{quote_generation}:batch:0"
     leg_payload = psycopg.types.json.Jsonb(
         [
@@ -5333,6 +5396,13 @@ def test_current_quote_projection_inputs_follows_quote_to_structure_admission_co
                 (job_key, job_type, job_key, now, now),
             )
         connection.execute(
+            """INSERT INTO m1_quote_generation_inputs
+               (generation_key,structure_generation_key,universe_hash,
+                cadence_seconds,cadence_bucket,admitted_at)
+               VALUES (%s,%s,%s,300,1,%s)""",
+            (quote_generation, structure_generation, "b" * 64, now),
+        )
+        connection.execute(
             """INSERT INTO m1_publication_pointers
                (pointer_key,generation_key,expected_generation_key,lease_epoch,published_at)
                VALUES ('quote:current',%s,NULL,1,%s)""",
@@ -5346,7 +5416,7 @@ def test_current_quote_projection_inputs_follows_quote_to_structure_admission_co
                 f"{structure_generation}:quote-admit",
                 structure_generation,
                 "b" * 64,
-                f"quote:{'b' * 64}",
+                quote_generation,
                 now,
             ),
         )
