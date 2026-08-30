@@ -11,7 +11,11 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from .models import JobLease, QuoteBatchLeg
-from .postgres import PostgresControlPlane, StaleLeaseError
+from .postgres import (
+    IncompleteStructureGenerationError,
+    PostgresControlPlane,
+    StaleLeaseError,
+)
 from .production_commissioning_runner import AttackIdentity, AttackStageReceipt
 from .reconciler import RuntimeReconciler
 from .recovery_executor import RecoveryExecutor
@@ -1677,6 +1681,333 @@ class RetryBudgetCommissioningAdapter:
         )
 
 
+class SourceReceiptGapCommissioningAdapter:
+    """Prove a missing source receipt gates, then releases, materialization."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._window_key: str | None = None
+        self._withheld_lease: JobLease | None = None
+        self._withheld_attempt_id: str | None = None
+        self._materializer_lease: JobLease | None = None
+        self._bundle: StructureBundleArtifact | None = None
+        self._source_digest: str | None = None
+        self._recovered_proof: dict[str, str] | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "source-receipt-gap"
+            or identity.node_id != "structure-materialize"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _attempt_id(self, lease: JobLease) -> str:
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (lease.job_key, lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("withheld-attempt-missing")
+        return str(row[0])
+
+    def _assert_incomplete_barrier(self) -> str:
+        window_key = self._need(self._window_key, "source-window-missing")
+        withheld = self._need(self._withheld_lease, "withheld-lease-missing")
+        try:
+            self._control_plane.structure_source_window_digest(window_key)
+        except IncompleteStructureGenerationError:
+            pass
+        else:
+            raise DisposableCommissioningError("source-gap-not-detected")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT source_window.state,
+                       count(DISTINCT input.job_key),
+                       count(DISTINCT receipt.job_key),
+                       array_agg(input.job_key ORDER BY input.job_key)
+                           FILTER (WHERE receipt.job_key IS NULL),
+                       count(DISTINCT materializer.job_key),
+                       count(DISTINCT bundle.window_key),
+                       (SELECT count(*) FROM m1_incidents),
+                       (SELECT count(*) FROM m1_recovery_actions)
+                FROM m1_structure_source_windows AS source_window
+                JOIN m1_structure_source_page_inputs AS input
+                  ON input.window_key = source_window.window_key
+                LEFT JOIN m1_structure_source_page_receipts AS receipt
+                  ON receipt.job_key = input.job_key
+                LEFT JOIN m1_jobs AS materializer
+                  ON materializer.job_key = source_window.window_key || ':materialize'
+                LEFT JOIN m1_structure_source_window_bundles AS bundle
+                  ON bundle.window_key = source_window.window_key
+                WHERE source_window.window_key = %s
+                GROUP BY source_window.state
+                """,
+                (window_key,),
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT state FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (withheld.job_key, withheld.lease_epoch),
+            ).fetchone()
+        expected = (
+            "events-complete",
+            3,
+            2,
+            [withheld.job_key],
+            0,
+            0,
+            0,
+            0,
+        )
+        if shape != expected or attempt != ("running",):
+            raise DisposableCommissioningError("source-gap-barrier-shape")
+        return withheld.job_key
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        window_key = identity.experiment_id
+        self._window_key = window_key
+        self._control_plane.admit_structure_source_window(
+            window_key=window_key,
+            now=self._started_at,
+        )
+        event = _claim(self._control_plane, "structure-fetch", self._started_at)
+        _record_progress(self._control_plane, event, self._started_at)
+        self._control_plane.record_structure_source_page(
+            event,
+            artifact_key=f"structure-source/{identity.experiment_id}/events-0.json",
+            artifact_digest=sha256(f"{identity.experiment_id}:events".encode()).hexdigest(),
+            next_cursor=None,
+            completed=True,
+            record_count=1,
+            market_batches=(("market-a",), ("market-b",)),
+            now=self._started_at + timedelta(seconds=1),
+        )
+        first_market = _claim(
+            self._control_plane,
+            "structure-fetch",
+            self._started_at + timedelta(seconds=2),
+        )
+        _record_progress(
+            self._control_plane,
+            first_market,
+            self._started_at + timedelta(seconds=2),
+        )
+        self._control_plane.record_structure_source_page(
+            first_market,
+            artifact_key=f"structure-source/{identity.experiment_id}/markets-0.json",
+            artifact_digest=sha256(f"{identity.experiment_id}:markets:0".encode()).hexdigest(),
+            next_cursor=None,
+            completed=True,
+            record_count=1,
+            now=self._started_at + timedelta(seconds=3),
+        )
+        withheld = _claim(
+            self._control_plane,
+            "structure-fetch",
+            self._started_at + timedelta(seconds=4),
+        )
+        _record_progress(
+            self._control_plane,
+            withheld,
+            self._started_at + timedelta(seconds=4),
+        )
+        self._withheld_lease = withheld
+        self._withheld_attempt_id = self._attempt_id(withheld)
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"attempt:{self._withheld_attempt_id}",
+            occurred_at=self._started_at + timedelta(seconds=4),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._need(self._withheld_lease, "preflight-missing")
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{self._withheld_attempt_id}",
+            occurred_at=self._started_at + timedelta(seconds=5),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        missing_job_key = self._assert_incomplete_barrier()
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"barrier:{identity.experiment_id}:missing:{missing_job_key}",
+            occurred_at=self._started_at + timedelta(seconds=6),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_incomplete_barrier()
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"attempt:{self._withheld_attempt_id}",
+            occurred_at=self._started_at + timedelta(seconds=7),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_incomplete_barrier()
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"barrier:{identity.experiment_id}:partial-publication-absent",
+            occurred_at=self._started_at + timedelta(seconds=8),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        withheld = self._need(self._withheld_lease, "withheld-lease-missing")
+        window_key = self._need(self._window_key, "source-window-missing")
+        receipt_at = self._started_at + timedelta(seconds=9)
+        self._control_plane.record_structure_source_page(
+            withheld,
+            artifact_key=f"structure-source/{identity.experiment_id}/markets-1.json",
+            artifact_digest=sha256(f"{identity.experiment_id}:markets:1".encode()).hexdigest(),
+            next_cursor=None,
+            completed=True,
+            record_count=1,
+            now=receipt_at,
+        )
+        materializer = _claim(
+            self._control_plane,
+            "structure-materialize",
+            receipt_at + timedelta(seconds=1),
+        )
+        self._materializer_lease = materializer
+        _record_progress(
+            self._control_plane,
+            materializer,
+            receipt_at + timedelta(seconds=1),
+        )
+        source_digest = self._control_plane.structure_source_window_digest(window_key)
+        self._source_digest = source_digest
+        bundle = StructureBundleArtifact.from_bytes(
+            f'{{"kind":"{identity.attack_id}"}}\n'.encode()
+        )
+        self._bundle = bundle
+        completed_at = receipt_at + timedelta(seconds=2)
+        specs = self._control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=_identity(
+                identity.experiment_id,
+                window_key,
+                source_digest,
+                "gamma-source-window-events-v3-sharded",
+            ),
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=completed_at,
+        )
+        if len(specs) != 1:
+            raise DisposableCommissioningError("source-gap-successor-shape")
+        self._recovered_proof = _normal_turn_proof(self._control_plane, materializer)
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
+            occurred_at=completed_at,
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        window_key = self._need(self._window_key, "source-window-missing")
+        materializer = self._need(self._materializer_lease, "materializer-lease-missing")
+        bundle = self._need(self._bundle, "source-bundle-missing")
+        source_digest = self._need(self._source_digest, "source-digest-missing")
+        proof = self._need(self._recovered_proof, "recovery-proof-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT source_window.state,
+                       count(DISTINCT input.job_key),
+                       count(DISTINCT receipt.job_key),
+                       count(DISTINCT bundle.window_key),
+                       count(DISTINCT range_input.job_key),
+                       (SELECT count(*) FROM m1_incidents),
+                       (SELECT count(*) FROM m1_recovery_actions)
+                FROM m1_structure_source_windows AS source_window
+                JOIN m1_structure_source_page_inputs AS input
+                  ON input.window_key = source_window.window_key
+                LEFT JOIN m1_structure_source_page_receipts AS receipt
+                  ON receipt.job_key = input.job_key
+                LEFT JOIN m1_structure_source_window_bundles AS bundle
+                  ON bundle.window_key = source_window.window_key
+                LEFT JOIN m1_structure_range_inputs AS range_input
+                  ON range_input.bundle_digest = bundle.bundle_digest
+                WHERE source_window.window_key = %s
+                GROUP BY source_window.state
+                """,
+                (window_key,),
+            ).fetchone()
+            attempt = connection.execute(
+                """
+                SELECT state FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (materializer.job_key, materializer.lease_epoch),
+            ).fetchone()
+        persisted_bundle = self._control_plane.structure_source_window_bundle(window_key)
+        if shape != ("complete", 3, 3, 1, 1, 0, 0):
+            raise DisposableCommissioningError("source-gap-recovery-shape")
+        if attempt != ("succeeded",):
+            raise DisposableCommissioningError("source-gap-materializer-not-succeeded")
+        if persisted_bundle != {
+            "source_digest": source_digest,
+            "bundle_key": bundle.key,
+            "bundle_digest": bundle.sha256,
+        }:
+            raise DisposableCommissioningError("source-gap-bundle-mismatch")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=1),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -2233,6 +2564,7 @@ __all__ = [
     "PreparedNormalTurn",
     "ProgressStallCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",
+    "SourceReceiptGapCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",
     "WorkerExitCommissioningAdapter",
     "complete_normal_turn",

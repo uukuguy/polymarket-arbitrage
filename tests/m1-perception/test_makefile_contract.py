@@ -726,6 +726,20 @@ def test_make_help_lists_worker_exit_commissioning_harness() -> None:
     assert "expired-worker reclaim" in result.stdout
 
 
+def test_make_help_lists_source_receipt_gap_commissioning_harness() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "m1-production-commissioning-source-receipt-gap:" in result.stdout
+    assert "source receipt barrier" in result.stdout
+
+
 def test_make_stale_owner_commissioning_requires_test_dsn_before_fake_uv(
     tmp_path: Path,
 ) -> None:
@@ -835,6 +849,31 @@ def test_make_worker_exit_commissioning_requires_test_dsn_before_fake_uv(
         [
             "make",
             "m1-production-commissioning-worker-exit",
+            "evidence_root=evidence",
+            f"expected_release={'a' * 40}",
+            f"expected_config=sha256:{'b' * 64}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "POLYARB_CONTROL_PLANE_TEST_DSN" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+def test_make_source_receipt_gap_commissioning_requires_test_dsn_before_fake_uv(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env.pop("POLYARB_CONTROL_PLANE_TEST_DSN", None)
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-source-receipt-gap",
             "evidence_root=evidence",
             f"expected_release={'a' * 40}",
             f"expected_config=sha256:{'b' * 64}",
@@ -1077,6 +1116,47 @@ def test_make_worker_exit_commissioning_executes_exact_harness_command(
             "-m",
             "polyarb.control_plane.production_commissioning_harness",
             "worker-exit",
+            "--root",
+            "evidence",
+            "--release-id",
+            release,
+            "--config-id",
+            config,
+            "--json",
+        ]
+    ]
+
+
+def test_make_source_receipt_gap_commissioning_executes_exact_harness_command(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    release = "a" * 40
+    config = f"sha256:{'b' * 64}"
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-source-receipt-gap",
+            "evidence_root=evidence",
+            f"expected_release={release}",
+            f"expected_config={config}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.production_commissioning_harness",
+            "source-receipt-gap",
             "--root",
             "evidence",
             "--release-id",

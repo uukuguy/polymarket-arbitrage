@@ -21,6 +21,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
+    SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
     WorkerExitCommissioningAdapter,
     complete_normal_turn,
@@ -921,6 +922,78 @@ def test_retry_budget_adapter_opens_one_incident_and_releases_one_successful_pro
         "recovered",
     ]
     assert probe_action == ("probe-circuit", "completed", "succeeded")
+
+
+def test_source_receipt_gap_adapter_releases_one_complete_materializer_turn(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:structure-materialize:source-receipt-gap",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="structure-materialize",
+        attack_id="source-receipt-gap",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=SourceReceiptGapCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=60),
+        ),
+        evidence_dir=tmp_path / "structure-materialize",
+    )
+
+    assert str(proof["detector_fact_id"]).startswith("barrier:")
+    assert str(proof["recovery_action_id"]).startswith("attempt:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith(
+        "postgres:m1_structure_source_window_bundles:"
+    )
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        shape = connection.execute(
+            """
+            SELECT source_window.state,
+                   count(DISTINCT input.job_key),
+                   count(DISTINCT receipt.job_key),
+                   count(DISTINCT bundle.window_key),
+                   count(DISTINCT range_input.job_key)
+            FROM m1_structure_source_windows AS source_window
+            JOIN m1_structure_source_page_inputs AS input
+              ON input.window_key = source_window.window_key
+            LEFT JOIN m1_structure_source_page_receipts AS receipt
+              ON receipt.job_key = input.job_key
+            LEFT JOIN m1_structure_source_window_bundles AS bundle
+              ON bundle.window_key = source_window.window_key
+            LEFT JOIN m1_structure_range_inputs AS range_input
+              ON range_input.bundle_digest = bundle.bundle_digest
+            WHERE source_window.window_key = %s
+            GROUP BY source_window.state
+            """,
+            (identity.experiment_id,),
+        ).fetchone()
+        materializer = connection.execute(
+            """
+            SELECT job.state, count(attempt.attempt_id), min(attempt.state)
+            FROM m1_jobs AS job
+            JOIN m1_job_attempts AS attempt ON attempt.job_key = job.job_key
+            WHERE job.job_key = %s
+            GROUP BY job.state
+            """,
+            (f"{identity.experiment_id}:materialize",),
+        ).fetchone()
+        incidents = connection.execute("SELECT count(*) FROM m1_incidents").fetchone()
+        recovery_actions = connection.execute(
+            "SELECT count(*) FROM m1_recovery_actions"
+        ).fetchone()
+
+    assert shape == ("complete", 3, 3, 1, 1)
+    assert materializer == ("succeeded", 1, "succeeded")
+    assert incidents == (0,)
+    assert recovery_actions == (0,)
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

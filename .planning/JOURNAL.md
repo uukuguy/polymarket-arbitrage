@@ -12134,3 +12134,33 @@ planning/hash integrity, then implement the next node-specific disposable
 attack adapter beginning with `source-receipt-gap`. Do not rebuild another
 image until the remaining disposable adapters can be rerun together under one
 later immutable release/config; do not start production canaries or qualification.
+
+### SESSION 359 — 2026-08-30 (source receipt gap commissioning)
+
+- [CLIMB H-045] Registered an in-flight production-enablement hypothesis for a
+  missing Structure source-page receipt at the materializer fan-in boundary.
+- [REAL NONTERMINAL STATE] The adapter admits one source window and three real
+  producer inputs, completes two receipts, then holds the exact third fenced
+  attempt open. It never mutates timestamps, receipts, jobs or leases directly.
+- [NEGATIVE PROOF] The public source-window digest reports typed incomplete
+  input and the detector names the missing job. During the gap there is no
+  materializer, partial bundle, downstream range, incident or recovery action.
+- [NORMAL RELEASE] Completing the exact held receipt through the producer API
+  releases one materializer turn. Its real transaction commits one complete
+  bundle, one normalizer range and one succeeded attempt.
+- [NO ARBITRARY TIMEOUT] Fan-in readiness is receipt-driven. Producer
+  progress/lease/retry policies remain the only escalation clocks; the barrier
+  does not introduce another timer or restart policy.
+- [HARNESS/ENTRY] Isolated migrated PostgreSQL execution, zero database/role
+  residue, explicit loopback DSN guard, exact Make argv and climb profile
+  contracts pass. Ruff passes and production-module Pyright reports zero errors.
+- [EXPECTED GUARD] The grouped regression passed except for the exact-HEAD image
+  build guard, which correctly rejected the current uncommitted runtime inputs.
+- [BOUNDARY] No production DB/provider, Fly action, SSH, deployment, Docker
+  build, canary, qualification, Colima or global context mutation occurred;
+  Docker context remained `orbstack`.
+
+[NEXT] Commit Plan 05.6-233 without protected user files, rerun the exact-HEAD
+image guard and confirm H-045 through climb. Then implement the next disposable
+fan-in attack, preferring `quote-batch-incomplete`; do not build another image
+until all remaining disposable adapters are ready for one combined release/config.

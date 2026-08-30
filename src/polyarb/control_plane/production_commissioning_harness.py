@@ -15,6 +15,7 @@ from .production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
+    SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
     WorkerExitCommissioningAdapter,
 )
@@ -35,6 +36,7 @@ _PROGRESS_STALL_ATTACK_ID: Final[str] = "progress-stall"
 _RETRY_BUDGET_ATTACK_ID: Final[str] = "retry-budget-exhaustion"
 _HEARTBEAT_OUTAGE_ATTACK_ID: Final[str] = "heartbeat-outage"
 _WORKER_EXIT_ATTACK_ID: Final[str] = "worker-exit"
+_SOURCE_RECEIPT_GAP_ATTACK_ID: Final[str] = "source-receipt-gap"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -215,6 +217,24 @@ def run_worker_exit_commissioning(
     )
 
 
+def run_source_receipt_gap_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove the source receipt barrier on its sole materializer target."""
+
+    return _run_commissioning(
+        attack_id=_SOURCE_RECEIPT_GAP_ATTACK_ID,
+        adapter_factory=SourceReceiptGapCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("structure-materialize",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -224,6 +244,7 @@ def _parser() -> argparse.ArgumentParser:
         "retry-budget",
         "heartbeat-outage",
         "worker-exit",
+        "source-receipt-gap",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -241,6 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "retry-budget": run_retry_budget_commissioning,
         "heartbeat-outage": run_heartbeat_outage_commissioning,
         "worker-exit": run_worker_exit_commissioning,
+        "source-receipt-gap": run_source_receipt_gap_commissioning,
     }
     try:
         result = runners[args.command](
@@ -261,6 +283,7 @@ __all__ = [
     "run_heartbeat_outage_commissioning",
     "run_progress_stall_commissioning",
     "run_retry_budget_commissioning",
+    "run_source_receipt_gap_commissioning",
     "run_stale_owner_commissioning",
     "run_worker_exit_commissioning",
 ]

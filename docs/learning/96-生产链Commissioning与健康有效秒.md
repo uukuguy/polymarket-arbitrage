@@ -238,3 +238,21 @@ progress regression 和 release/config/policy/role identity 漂移。
 因此 worker-exit 的完整闭环是：到期前 fence → 到期后 reclaim → 旧写拒绝 → 新 epoch
 业务成功 → incident recovered → 同一资格 epoch 恢复累计。若缺任一步，只能保持 block，
 不能用“进程已经重启”冒充生产恢复。
+
+### 缺一条 Structure source receipt，为什么既不报警也不启动恢复动作？
+
+因为它还不是故障，而是 fan-in barrier 的合法非终态。Structure window 先登记全部
+`m1_structure_source_page_inputs`，每个 producer 通过带 lease epoch 的正式 API 提交
+immutable receipt。只完成两条、还差一条时，`structure_source_window_digest()` 必须返回
+typed incomplete condition；此时不能创建 materializer，更不能发布部分 bundle。
+
+commissioning 的 `source-receipt-gap` 攻击刻意持有最后一个真实 producer attempt，而不是
+直接改 receipt 表或把时间戳“老化”。它同时验证精确缺失 job identity、`3 inputs / 2 receipts`、
+零 materializer、零 bundle、零 downstream range、零 incident 和零 recovery action。最后再通过
+同一个 fenced producer API 提交缺失 receipt；正常事务边界只释放一个 materializer turn，
+并产出一个完整 bundle 和一个 normalizer range。
+
+这条预案的关键不是“等多久后重启”，而是“durable input 是否齐全”。如果 producer 后续真的
+超过自己的持久化 progress/lease/retry policy，已有 progress-stall、worker-exit 或 retry-budget
+路径会单独接管；barrier 本身不发明第二套 timeout。这样慢任务不会被任意外层时钟误杀，真正
+失效的 producer 又不会永久静默。
