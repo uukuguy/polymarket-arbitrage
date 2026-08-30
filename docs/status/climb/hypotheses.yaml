@@ -151,18 +151,35 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-042
   description: Three identical typed failures can exhaust each node's shared retry
-    budget into one deduplicated circuit incident, after which only a policy-due
-    fenced probe action releases one successor epoch whose real business success
-    closes the circuit and incident.
+    budget into one deduplicated circuit incident, after which only a policy-due fenced
+    probe action releases one successor epoch whose real business success closes the
+    circuit and incident.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Prove retry exhaustion cannot silently strand an M1 node or create
     duplicate incidents, private backoff clocks, ordinary-worker probes, or synthetic
     recovery success across the eight-node chain.
   cost_h: 1.0
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T18:30:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 47
+    run: 20260830-022416-h-042
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
