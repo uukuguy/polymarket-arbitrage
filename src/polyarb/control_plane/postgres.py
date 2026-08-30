@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -242,7 +243,10 @@ def _persisted_legs(value: object) -> tuple[QuoteBatchLeg, ...]:
     return tuple(legs)
 
 
-ConnectionFactory = Callable[[], psycopg.Connection[Any]]
+# Both direct psycopg connections and the bounded scoped pool return a connection
+# context manager.  Keeping that contract here prevents callers from needing an
+# unsafe cast when production uses the shared pool.
+ConnectionFactory = Callable[[], AbstractContextManager[psycopg.Connection[Any]]]
 
 _SNAPSHOT_RUNTIME_CONTROLLER_ID = "m1-runtime-reconciler"
 _SNAPSHOT_RUNTIME_INITIAL_STAGE = "started"

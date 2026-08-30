@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 from polyarb.perception.fault_runtime import FaultRuntime
@@ -127,12 +128,19 @@ def test_capacity_worker_builds_without_opportunity_supervisor(tmp_path) -> None
 
 def test_daemon_control_plane_connection_has_bounded_connect_timeout(monkeypatch) -> None:
     import polyarb.daemon.main as daemon_main
+    from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE
+    from polyarb.control_plane.db_role_contract import CONTROLLED_CONNECTION_OPTIONS
 
     calls: list[tuple[str, dict[str, object]]] = []
 
     class Connection:
+        autocommit = False
+
         def execute(self, query, params):
             calls.append((query, {"params": params}))
+            return SimpleNamespace(
+                fetchone=lambda: ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+            )
 
         def commit(self):
             calls.append(("commit", {}))
@@ -142,26 +150,37 @@ def test_daemon_control_plane_connection_has_bounded_connect_timeout(monkeypatch
 
     sentinel = Connection()
 
-    def connect(dsn: str, **kwargs: object) -> object:
-        calls.append((dsn, kwargs))
-        return sentinel
+    class ConnectionPool:
+        def __init__(self, dsn: str, **kwargs: object) -> None:
+            calls.append((dsn, kwargs))
+            configure = kwargs["configure"]
+            assert callable(configure)
+            configure(sentinel)
 
-    monkeypatch.setattr("polyarb.control_plane.db_role_contract.psycopg.connect", connect)
+        def connection(self):
+            return nullcontext(sentinel)
+
+        def close(self) -> None:
+            return None
+
+        def get_stats(self) -> dict[str, int]:
+            return {}
+
+    monkeypatch.setattr("polyarb.control_plane.db_role_contract.ConnectionPool", ConnectionPool)
     control_plane = daemon_main._build_daemon_control_plane("postgresql://control-plane")
 
     assert control_plane is not None
-    assert control_plane._connection_factory() is sentinel
-    assert calls == [
-        (
-            "postgresql://control-plane",
-            {"connect_timeout": 5, "options": "-csearch_path=pg_catalog,public"},
-        ),
-        (
-            "SELECT pg_catalog.set_config('search_path', %s, false), "
-            "pg_catalog.set_config('statement_timeout', %s, false), "
-            "pg_catalog.set_config('lock_timeout', %s, false)",
-            {"params": ("pg_catalog,public", "5000ms", "1000ms")},
-        ),
-        ("commit", {}),
-    ]
+    with control_plane._connection_factory() as connection:
+        assert connection is sentinel
+    dsn, pool_kwargs = calls.pop(0)
+    assert dsn == "postgresql://control-plane"
+    assert pool_kwargs["kwargs"] == {
+        "connect_timeout": 5,
+        "options": CONTROLLED_CONNECTION_OPTIONS,
+    }
+    assert pool_kwargs["max_size"] == CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE
+    bootstrap_query, bootstrap_kwargs = calls[0]
+    assert "pg_catalog.set_config('search_path', %s, false)" in bootstrap_query
+    assert bootstrap_kwargs == {"params": ("pg_catalog,public", "5000ms", "1000ms")}
+    assert sentinel.autocommit is False
     assert daemon_main._build_daemon_control_plane("   ") is None
