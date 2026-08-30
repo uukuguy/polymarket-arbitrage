@@ -1,0 +1,160 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-30T12:35:55Z",
+  "status": "requested",
+  "operator": "Codex",
+  "source_release_sha": "e17f1359957bd8a585df62d68aa7b4bdbf2c7820",
+  "production_database_revision": "036",
+  "target_database_revision": "036",
+  "qualification_config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+  "commissioning": {
+    "evidence": "../commissioning-h057-e17f1359/commissioning-evidence.json",
+    "config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+    "evidence_sha256": "67f9cd4f84a27c5f2647a4033a94e62ee9007668d591bedd8439bfe79244969e",
+    "node_count": 8,
+    "attack_proof_count": 66,
+    "status": "ready",
+    "qualification_may_start": true
+  },
+  "target_image": {
+    "tag": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v25-e17f1359",
+    "digest": "registry.fly.io/polyarb-control-worker-m1@sha256:ab40ea0094d8a010127f3417e632459dffdc203a22e9d59d881c3867e5025263",
+    "local_image_id": "sha256:978f5e9b294004fa6af3ba40b5f86fffe1cc98bea5aba45c4ed3449a8d37f446",
+    "architecture": "amd64",
+    "user": "polyarb",
+    "alembic_head": "036",
+    "oci_revision": "e17f1359957bd8a585df62d68aa7b4bdbf2c7820"
+  },
+  "read_only_preflight": {
+    "database_revision": "036",
+    "database_role_admin": "ready",
+    "exact_runtime_app_count": 6,
+    "exact_runtime_machine_count": 8,
+    "required_secret_names_present": true,
+    "runtime_recovery_mode": "observe-only",
+    "runtime_recovery_allowed_targets": [],
+    "known_degraded_state": {
+      "controller_machine": "6e82036dce4958",
+      "controller_state": "stopped",
+      "structure_machine": "683e46ea500dd8",
+      "structure_state": "stopped",
+      "qualification_machine": "876077f0274598",
+      "qualification_state": "stopped",
+      "expired_lease_count": 1,
+      "open_circuit_count": 1,
+      "exact_recovery_target": "structure:52722c3014cdb6336fe840da6ffbfe6def5abade5e7f086aa2d2c344669c0c36:normalize:events:434",
+      "exact_recovery_action": "probe-circuit"
+    }
+  },
+  "exact_targets": [
+    {
+      "app": "polyarb-runtime-controller-m1",
+      "machine_id": "6e82036dce4958",
+      "process_group": "controller",
+      "state_before": "stopped",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "04c2088e33c6f86b3b341cac0f622a59ad30c62575ae797f9d8b8917c848a4d8"
+    },
+    {
+      "app": "polyarb-control-worker-m1",
+      "machine_id": "683e46ea500dd8",
+      "process_group": "structure_range",
+      "state_before": "stopped",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "a26ab28c2f7f59b5fc57780a35028051c7b55a93752c44a0aa73178eab31d852"
+    },
+    {
+      "app": "polyarb-control-worker-m1",
+      "machine_id": "e82d1220b2d138",
+      "process_group": "coordinator",
+      "state_before": "started",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "b7b3cb38ef21ad127610815bc85a3b43f70109b067cc162a7a7922bc727a2687"
+    },
+    {
+      "app": "polyarb-control-worker-m1",
+      "machine_id": "4d895231f66748",
+      "process_group": "quote_batch",
+      "state_before": "started",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "e2889aa34f92708e3d5e7053af01acd0dc70d6b80e1ef262dbd95939fb38c764"
+    },
+    {
+      "app": "polyarb-control-api",
+      "machine_id": "d8d0e27a734158",
+      "process_group": "api",
+      "state_before": "started",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "89d7b5818df6781cd2fbb798cb095a8d7b62b3c936e6b2783e8f6892d81e3e2e"
+    },
+    {
+      "app": "polyarb-control-runtime-event-writer",
+      "machine_id": "28654e35a73d08",
+      "process_group": "writer",
+      "state_before": "started",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "9e3dabd3f1451b440f138ef82b163b2830f2d55d4b0a4ca685199e6296b14709"
+    },
+    {
+      "app": "polyarb-control-alert",
+      "machine_id": "d891e941a41dd8",
+      "process_group": "watchdog",
+      "state_before": "started",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v22-5c3ee3cd",
+      "non_image_config_sha256": "ede2d6f1aec6759f207cd661d3515954bfa9d8032e9139e8103cf9563fd4916d"
+    },
+    {
+      "app": "polyarb-qualification-worker-m1",
+      "machine_id": "876077f0274598",
+      "process_group": "qualification",
+      "state_before": "stopped",
+      "old_image": "registry.fly.io/polyarb-control-worker-m1:m1-runtime-v23-e8dc35b6",
+      "non_image_config_sha256": "8fbc7155ba77a1ce440e154b021fe5f48e335d15256acfb3a3725c3b20257b22",
+      "authorized_env_overlay": {
+        "POLYARB_QUALIFICATION_RELEASE_ID": "e17f1359957bd8a585df62d68aa7b4bdbf2c7820",
+        "POLYARB_QUALIFICATION_CONFIG_ID": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90"
+      }
+    }
+  ],
+  "ordered_effects": [
+    "update the stopped controller in place, preserve observe-only and empty allowlist, start it, and require fresh lease/ticks with zero recovery actions",
+    "update the stopped Structure worker in place and start it",
+    "roll coordinator, Quote, API, runtime-event writer and alert one at a time, preserving each Machine ID and all non-image configuration",
+    "update qualification in place with only the image plus exact release/config identity overlay, but keep it stopped",
+    "execute only the exact due probe-circuit target after a fresh candidate read; reject any changed target, action, attempt or lease fence",
+    "require fresh Structure certification, Quote admission/certification and Opportunity publication before starting qualification",
+    "start the existing qualification Machine and require a new v2 epoch bound to the exact release/config identity"
+  ],
+  "maximum_effect": [
+    "update only the eight exact existing Machines",
+    "briefly stop and restart only the five currently running target Machines, sequentially",
+    "execute at most one exact fenced probe-circuit recovery action for the named Structure target",
+    "start only the three existing stopped Machines after their exact updates and gates",
+    "create a fresh append-only qualification v2 epoch; preserve all prior epochs and evidence"
+  ],
+  "forbidden_effects": [
+    "no new, deleted or replaced app or resident Machine",
+    "no database migration, row edit, role, credential, privilege, owner, extension or search-path change",
+    "no recovery allowlist or recovery-mode expansion",
+    "no second or non-exact recovery action",
+    "no env change except the two exact qualification identity keys",
+    "no VM, region, volume, IP, command, process group, restart policy, stop policy or secret change",
+    "no fault injection, wallet, signing, order, balance or trade action"
+  ],
+  "rollback": [
+    "stop qualification first if a downstream gate fails",
+    "restore each changed Machine to its recorded immutable old image in reverse order",
+    "restore the qualification release/config env values together with its old image",
+    "restore every Machine to its recorded pre-rollout started or stopped state",
+    "require exact topology, unchanged non-image config hashes, observe-only empty-allowlist controller and append-only evidence after rollback"
+  ],
+  "cloud_actions_performed_before_request": {
+    "target_image_built_and_pushed": true,
+    "machine_updated": false,
+    "machine_started_or_stopped": false,
+    "database_mutated": false,
+    "recovery_action_executed": false
+  },
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

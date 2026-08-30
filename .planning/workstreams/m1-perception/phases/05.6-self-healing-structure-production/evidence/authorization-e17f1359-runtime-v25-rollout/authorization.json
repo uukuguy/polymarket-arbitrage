@@ -1,0 +1,19 @@
+{
+  "artifact_version": 1,
+  "authorized_at": "2026-08-30T12:35:55Z",
+  "status": "authorized",
+  "authorized_by": "user",
+  "operator": "Codex",
+  "rollout_request": "rollout-request.json",
+  "rollout_request_sha256": "6549fdc2a7adbd1af3aa7f372bd8aa92f05bfcee1b1fd399d9c3484aad7f0e4a",
+  "authorization_basis": [
+    "批准并完全授权",
+    "批准授权包",
+    "要找出同一 public.digest 缺陷耗尽重试并停止的原因并解决，需要的授权都批准。",
+    "climb 持续自主推进"
+  ],
+  "authorized_scope": "all ordered effects and maximum effects in the hash-bound rollout request, subject to every prerequisite and forbidden-effect boundary",
+  "authorization_excludes": "any effect listed as forbidden in the hash-bound rollout request",
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}
