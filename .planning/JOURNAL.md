@@ -12589,3 +12589,32 @@ global context, push, or deploy.
 [NEXT] Commit Plan 05.6-241 without protected user files. Implement and confirm
 the sole remaining disposable `stale-quote-pointer` attack before considering
 the separately authorized four production canaries.
+
+### SESSION 376 — 2026-08-30 (stale Quote authority closed)
+
+- [REAL DEFECT] `opportunity-certify` authenticated `quote:current` identity
+  but did not enforce the already canonical 300-second Quote business SLA, so
+  a stale complete generation could still publish a newly timestamped
+  Opportunity projection.
+- [CENTRAL POLICY] The new gate imports the sole SLA from `quote_timing.py`,
+  checks the oldest batch, and rejects before any R2 GET or Opportunity write;
+  no private timeout was introduced.
+- [CHAIN TRUTH] Runtime failure is `freshness.quote / blocked`; incident and
+  qualification impact are `freshness.quote / breaking`. These are two
+  vocabulary projections of one cause, not contradictory severity claims.
+- [CROSS-LINEAGE RECOVERY] A stable `freshness:quote` incident spans job keys.
+  Fresh Structure/Quote lineage publishes one current Opportunity and its
+  successful lease resolves the original freshness incident.
+- [COMMISSIONING] The sole missing disposable attack now passes the full real
+  PostgreSQL intent→preflight→inject→detect→recovery→cleanup→verify protocol
+  with no stale projection rows or pointer.
+- [ORBSTACK] Temporary PostgreSQL ran only through command-scoped OrbStack and
+  was removed; global context remained `orbstack`.
+- [BOUNDARY] No production provider/DB, Fly/SSH/deploy, Machine, canary,
+  Colima, global context, or qualification mutation occurred.
+
+[NEXT] Commit Plan 05.6-242 without protected user files, pass exact-HEAD and
+the full deterministic production-enablement gates, then confirm H-053 through
+climb cycle 58. After confirmation, audit the four production-canary attacks
+against exact target, rollback, detector and blast-radius contracts before any
+mutation.

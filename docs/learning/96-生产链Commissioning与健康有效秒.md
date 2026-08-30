@@ -370,3 +370,20 @@ HEAD 核对 metadata SHA-256；完全一致才继续原节点的 fenced database
 验证同时要求 `PUT count == 1`、`HEAD count == 2`（清理检查和恢复检查）、失败/成功 attempt 的
 job input identity 相同、最终只有一个业务成功事实。7 个写节点分别在独立迁移数据库运行；因此
 “对象已写但响应丢失”不会升级成整链重启，也不会被伪装成对象一定缺失。
+
+### Quote 指针已认证，为什么 Opportunity 仍必须再做新鲜度门控？
+
+认证只证明 Quote generation 完整、不可篡改，并不证明它此刻仍有交易意义。若
+`opportunity-certify` 只校验 `quote:current` 的 identity，301 秒前的完整 Quote 仍会被投影成一个
+全新的 Opportunity，后续读端看见的将是“刚发布但输入已经过期”的假新鲜数据。
+
+现在输入门直接复用 `quote_timing.py` 的唯一 300 秒业务 SLA，并检查 generation 中**最老**的
+batch，而不是用最新 batch 掩盖早期批次。拒绝发生在任何 R2 GET 和 Opportunity 业务写入之前；
+运行时事实写 `freshness.quote + blocked`，告警/资格事实写同一原因的 `breaking`，避免一个故障在
+两个真相面出现互相矛盾的影响等级。
+
+恢复也不能把 incident 绑死在旧 job key：Quote generation 由 Structure identity 决定，真正的
+刷新会产生新的 Structure/Quote lineage。`freshness:quote` 因此是跨 generation 的稳定 dedupe
+identity；新鲜 lineage 成功投影后，由其成功 lease 关闭同一个 incident。commissioning 会攻击
+完整链条：陈旧指针 → 无 R2/无 Opportunity 写入 → blocking incident → 新 Structure/Quote 指针 →
+新 Opportunity 唯一发布 → incident recovered。

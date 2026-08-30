@@ -3296,6 +3296,7 @@ class PostgresControlPlane:
         backoff_seconds: int,
         next_attempt_at: datetime,
         now: datetime,
+        detail: Mapping[str, object] | None = None,
     ) -> tuple[RuntimeEvent, RuntimeEvent]:
         """Append bounded failure and retry facts before releasing a job lease."""
         cursor.execute(
@@ -3344,7 +3345,12 @@ class PostgresControlPlane:
         )
         failure_signature = _retry_failure_signature(error_class)
         interrupted = failure_signature == "service.interrupted"
-        if failure_signature == "upstream.timeout":
+        detail = {} if detail is None else detail
+        explicit_reason = detail.get("reason_code")
+        explicit_impact = detail.get("qualification_impact")
+        if explicit_reason == "freshness.quote":
+            reason_code = "freshness.quote"
+        elif failure_signature == "upstream.timeout":
             reason_code = "timeout"
         elif failure_signature == "progress.stalled":
             reason_code = "invalid-input"
@@ -3352,6 +3358,7 @@ class PostgresControlPlane:
             reason_code = "service-stop"
         else:
             reason_code = "invalid-input"
+        qualification_impact = "blocked" if explicit_impact == "breaking" else "delayed"
         recovery_policy = "retry-same-input" if interrupted else "exponential-backoff"
         attempt_id = str(state["attempt_id"])
         cursor.execute(
@@ -3381,7 +3388,7 @@ class PostgresControlPlane:
                     detail={
                         "component": component,
                         "failure_signature": failure_signature,
-                        "qualification_impact": "delayed",
+                        "qualification_impact": qualification_impact,
                         "reason_code": reason_code,
                         "recovery_policy": recovery_policy,
                         "retry_count": retry_count,
@@ -5872,6 +5879,7 @@ class PostgresControlPlane:
             backoff_seconds=delay_seconds,
             next_attempt_at=next_attempt_at,
             now=now,
+            detail=detail,
         )
         cursor.execute(
             """
@@ -7012,6 +7020,7 @@ class PostgresControlPlane:
                 backoff_seconds=delay_seconds,
                 next_attempt_at=next_attempt_at,
                 now=now,
+                detail=detail,
             )
             cursor.execute(
                 """
@@ -7418,6 +7427,7 @@ class PostgresControlPlane:
                 f"job-retry:{lease.job_key}",
                 f"recovery:job:{lease.job_key}",
                 f"recovery:circuit:{lease.job_key}",
+                *(("freshness:quote",) if component == "opportunity-certify" else ()),
             )
             cursor.execute(
                 """
@@ -7436,6 +7446,11 @@ class PostgresControlPlane:
                 incident_dedupe_keys[0]: "",
                 incident_dedupe_keys[1]: ":runtime-job",
                 incident_dedupe_keys[2]: ":runtime-circuit",
+                **(
+                    {"freshness:quote": ":freshness-quote"}
+                    if component == "opportunity-certify"
+                    else {}
+                ),
             }
             for incident in incidents:
                 incident_key = str(incident["incident_key"])

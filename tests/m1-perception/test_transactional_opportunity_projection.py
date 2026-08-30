@@ -1,13 +1,16 @@
 import asyncio
 import hashlib
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
-from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
+from polyarb.control_plane.opportunity_worker import (
+    StaleQuoteGenerationError,
+    TransactionalOpportunityCertifier,
+)
 from polyarb.control_plane.postgres import (
     IncompleteQuoteGenerationError,
     OpportunityProjectionCurrentError,
@@ -211,6 +214,75 @@ def test_opportunity_incomplete_input_uses_durable_retry_circuit() -> None:
     assert result.outcome == "retryable"
     assert control_plane.retry["component"] == "opportunity-certify"
     assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
+def test_opportunity_stale_quote_is_blocked_before_r2_or_publish() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    quoted_at = now - timedelta(seconds=301)
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.retry = None
+
+        def claim_job(self, **_kwargs):
+            return JobLease(
+                job_key="quote:old:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity="quote:old",
+                lease_owner="opportunity-worker",
+                lease_epoch=4,
+                lease_expires_at=now,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def current_quote_projection_inputs(self):
+            receipt = QuoteBatchReceipt("quote:old:batch:0", "a" * 64, "quotes/key", "b" * 64, 1)
+            return "quote:old", "structure:old", (((object(),), receipt, quoted_at),)
+
+        def finish_retryable_with_incident(self, _lease, **kwargs):
+            self.retry = kwargs
+
+        def publish_opportunity_projection(self, **_kwargs):
+            raise AssertionError("stale Quote must not publish an Opportunity projection")
+
+    class Client:
+        def get_object(self, **kwargs):
+            raise AssertionError(f"stale Quote must be rejected before R2 read: {kwargs}")
+
+    control_plane = ControlPlane()
+    result = TransactionalOpportunityCertifier(
+        control_plane=control_plane,
+        object_client=Client(),
+        bucket="bucket",
+        now=lambda: now,
+    ).run_once()
+
+    assert result.outcome == "retryable"
+    assert control_plane.retry is not None
+    assert control_plane.retry["error_class"] == "StaleQuoteGenerationError"
+    assert control_plane.retry["incident_key"] == "incident:freshness:quote"
+    assert control_plane.retry["dedupe_key"] == "freshness:quote"
+    assert control_plane.retry["detail"]["reason_code"] == "freshness.quote"
+    assert control_plane.retry["detail"]["qualification_impact"] == "breaking"
+
+
+def test_opportunity_quote_freshness_uses_oldest_batch_and_canonical_sla() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    with pytest.raises(StaleQuoteGenerationError, match="301.0s exceeds 300.0s"):
+        TransactionalOpportunityCertifier._require_fresh_quote_generation(
+            (
+                ((), object(), now - timedelta(seconds=299)),
+                ((), object(), now - timedelta(seconds=301)),
+            ),
+            now=now,
+        )
+
+    TransactionalOpportunityCertifier._require_fresh_quote_generation(
+        (((), object(), now - timedelta(seconds=300)),),
+        now=now,
+    )
 
 
 def test_opportunity_pointer_conflict_is_visible_and_never_retried() -> None:
@@ -642,6 +714,17 @@ def test_opportunity_scheduler_cancellation_drains_db_call_without_late_publish(
 
 
 def test_opportunity_terminal_commit_wins_heartbeat_race_without_pending_thread() -> None:
+    payload = (
+        b'{"structure_receipt_digest":"'
+        + b"a" * 64
+        + b'","token_range_digest":"'
+        + b"b" * 64
+        + b'","universe_hash":"'
+        + b"c" * 64
+        + b'"}\n'
+        + b'{"yes_token_id":"token-a"}\n'
+    )
+
     class ControlPlane:
         def __init__(self) -> None:
             self.started = threading.Event()
@@ -662,7 +745,14 @@ def test_opportunity_terminal_commit_wins_heartbeat_race_without_pending_thread(
             raise StaleLeaseError("terminal race heartbeat fenced")
 
         def current_quote_projection_inputs(self):
-            return "quote:" + "a" * 64, "structure:" + "b" * 64, ()
+            receipt = QuoteBatchReceipt(
+                "job", "d" * 64, "quotes/key", hashlib.sha256(payload).hexdigest(), 1
+            )
+            return (
+                "quote:" + "a" * 64,
+                "structure:" + "b" * 64,
+                (((), receipt, datetime.now(UTC)),),
+            )
 
         def publish_opportunity_projection(self, **kwargs):
             self.started.set()
@@ -673,10 +763,14 @@ def test_opportunity_terminal_commit_wins_heartbeat_race_without_pending_thread(
             return False
 
     async def scenario() -> None:
+        class Client:
+            def get_object(self, **_kwargs):
+                return {"Body": type("Body", (), {"read": lambda self: payload})()}
+
         control_plane = ControlPlane()
         certifier = TransactionalOpportunityCertifier(
             control_plane=control_plane,
-            object_client=object(),  # type: ignore[arg-type]
+            object_client=Client(),
             bucket="bucket",
             now=lambda: datetime.now(UTC),
             lease_seconds=3,

@@ -22,6 +22,7 @@ from polyarb.control_plane.production_commissioning_harness import (
     run_retry_budget_commissioning,
     run_source_receipt_gap_commissioning,
     run_stale_owner_commissioning,
+    run_stale_quote_pointer_commissioning,
     run_structure_parity_mismatch_commissioning,
     run_worker_exit_commissioning,
 )
@@ -786,6 +787,37 @@ def test_r2_write_timeout_harness_runs_seven_targets_and_cleans_database_and_rol
     }
     for node_id in nodes:
         assert (root / f"attacks/{node_id}/r2-write-timeout/proof.json").is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+    assert databases == []
+
+
+def test_stale_quote_pointer_harness_blocks_then_recovers_fresh_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_stale_quote_pointer_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+    )
+
+    assert result == {
+        "attack_id": "stale-quote-pointer",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 1,
+        "proof_count": 1,
+        "status": "pass",
+    }
+    assert (
+        root / "attacks/opportunity-certify/stale-quote-pointer/proof.json"
+    ).is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"

@@ -29,6 +29,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
+    StaleQuotePointerCommissioningAdapter,
     StructureParityMismatchCommissioningAdapter,
     WorkerExitCommissioningAdapter,
     complete_normal_turn,
@@ -1417,6 +1418,35 @@ def test_r2_write_timeout_adapter_heads_committed_object_before_single_receipt(
     assert str(proof["recovery_action_id"]).startswith("retry:")
     assert str(proof["recovery_fact_id"]).startswith("event:")
     assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    assert proof["cleanup_verified"] is True
+
+
+def test_stale_quote_pointer_adapter_blocks_business_fact_then_resolves_on_fresh_lineage(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:opportunity-certify:stale-quote-pointer",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="opportunity-certify",
+        attack_id="stale-quote-pointer",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=StaleQuotePointerCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=69),
+        ),
+        evidence_dir=tmp_path / "stale-quote-pointer",
+    )
+
+    assert proof["qualification_impact"] == "block"
+    assert str(proof["detector_fact_id"]).startswith("event:")
+    assert str(proof["recovery_action_id"]).startswith("pointer:quote:current:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("pointer:opportunity:current:")
     assert proof["cleanup_verified"] is True
 
 

@@ -1,4 +1,18 @@
 hypotheses:
+- id: H-053
+  description: A canonical oldest-batch Quote freshness gate can block Opportunity
+    publication before R2 or business writes, then let fresh Structure and Quote
+    lineage publish exactly once and resolve one stable cross-generation freshness
+    incident.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Close the last disposable commissioning gap without a private timeout,
+    contradictory qualification semantics, stale Opportunity truth, or an orphaned
+    old-job incident.
+  cost_h: 1.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-30T20:15:00+08:00'
+  results: []
 - id: H-052
   description: A PUT response timeout after R2 has durably stored an immutable object
     can leave the exact attempt retryable with no database receipt, then let a policy-due

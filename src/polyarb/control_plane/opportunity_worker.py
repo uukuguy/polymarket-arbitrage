@@ -9,6 +9,7 @@ from threading import Event
 from typing import Any, Protocol, cast
 
 from polyarb.config import Settings
+from polyarb.routing.quote_timing import QUOTE_AGE_SLA_SECONDS
 
 from .alert_delivery import incident_alert_channels
 from .failure_identity import retry_failure_fingerprint
@@ -33,6 +34,10 @@ class _Body(Protocol):
 
 class _ObjectClient(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+
+
+class StaleQuoteGenerationError(RuntimeError):
+    """The current certified Quote is too old to authorize Opportunity output."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +113,7 @@ class TransactionalOpportunityCertifier:
                 raise PublicationPointerConflictError(
                     "opportunity candidate no longer names current Quote"
                 )
+            self._require_fresh_quote_generation(batches, now=self._now())
         except ServiceStopRequested:
             if runtime is None:
                 self._finish_interrupted(lease)
@@ -180,7 +186,7 @@ class TransactionalOpportunityCertifier:
             else:
                 _runtime_sync_call(runtime, finish, terminal=True)
             return OpportunityCertifierResult(job_key=lease.job_key, outcome="superseded")
-        except IncompleteQuoteGenerationError as error:
+        except (IncompleteQuoteGenerationError, StaleQuoteGenerationError) as error:
             failure = error
             if runtime is None:
                 self._finish_retryable(lease, failure)
@@ -355,6 +361,24 @@ class TransactionalOpportunityCertifier:
             raise ValueError(f"{label}-body-is-not-bytes")
         return payload
 
+    @staticmethod
+    def _require_fresh_quote_generation(
+        batches: tuple[tuple[Any, Any, datetime], ...],
+        *,
+        now: datetime,
+    ) -> None:
+        """Fail closed when any batch exceeds the shared business freshness SLA."""
+
+        if not batches:
+            raise IncompleteQuoteGenerationError("current Quote generation has no batches")
+        oldest_quoted_at = min(quoted_at for _legs, _receipt, quoted_at in batches)
+        quote_age_seconds = max(0.0, (now - oldest_quoted_at).total_seconds())
+        if quote_age_seconds > QUOTE_AGE_SLA_SECONDS:
+            raise StaleQuoteGenerationError(
+                f"oldest Quote batch age {quote_age_seconds:.1f}s exceeds "
+                f"{QUOTE_AGE_SLA_SECONDS:.1f}s"
+            )
+
     def _publish(
         self,
         quote_generation: str,
@@ -380,11 +404,24 @@ class TransactionalOpportunityCertifier:
         )
 
     def _finish_retryable(self, lease: JobLease, error: Exception) -> None:
+        stale_quote = isinstance(error, StaleQuoteGenerationError)
+        freshness_detail = (
+            {
+                "reason_code": "freshness.quote",
+                "qualification_impact": "breaking",
+            }
+            if stale_quote
+            else {}
+        )
         self._control_plane.finish_retryable_with_incident(
             lease,
             error_class=type(error).__name__,
-            incident_key=f"incident:job-retry:{lease.job_key}",
-            dedupe_key=f"job-retry:{lease.job_key}",
+            incident_key=(
+                "incident:freshness:quote"
+                if stale_quote
+                else f"incident:job-retry:{lease.job_key}"
+            ),
+            dedupe_key=("freshness:quote" if stale_quote else f"job-retry:{lease.job_key}"),
             component="opportunity-certify",
             summary="opportunity-certify retryable failure",
             detail={
@@ -394,6 +431,7 @@ class TransactionalOpportunityCertifier:
                 "failure_fingerprint": retry_failure_fingerprint(
                     error, component="opportunity-certify"
                 ),
+                **freshness_detail,
             },
             channels=incident_alert_channels(Settings()),
             now=self._now(),

@@ -127,6 +127,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
             "failure.credential",
             "failure.integrity",
             "failure.schema",
+            "freshness.quote",
             "invalid-input",
             "integrity.conflict",
             "job.attempt-deadline",

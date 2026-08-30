@@ -14,6 +14,7 @@ from botocore.exceptions import ReadTimeoutError
 from psycopg.types.json import Jsonb
 
 from .models import JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
+from .opportunity_worker import TransactionalOpportunityCertifier
 from .postgres import (
     IncompleteStructureGenerationError,
     PostgresControlPlane,
@@ -25,6 +26,7 @@ from .quote_admission import (
     QuoteAdmissionShardUnavailable,
     TransactionalQuoteAdmitter,
 )
+from .quote_artifact import QuoteBatchArtifact, canonical_quote_batch_bytes
 from .reconciler import RuntimeReconciler
 from .recovery_executor import RecoveryExecutor
 from .recovery_models import RecoveryActionType
@@ -3945,6 +3947,332 @@ class StructureParityMismatchCommissioningAdapter:
         )
 
 
+class StaleQuotePointerCommissioningAdapter:
+    """Prove stale Quote authority blocks output and fresh lineage self-recovers."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._clock_at = self._started_at
+        self._objects = _DisposableObjectStore()
+        self._worker = TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=self._objects,
+            bucket="commissioning-artifacts",
+            worker_id="commissioning:opportunity-certify",
+            now=lambda: self._clock_at,
+            lease_seconds=120,
+        )
+        self._structure_generation: str | None = None
+        self._structure_digest: str | None = None
+        self._stale_generation: str | None = None
+        self._fresh_generation: str | None = None
+        self._stale_job_key: str | None = None
+        self._fresh_job_key: str | None = None
+        self._detector_event_id: str | None = None
+        self._recovery_event_id: str | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "stale-quote-pointer"
+            or identity.node_id != "opportunity-certify"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _publish_quote(
+        self,
+        *,
+        identity: AttackIdentity,
+        label: str,
+        quoted_at: datetime,
+        admitted_at: datetime,
+    ) -> tuple[str, str]:
+        structure_digest = self._need(self._structure_digest, "structure-digest-missing")
+        legs = (
+            _leg(f"{identity.experiment_id}:{label}:a"),
+            _leg(f"{identity.experiment_id}:{label}:b"),
+        )
+        universe_hash = sha256(f"{identity.experiment_id}:{label}:universe".encode()).hexdigest()
+        batch = self._control_plane.enqueue_quote_generation(
+            structure_receipt_digest=structure_digest,
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=2,
+            now=admitted_at,
+        )[0]
+        payload = canonical_quote_batch_bytes(
+            structure_receipt_digest=structure_digest,
+            universe_hash=universe_hash,
+            token_range_digest=batch.token_range_digest,
+            quotes=tuple(
+                {
+                    "token_id": leg.yes_token_id,
+                    "yes_token_id": leg.yes_token_id,
+                    "terminal_state": "executable",
+                    "best_ask_price": 0.45,
+                    "best_ask_size": 5.0,
+                }
+                for leg in legs
+            ),
+        )
+        artifact = QuoteBatchArtifact.from_bytes(payload)
+        self._objects.restore(
+            key=artifact.key,
+            payload=artifact.payload,
+            digest=artifact.sha256,
+        )
+        batch_lease = _claim(self._control_plane, "quote-batch", admitted_at)
+        self._control_plane.record_quote_batch(
+            batch_lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=sha256(f"{identity.experiment_id}:{label}:quote".encode()).hexdigest(),
+            artifact_key=artifact.key,
+            artifact_digest=artifact.sha256,
+            successful_response_count=2,
+            quoted_at=quoted_at,
+            now=admitted_at,
+            terminal=True,
+        )
+        certifier = _claim(self._control_plane, "quote-certify", admitted_at)
+        self._control_plane.certify_quote_generation(
+            certifier,
+            generation_key=batch.generation_key,
+            now=admitted_at,
+        )
+        return batch.generation_key, f"{batch.generation_key}:opportunity-certify"
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        structure_generation, structure_digest = _structure_prerequisite(
+            self._control_plane,
+            f"{identity.experiment_id}:authority",
+            self._started_at - timedelta(seconds=420),
+        )
+        self._structure_generation = structure_generation
+        self._structure_digest = structure_digest
+        stale_generation, stale_job_key = self._publish_quote(
+            identity=identity,
+            label="stale",
+            quoted_at=self._started_at - timedelta(seconds=301),
+            admitted_at=self._started_at - timedelta(seconds=301),
+        )
+        self._stale_generation = stale_generation
+        self._stale_job_key = stale_job_key
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"pointer:quote:current:{stale_generation}",
+            occurred_at=self._started_at,
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._clock_at = self._started_at
+        result = self._worker.run_once()
+        if result.outcome != "retryable":
+            raise DisposableCommissioningError("stale-quote-not-rejected")
+        job_key = self._need(self._stale_job_key, "stale-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt.attempt_id
+                FROM m1_job_attempts AS attempt
+                JOIN m1_jobs AS job USING (job_key)
+                WHERE attempt.job_key = %s AND attempt.state = 'retryable'
+                  AND job.state = 'retryable'
+                """,
+                (job_key,),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("stale-quote-retry-fact-missing")
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{row[0]}",
+            occurred_at=self._clock_at,
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._stale_job_key, "stale-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT runtime.event_id, runtime.detail->>'reason_code',
+                       runtime.detail->>'qualification_impact', incident.state,
+                       incident.severity, event.incident_event_id,
+                       event.detail->>'qualification_impact', outbox.state,
+                       (SELECT count(*) FROM m1_opportunity_publication_pointers)
+                FROM m1_job_runtime_events AS runtime
+                JOIN m1_incidents AS incident ON incident.dedupe_key = 'freshness:quote'
+                JOIN m1_incident_events AS event USING (incident_key)
+                JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+                WHERE runtime.job_key = %s AND runtime.kind = 'job.retryable-failed'
+                  AND event.kind = 'attempt-failed'
+                """,
+                (job_key,),
+            ).fetchone()
+        if row is None or not row[5] or (
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[6],
+            row[7],
+            row[8],
+        ) != ("freshness.quote", "blocked", "open", "warning", "breaking", "pending", 0):
+            raise DisposableCommissioningError("stale-quote-detector-chain-missing")
+        self._detector_event_id = str(row[0])
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{row[0]}",
+            occurred_at=self._started_at + timedelta(seconds=1),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        structure_generation, structure_digest = _structure_prerequisite(
+            self._control_plane,
+            f"{identity.experiment_id}:fresh-authority",
+            self._started_at + timedelta(seconds=2),
+        )
+        self._structure_generation = structure_generation
+        self._structure_digest = structure_digest
+        self._clock_at = self._started_at + timedelta(seconds=8)
+        fresh_generation, fresh_job_key = self._publish_quote(
+            identity=identity,
+            label="fresh",
+            quoted_at=self._clock_at,
+            admitted_at=self._clock_at,
+        )
+        self._fresh_generation = fresh_generation
+        self._fresh_job_key = fresh_job_key
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"pointer:quote:current:{fresh_generation}",
+            occurred_at=self._clock_at,
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale_job = self._need(self._stale_job_key, "stale-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT job.state,
+                       (SELECT count(*) FROM m1_opportunity_projections
+                        WHERE generation_key = job.input_identity),
+                       (SELECT count(*) FROM m1_opportunity_projection_rows
+                        WHERE generation_key = job.input_identity)
+                FROM m1_jobs AS job WHERE job.job_key = %s
+                """,
+                (stale_job,),
+            ).fetchone()
+        if shape != ("retryable", 0, 0):
+            raise DisposableCommissioningError("stale-quote-partial-business-fact")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"postgres:m1_opportunity_projection_rows:{stale_job}:absent",
+            occurred_at=self._started_at + timedelta(seconds=9),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._clock_at = self._started_at + timedelta(seconds=10)
+        result = self._worker.run_once()
+        fresh_generation = self._need(self._fresh_generation, "fresh-generation-missing")
+        if result.outcome.split(":", 1)[0] != "certified":
+            raise DisposableCommissioningError("fresh-opportunity-not-certified")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT event.incident_event_id
+                FROM m1_incidents AS incident
+                JOIN m1_incident_events AS event USING (incident_key)
+                WHERE incident.dedupe_key = 'freshness:quote'
+                  AND incident.state = 'resolved' AND event.kind = 'recovered'
+                """
+            ).fetchone()
+            pointer = connection.execute(
+                """
+                SELECT generation_key FROM m1_opportunity_publication_pointers
+                WHERE pointer_key = 'opportunity:current'
+                """
+            ).fetchone()
+        if row is None or pointer != (fresh_generation,):
+            raise DisposableCommissioningError("fresh-quote-recovery-chain-missing")
+        self._recovery_event_id = str(row[0])
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{row[0]}",
+            occurred_at=self._clock_at,
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        stale_generation = self._need(self._stale_generation, "stale-generation-missing")
+        fresh_generation = self._need(self._fresh_generation, "fresh-generation-missing")
+        fresh_job = self._need(self._fresh_job_key, "fresh-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT pointer.generation_key, job.state,
+                       (SELECT count(*) FROM m1_opportunity_projections
+                        WHERE generation_key = %s),
+                       (SELECT count(*) FROM m1_opportunity_projections
+                        WHERE generation_key = %s),
+                       (SELECT array_agg(kind ORDER BY occurred_at, incident_event_id)
+                        FROM m1_incident_events AS event
+                        JOIN m1_incidents USING (incident_key)
+                        WHERE dedupe_key = 'freshness:quote')
+                FROM m1_opportunity_publication_pointers AS pointer
+                JOIN m1_jobs AS job ON job.job_key = %s
+                WHERE pointer.pointer_key = 'opportunity:current'
+                """,
+                (stale_generation, fresh_generation, fresh_job),
+            ).fetchone()
+        if shape != (fresh_generation, "succeeded", 0, 1, ["attempt-failed", "recovered"]):
+            raise DisposableCommissioningError("stale-quote-postcondition")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"pointer:opportunity:current:{fresh_generation}",
+            occurred_at=self._started_at + timedelta(seconds=11),
+        )
+
+
 class PublicationPointerConflictCommissioningAdapter:
     """Race one stale publisher against a newer lineage on each pointer node."""
 
@@ -4857,6 +5185,7 @@ __all__ = [
     "RetryBudgetCommissioningAdapter",
     "SourceReceiptGapCommissioningAdapter",
     "StructureParityMismatchCommissioningAdapter",
+    "StaleQuotePointerCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",
     "WorkerExitCommissioningAdapter",
     "complete_normal_turn",
