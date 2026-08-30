@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime
@@ -198,9 +198,7 @@ def _run_bounded_sync_call[SyncResult](
         if remaining <= 0:
             primary_error = TimeoutError("structure sync call exceeded attempt deadline")
             break
-        interval = (
-            heartbeat_interval_seconds / 3 if retry_heartbeat else heartbeat_interval_seconds
-        )
+        interval = heartbeat_interval_seconds / 3 if retry_heartbeat else heartbeat_interval_seconds
         if not completed:
             try:
                 result_box.append(future.result(timeout=min(interval, remaining)))
@@ -649,18 +647,22 @@ class TransactionalStructureCertifier:
         worker_id: str,
         now: Callable[[], datetime],
         lease_seconds: int = 30,
+        parity_max_concurrency: int = 1,
         monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if not 1 <= parity_max_concurrency <= 32:
+            raise ValueError("parity_max_concurrency must be between 1 and 32")
         self._control_plane = control_plane
         self._object_client = object_client
         self._bucket = bucket
         self._worker_id = worker_id
         self._now = now
         self._lease_seconds = lease_seconds
+        self._parity_max_concurrency = parity_max_concurrency
         self._monotonic_clock = monotonic_clock
         self._heartbeat_interval_seconds = max(0.1, lease_seconds / 3)
         self._stop_requested = Event()
@@ -958,49 +960,26 @@ class TransactionalStructureCertifier:
         checkpoint_interval = runtime_policy(
             "structure-certify", lease_seconds=runtime.profile.lease_seconds
         ).checkpoint_interval
-        for index, (spec, receipt) in enumerate(ranges[resume_index:], start=resume_index + 1):
+        verified_count = resume_index
+        while verified_count < total_ranges:
             heartbeat()
-            ordinal = int(spec.range_start.removeprefix("shard:"))
-            shard = by_identity.get((spec.component, ordinal))
-            if shard is None or spec.range_end != f"shard:{ordinal + 1:08d}":
-                raise StructureWorkerError("structure-v3-content-parity-range-identity")
-            shard_artifact_key = shard.artifact_key
-            shard_artifact_digest = shard.artifact_digest
-            source_payload = sync_call(
-                lambda: _read_object_bytes(
-                    self._object_client, bucket=self._bucket, key=shard_artifact_key
-                )
+            checkpoint_boundary = min(
+                ((verified_count // checkpoint_interval) + 1) * checkpoint_interval,
+                total_ranges,
             )
-            _header, expected_rows = sync_call(
-                lambda: parse_structure_shard_bytes(
-                    source_payload, expected_sha256=shard_artifact_digest
-                )
+            wave_end = min(
+                verified_count + self._parity_max_concurrency,
+                checkpoint_boundary,
             )
-            heartbeat()
-            payload = sync_call(
-                lambda: _read_object_bytes(
-                    self._object_client,
-                    bucket=self._bucket,
-                    key=getattr(receipt, "artifact_key"),
-                )
-            )
-
-            def verify_range() -> None:
-                _range_identity, actual_rows = parse_structure_range_bytes(
-                    payload, expected_sha256=getattr(receipt, "artifact_digest")
-                )
-                if actual_rows != expected_rows or len(actual_rows) != getattr(
-                    receipt, "record_count"
-                ):
-                    raise StructureWorkerError("structure-v3-content-parity-range-content")
-
-            sync_call(verify_range)
-            progress(index, total_ranges)
-            if index % checkpoint_interval == 0 or index == total_ranges:
+            wave = tuple(ranges[verified_count:wave_end])
+            sync_call(lambda: self._verify_v3_parity_wave(wave, by_identity))
+            verified_count = wave_end
+            progress(verified_count, total_ranges)
+            if verified_count == checkpoint_boundary:
 
                 def persist_checkpoint(
-                    checkpoint_index: int = index,
-                    checkpoint_receipt: object = receipt,
+                    checkpoint_index: int = verified_count,
+                    checkpoint_receipt: object = ranges[verified_count - 1][1],
                 ) -> object:
                     return self._control_plane.record_running_checkpoint(
                         runtime.current_lease,
@@ -1015,6 +994,50 @@ class TransactionalStructureCertifier:
                     )
 
                 sync_call(persist_checkpoint)
+
+    def _verify_v3_parity_wave(
+        self,
+        wave: Sequence[tuple[StructureRangeSpec, object]],
+        by_identity: Mapping[tuple[str, int], StructureShardReceipt],
+    ) -> None:
+        """Drain one bounded R2 parity wave before advancing its prefix proof."""
+
+        def verify_range(item: tuple[StructureRangeSpec, object]) -> None:
+            spec, receipt = item
+            ordinal = int(spec.range_start.removeprefix("shard:"))
+            shard = by_identity.get((spec.component, ordinal))
+            if shard is None or spec.range_end != f"shard:{ordinal + 1:08d}":
+                raise StructureWorkerError("structure-v3-content-parity-range-identity")
+            source_payload = _read_object_bytes(
+                self._object_client,
+                bucket=self._bucket,
+                key=shard.artifact_key,
+            )
+            _header, expected_rows = parse_structure_shard_bytes(
+                source_payload,
+                expected_sha256=shard.artifact_digest,
+            )
+            payload = _read_object_bytes(
+                self._object_client,
+                bucket=self._bucket,
+                key=str(getattr(receipt, "artifact_key")),
+            )
+            _range_identity, actual_rows = parse_structure_range_bytes(
+                payload,
+                expected_sha256=str(getattr(receipt, "artifact_digest")),
+            )
+            if actual_rows != expected_rows or len(actual_rows) != int(
+                getattr(receipt, "record_count")
+            ):
+                raise StructureWorkerError("structure-v3-content-parity-range-content")
+
+        with ThreadPoolExecutor(
+            max_workers=min(self._parity_max_concurrency, len(wave)),
+            thread_name_prefix="structure-parity",
+        ) as executor:
+            # executor.map preserves input/error order while the context manager
+            # drains every already-started sibling before the caller can retry.
+            tuple(executor.map(verify_range, wave))
 
 
 def _parity_prefix_digests(

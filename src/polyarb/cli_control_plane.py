@@ -1305,6 +1305,7 @@ def _transactional_scheduler(
             bucket=bucket,
             worker_id=f"{worker_id}:structure-certifier",
             now=lambda: datetime.now(UTC),
+            parity_max_concurrency=Settings().structure_range_max_concurrency,
         ),
         quote_admitter=_transactional_quote_admitter(
             control_plane, worker_id=f"{worker_id}:quote-admitter"
@@ -2418,9 +2419,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             current = control_plane.publish_structure_shadow(
                 generation_key=args.generation_key,
                 now=datetime.now(UTC),
-                expected_generation_key=(
-                    None if before is None else str(before["generation_key"])
-                ),
+                expected_generation_key=(None if before is None else str(before["generation_key"])),
             )
             _write(
                 {

@@ -695,9 +695,7 @@ def test_structure_worker_atomically_quarantines_schema_invalid_named_v3_shard()
     manifest = StructureBundleArtifact.from_bytes(
         canonical_structure_shard_manifest_bytes(
             identity=identity,
-            shards=(
-                StructureShardReceipt("events", 0, corrupt.key, corrupt.sha256, 1),
-            ),
+            shards=(StructureShardReceipt("events", 0, corrupt.key, corrupt.sha256, 1),),
         )
     )
     spec = StructureRangeSpec.create(
@@ -714,9 +712,7 @@ def test_structure_worker_atomically_quarantines_schema_invalid_named_v3_shard()
             super().__init__(spec)
             self.quarantines: list[dict[str, object]] = []
 
-        def finish_quarantined_with_incident(
-            self, _lease: JobLease, **kwargs: object
-        ) -> None:
+        def finish_quarantined_with_incident(self, _lease: JobLease, **kwargs: object) -> None:
             self.quarantines.append(kwargs)
 
     class Objects(FakeObjectClient):
@@ -1417,14 +1413,25 @@ def test_structure_certifier_resumes_1117_ranges_after_durable_checkpoint(
             self.failed = False
             self.read_counts: dict[str, int] = {}
             self.upload: dict[str, object] = {}
+            self.active_reads = 0
+            self.max_active_reads = 0
+            self.read_lock = threading.Lock()
 
         def get_object(self, **kwargs: object) -> dict[str, object]:
             key = str(kwargs["Key"])
-            self.read_counts[key] = self.read_counts.get(key, 0) + 1
-            if key == shards[300].key and not self.failed:
-                self.failed = True
-                raise TimeoutError("simulated parity interruption")
-            return {"Body": _Body(payloads[key])}
+            with self.read_lock:
+                self.read_counts[key] = self.read_counts.get(key, 0) + 1
+                self.active_reads += 1
+                self.max_active_reads = max(self.max_active_reads, self.active_reads)
+            try:
+                time.sleep(0.002)
+                if key == shards[300].key and not self.failed:
+                    self.failed = True
+                    raise TimeoutError("simulated parity interruption")
+                return {"Body": _Body(payloads[key])}
+            finally:
+                with self.read_lock:
+                    self.active_reads -= 1
 
         def put_object(self, **kwargs: object) -> None:
             self.upload = kwargs
@@ -1443,6 +1450,7 @@ def test_structure_certifier_resumes_1117_ranges_after_durable_checkpoint(
         bucket="structure",
         worker_id="certifier-a",
         now=lambda: NOW,
+        parity_max_concurrency=12,
     )
 
     with pytest.raises(TimeoutError, match="parity interruption"):
@@ -1450,9 +1458,11 @@ def test_structure_certifier_resumes_1117_ranges_after_durable_checkpoint(
     assert control_plane.checkpoints[-1][0].endswith(":300")
 
     assert certifier.run_once().outcome == "certified"
+    assert objects.max_active_reads == 12
     assert all(objects.read_counts[shard.key] == 1 for shard in shards[:300])
     assert objects.read_counts[shards[300].key] == 2
-    assert all(objects.read_counts[shard.key] == 1 for shard in shards[301:])
+    assert all(objects.read_counts[shard.key] == 2 for shard in shards[301:312])
+    assert all(objects.read_counts[shard.key] == 1 for shard in shards[312:])
 
 
 def test_structure_certifier_waits_for_missing_range_receipts_without_incident() -> None:
@@ -1524,9 +1534,7 @@ def test_structure_certifier_quarantines_parity_mismatch_and_invalidates_qualifi
         def structure_generation_receipts(self, generation_key: str):
             raise StructureParityMismatchError("component-count parity failed")
 
-        def finish_quarantined_with_incident(
-            self, lease: JobLease, **kwargs: object
-        ) -> None:
+        def finish_quarantined_with_incident(self, lease: JobLease, **kwargs: object) -> None:
             self.quarantined.append(kwargs)
 
         def finish(self, lease: JobLease, **kwargs: object) -> None:

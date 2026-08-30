@@ -112,6 +112,7 @@
 | 98 | [可恢复故障与终态隔离](98-可恢复故障与终态隔离.md) | retryability 判断 / stale Quote 终态隔离 / incident 与 job 状态分离 / successor generation 恢复链 |
 | 99 | [低内存控制器的单进程恢复事务](99-低内存控制器的单进程恢复事务.md) | SSH 双进程 OOM / 乐观进程替换 / lane-busy 有界等待 / action 后置证明 / exact restore |
 | 100 | [生产节点健康不能由累计事实推断](100-生产节点健康不能由累计事实推断.md) | 当前任务与历史计数 / source-fetch egress 门 / 告警写入原子链 / 最小权限迁移 |
+| 101 | [认证吞吐不能靠放宽新鲜度](101-认证吞吐不能靠放宽新鲜度.md) | 串行 parity 与 900 秒矛盾 / checkpoint 对齐并发 wave / 有界重读 / pause 不等于停机 |
 
 ## Phase 02.1 教学增量（2026-05）
 
