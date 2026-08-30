@@ -21,10 +21,11 @@ from polyarb.control_plane.db_role_contract import (
     verify_daemon_database_role,
     verify_effective_database_role_authority,
 )
+from polyarb.control_plane.schema_contract import CONTROL_PLANE_SCHEMA_REVISION
 
 RUNTIME_PROFILE = "runtime-controller"
 QUALIFICATION_PROFILE = "qualification-worker"
-EXPECTED_REVISION = "036"
+EXPECTED_REVISION = CONTROL_PLANE_SCHEMA_REVISION
 ADMIN_DSN_ENV = "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN"
 RUNTIME_PASSWORD_ENV = "POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD"
 QUALIFICATION_PASSWORD_ENV = "POLYARB_QUALIFICATION_WORKER_DB_PASSWORD"

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .qualification_identity import qualification_config_id, qualification_config_payload
+from .schema_contract import CONTROL_PLANE_SCHEMA_REVISION
 
 
 class RolloutArtifactError(ValueError):
@@ -166,7 +167,7 @@ def render_rollout_artifacts(
                 "qualification_worker_app": runtime_apps[1],
                 "runtime_recovery_mode": "observe-only",
                 "runtime_recovery_allowed_targets": list(allowed_targets),
-                "database_revision": "036",
+                "database_revision": CONTROL_PLANE_SCHEMA_REVISION,
                 "runtime_controller_database_role": "runtime_controller",
                 "qualification_database_role": "qualification_worker",
                 "qualification_release_id": release_id,

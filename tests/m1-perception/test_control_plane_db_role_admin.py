@@ -22,6 +22,7 @@ from polyarb.control_plane.db_role_contract import (
     TABLE_PRIVILEGES,
     ConnectionFactory,
 )
+from polyarb.control_plane.schema_contract import CONTROL_PLANE_SCHEMA_REVISION
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 RUNTIME_LOGIN = "m1_runtime_controller_login"
@@ -81,7 +82,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "036"
+        self.revision = CONTROL_PLANE_SCHEMA_REVISION
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -1440,7 +1441,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "036")
+        _run_alembic(dsn, "upgrade", CONTROL_PLANE_SCHEMA_REVISION)
         yield dsn
 
 

@@ -11784,3 +11784,24 @@ through the deterministic runtime production-enablement climb gate. Then run all
 eight stale-owner proofs inside the next immutable image built through OrbStack
 only, and extend the shared harness with heartbeat/progress/worker-exit/retry-
 budget attacks before any scoped production canary or qualification epoch.
+
+### SESSION 346 — 2026-08-30 (schema revision drift fail-fast repair)
+
+- [CLIMB H-040] Cycle 44 scored 88.89: planning and seven product/output gates
+  passed; integration alone failed. The falsified run remains append-only.
+- [ROOT CAUSE] Historical `test_026` claimed to migrate to the repository's
+  current revision but hardcoded `031`. The live role administrator correctly
+  rejected it because its reviewed schema identity is `036`.
+- [SYSTEMIC REPAIR] Added one control-plane schema revision authority consumed
+  by role administration, rollout artifacts and real-PostgreSQL fixtures.
+- [FAIL-FAST CONTRACT] A new test compares that authority with Alembic's sole
+  head. Future migration changes cannot leave runtime/rollout identity silently
+  behind or let a copied fixture revision become dormant until climb.
+- [VERIFICATION] Schema-head, adversarial PG16 authority, rollout and role-admin
+  suites pass (38 cases); Ruff passes. All H-040 commissioning tests had already
+  passed in cycle 44.
+
+[NEXT] Commit Plan 05.6-225 without protected user files, rerun H-040 on exact
+HEAD and preserve both climb cycles. After confirmation, execute all eight
+stale-owner proofs inside the immutable OrbStack-built image and continue the
+remaining shared disposable attack adapters.

@@ -721,6 +721,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "uv",
             "run",
             "pytest",
+            "tests/alembic/test_control_plane_schema_contract.py",
             "tests/alembic/test_026.py",
             "tests/m1-perception/test_control_plane_db_role_contract.py",
             "tests/m1-perception/test_control_plane_db_role_admin.py",
@@ -803,6 +804,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
     ):
         assert output_node in commands
     for required_file in (
+        "tests/alembic/test_control_plane_schema_contract.py",
         "tests/alembic/test_026.py",
         "tests/m1-perception/test_control_plane_db_role_contract.py",
         "tests/m1-perception/test_control_plane_db_role_admin.py",

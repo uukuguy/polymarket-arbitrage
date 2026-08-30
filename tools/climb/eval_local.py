@@ -675,6 +675,7 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "uv",
         "run",
         "pytest",
+        "tests/alembic/test_control_plane_schema_contract.py",
         "tests/alembic/test_026.py",
         "tests/m1-perception/test_control_plane_db_role_contract.py",
         "tests/m1-perception/test_control_plane_db_role_admin.py",

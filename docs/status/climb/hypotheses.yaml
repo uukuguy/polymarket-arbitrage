@@ -73,16 +73,34 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-040
   description: A shared isolated-database harness can execute the stale-owner commissioning
-    adapter per production node, preserve append-only partial evidence, and always remove
-    only the database and migration roles owned by that experiment.
+    adapter per production node, preserve append-only partial evidence, and always
+    remove only the database and migration roles owned by that experiment.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Turn the verified stale-owner adapter into an exact-image Make workflow
-    without production DSN fallback, arbitrary outer timeout, or destructive cluster cleanup.
+    without production DSN fallback, arbitrary outer timeout, or destructive cluster
+    cleanup.
   cost_h: 0.75
   ranking: 1.0
-  status: pending
+  status: in-flight
   created_at: '2026-08-30T09:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 44
+    run: 20260830-005952-h-040
+    local: 88.88888888888889
+    local_per_task:
+      cli: 100.0
+      integration: 0.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: falsified
+    decision_reason: one or more local gates failed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
