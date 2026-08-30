@@ -2603,3 +2603,20 @@ success is not user receipt/read evidence.
   comparing Structure, Quote and Opportunity counters created false progress
   regression; only an explicit producer-scoped regression fact can now break
   the epoch.
+
+### §2.79 A normal turn needs lifecycle, observation and business truth (2026-08-30)
+
+- The eight commissioning normal turns now execute the real transactional
+  domain APIs against disposable migrated PostgreSQL rather than accepting
+  caller-authored proof strings.
+- A turn is usable only when the same `(job_key, lease_epoch)` has a succeeded
+  attempt, an authoritative `job.succeeded` runtime event, and a causally bound
+  business postcondition. These are separate authorities; none implies the
+  other two.
+- Pointer and successor postconditions are queried against the exact generation
+  or producer job. An arbitrary row from the right table is not evidence for
+  this turn. The exact-image harness must continue to isolate databases per
+  node/attack so leftover successor work cannot contaminate claims.
+- This fixture creates no production authority and adds no outer experiment
+  timeout. It is the reusable preparation boundary for the forthcoming
+  heartbeat, progress, worker-exit, stale-owner and retry-budget attacks.

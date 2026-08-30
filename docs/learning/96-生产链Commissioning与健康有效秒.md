@@ -39,6 +39,9 @@ Structure→Quote→Opportunity 的八个节点逐一 commissioning：跑通正�
   失败后强制 cleanup 与 append-only 阶段文件。
 - `src/polyarb/control_plane/production_commissioning_runner.py:331`：从 66 个 proof、八个正常
   回合和最终 lineage 汇总一份可验证 envelope。
+- `src/polyarb/control_plane/production_commissioning_disposable.py:27`：在 disposable
+  PostgreSQL 上完成八类真实 domain transaction，并只返回数据库中存在的
+  terminal attempt、runtime success event 和因果绑定的业务后置条件 ID。
 - `src/polyarb/control_plane/qualification.py:30`：真正作废 epoch 的严重原因闭集。
 - `src/polyarb/control_plane/qualification.py:42`：暂停或阻塞健康秒的原因闭集。
 - `src/polyarb/control_plane/qualification.py:656`：单条事实如何改变资格状态。
@@ -123,3 +126,11 @@ runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma�
 不是。release/config 改变后证据身份不匹配，必须重新完成受影响合同；长期运行也应按
 风险和变更触发重演。资格窗负责持续健康事实，commissioning 负责证明已知恢复预案能
 被真实触发并闭环，两者互相不能替代。
+
+### 正常回合为什么需要三类事实？
+
+`attempt=succeeded` 只说生命周期已终止；`job.succeeded` 事件说明 runtime
+观测链看到了终态；业务后置条件则证明该节点真的产出了下游可消费事实。
+只有三者同时存在，才能排除“状态写成成功但业务事实缺失”和“业务成功但
+监控链静默”。`postcondition_fact_id` 还必须按当前 lease/job identity 精确查询，
+不能用“表里随便有一行”充当该回合的证据。

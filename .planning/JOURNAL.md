@@ -11672,3 +11672,24 @@ heartbeat/progress/worker-exit/stale-owner/retry-budget disposable adapter again
 all eight runtime job types, then add node-specific source/R2/parity/admission/
 batch/pointer/freshness adapters. Build one exact OrbStack image only after all
 adapter tests and a fresh full M1 gate pass.
+
+### SESSION 341 — 2026-08-30 (real PostgreSQL normal-turn commissioning fixtures)
+
+- [CLIMB H-037] Registered the next resumable hypothesis: every production node
+  must prove a real normal transaction before its directed fault attacks can be
+  trusted.
+- [EIGHT NODES] Added one disposable PostgreSQL fixture covering structure-fetch,
+  structure-materialize, structure-normalize, structure-certify, quote-admit,
+  quote-batch, quote-certify and opportunity-certify through their actual domain
+  APIs and runtime policy.
+- [THREE AUTHORITIES] Every result references a succeeded attempt, the matching
+  authoritative `job.succeeded` event and the node's causally bound business
+  postcondition. Pointer/successor checks reject unrelated table rows.
+- [BOUNDARY] This is executable test infrastructure, not manufactured
+  commissioning evidence. It performs no production mutation, provider call,
+  Machine action, Docker context change or arbitrary outer timeout.
+
+[NEXT] Complete H-037's event-driven runtime gate and record its climb cycle.
+Then refactor the normal-turn fixture into a prepare/complete boundary and prove
+stale-owner rejection plus current-owner recovery for all eight nodes before
+adding heartbeat, progress, worker-exit and retry-budget attacks.

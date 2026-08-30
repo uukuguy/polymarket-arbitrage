@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane
+from polyarb.control_plane.production_commissioning_disposable import complete_normal_turn
 from polyarb.control_plane.recovery_store import _runtime_deadline_profile
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
 from polyarb.control_plane.runtime_deadlines import (
@@ -439,6 +440,35 @@ def test_transactional_job_type_persists_one_start_progress_chain_and_terminal_e
     for event in events:
         detail = cast(dict[str, object], event["detail"])
         assert not _secret_like_detail_keys(detail)
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_disposable_commissioning_normal_turn_references_real_durable_facts(
+    control_plane: PostgresControlPlane,
+    job_type: str,
+) -> None:
+    proof = complete_normal_turn(
+        control_plane,
+        node_id=job_type,
+        experiment_id=f"normal-turn:{job_type}",
+        now=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1),
+    )
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        attempt = connection.execute(
+            "SELECT state FROM m1_job_attempts WHERE attempt_id = %s",
+            (proof["attempt_id"],),
+        ).fetchone()
+        event = connection.execute(
+            "SELECT kind FROM m1_job_runtime_events WHERE event_id = %s",
+            (proof["success_fact_id"],),
+        ).fetchone()
+
+    assert attempt == ("succeeded",)
+    assert event == (RuntimeEventKind.SUCCEEDED.value,)
+    assert proof["terminal_fact_id"] == f"attempt:{proof['attempt_id']}"
+    assert proof["postcondition_fact_id"].startswith("postgres:")
+    assert proof["succeeded_at"].endswith("+00:00")
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

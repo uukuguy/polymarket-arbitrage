@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 39
-- Next action: rank next pending hypothesis
+- Next action: evaluate eight real-PostgreSQL normal turns for H-037
 
 ## In flight
 
-- None
+- H-037
 
 ## Hypothesis pool
 
@@ -44,6 +44,7 @@
 - **H-034** [confirmed]: Every cooperative Structure subprocess parent can derive its only normal outer envelope from the child work slice plus one shared owned shutdown budget.
 - **H-035** [confirmed]: Command-scoped Docker context selection plus daemon and VM capacity reads can isolate M1 builds without mutating the user-global Docker default.
 - **H-036** [confirmed]: Platform-exact readiness grace and release-input identity checks can keep declared daemon startup behavior equal to the configuration Fly actually executes.
+- **H-037** [in-flight]: A disposable real-PostgreSQL normal-turn fixture can prove every one of the eight production nodes through its actual terminal attempt, runtime success event, and causally bound business postcondition instead of synthetic evidence.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
