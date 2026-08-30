@@ -23,17 +23,35 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-049
   description: A complete Structure generation whose normalized component counts conflict
-    with its frozen source identity can atomically quarantine the certifier, emit a terminal
-    integrity fact and critical alert, invalidate qualification, and preserve the prior
-    certified pointer without entering the retry circuit.
+    with its frozen source identity can atomically quarantine the certifier, emit
+    a terminal integrity fact and critical alert, invalidate qualification, and preserve
+    the prior certified pointer without entering the retry circuit.
   parent_paradigm: deterministic-runtime-production-enablement
-  expected_lift: Separate ordinary incomplete-barrier waiting from immutable parity conflict
-    so corrupt candidate truth cannot wait silently, consume retries, or replace the last
-    certified Structure generation.
+  expected_lift: Separate ordinary incomplete-barrier waiting from immutable parity
+    conflict so corrupt candidate truth cannot wait silently, consume retries, or
+    replace the last certified Structure generation.
   cost_h: 1.0
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T17:19:06+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 54
+    run: 20260830-093028-h-049
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-038
   description: A two-phase disposable transaction can reclaim each production node
     through the public lease path, reject the superseded owner's real terminal write,

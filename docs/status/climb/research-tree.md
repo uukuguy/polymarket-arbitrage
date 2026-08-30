@@ -4,12 +4,12 @@
 
 ## Session
 
-- Last cycle: 53
-- Next action: prove Structure parity conflict quarantine and pointer preservation
+- Last cycle: 54
+- Next action: rank next pending hypothesis
 
 ## In flight
 
-- H-049
+- None
 
 ## Hypothesis pool
 
@@ -56,7 +56,7 @@
 - **H-046** [confirmed]: A failed Quote batch can leave its certification barrier incomplete while opening one durable producer incident and publishing no pointer, after which the policy-due fenced retry commits the missing receipt, resolves that incident, and releases exactly one complete certification turn.
 - **H-047** [confirmed]: Translating a manifest-named missing Structure shard into one safe typed Quote admission incident can identify the exact unavailable artifact, prevent partial batch admission, and let the policy-due fenced retry admit the complete generation after that artifact is restored.
 - **H-048** [confirmed]: A schema-invalid manifest-authorized Structure shard can terminate the exact normalizer attempt through one atomic quarantined state, terminal runtime fact, critical operator incident, and alert while preserving the last certified Structure pointer.
-- **H-049** [in-flight]: A complete Structure generation whose normalized component counts conflict with its frozen source identity can atomically quarantine the certifier, emit a terminal integrity fact and critical alert, invalidate qualification, and preserve the prior certified pointer without entering the retry circuit.
+- **H-049** [confirmed]: A complete Structure generation whose normalized component counts conflict with its frozen source identity can atomically quarantine the certifier, emit a terminal integrity fact and critical alert, invalidate qualification, and preserve the prior certified pointer without entering the retry circuit.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -118,3 +118,4 @@
 - 20260830-033754-h-046: 100.0 (confirmed)
 - 20260830-035827-h-047: 100.0 (confirmed)
 - 20260830-042141-h-048: 100.0 (confirmed)
+- 20260830-093028-h-049: 100.0 (confirmed)

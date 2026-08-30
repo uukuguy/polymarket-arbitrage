@@ -12389,3 +12389,26 @@ into transient retry.
 full related regression, then confirm H-049 through climb cycle 54. Continue
 with the next disposable fault, preferring publication pointer conflict before
 shared R2 timeout adapters.
+
+### SESSION 368 — 2026-08-30 (H-049 Structure parity conflict confirmed)
+
+- [EXACT HEAD] Commit `09513eb1` passed the exact-revision build-only contract;
+  runtime image inputs matched HEAD, but no image was built or pushed.
+- [CLIMB H-049] Cycle 54 passed all nine production-enablement gates at 100%;
+  integration passed 144 cases and `disaster_pattern=false`.
+- [CHAIN-TRUTH] Missing Structure receipts remain ordinary waiting, while a
+  complete frozen component-count conflict now yields one quarantined
+  certifier attempt, terminal `integrity.conflict` fact, critical incident and
+  Dashboard alert, with zero retry circuit or candidate authority publication.
+- [AVAILABILITY] The prior certified Structure shadow pointer remains current;
+  the bad candidate invalidates qualification evidence without stopping the
+  last known-good read chain.
+- [ONLINE TARGET] `target evaluation not configured` is only the absent
+  external leaderboard target and does not weaken the confirmed local verdict.
+- [BOUNDARY] No production mutation/provider call, Fly/SSH/deploy, Docker build
+  or context change, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-049 confirmation state without protected user files. Audit and
+implement `publication-pointer-conflict` as the next disposable truth-boundary
+attack; keep shared R2 timeout adapters and the combined exact-image run
+deferred until their contracts are explicit.
