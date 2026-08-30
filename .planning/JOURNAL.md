@@ -11911,3 +11911,33 @@ through command-scoped OrbStack, then run and independently verify all eight
 progress-stall proofs against a port-unpublished PostgreSQL 16 container. Remove
 the disposable container after zero-residue checks; do not start production
 canaries or qualification.
+
+### SESSION 351 — 2026-08-30 (exact-v26 eight-node progress-stall evidence)
+
+- [ORBSTACK BUILD] Built and pushed build-only image
+  `m1-runtime-v26-9b770d57`; registry digest is `sha256:1452064d...`. Global
+  Docker context stayed `orbstack` and available capacity remained sufficient.
+- [INDEPENDENT IMAGE CHECK] An isolated registry-auth directory pulled the image
+  into OrbStack. Inspect proved amd64/linux, non-root `polyarb`, exact revision
+  `9b770d57...`, image ID `dfd70b31...` and 752,013,938-byte size.
+- [EIGHT-NODE EXECUTION] The exact image ran progress-stall commissioning for
+  all eight production nodes against one independently migrated disposable
+  database per node and returned 8/8 pass.
+- [PROOF SHAPE] All proofs bind the exact release and observe-only empty-
+  allowlist config, carry block impact, real incident/action/recovered/business
+  IDs and `cleanup_verified=true`.
+- [ZERO RESIDUE] Independent queries found zero temporary databases and zero
+  migration roles; the 72 attack files contain no sensitive strings. The
+  attack and PostgreSQL containers were then removed. Their disposable test
+  data is not recoverable; extracted evidence is preserved.
+- [CREDENTIAL CLEANUP] Temporary registry auth was moved to Trash without
+  touching global Docker credentials.
+- [IDENTITY BOUNDARY] v26 progress-stall evidence and v25 stale-owner evidence
+  validate both adapters but cannot form one final envelope because releases
+  differ. The eventual 66 proofs must share one immutable release/config.
+
+[NEXT] Commit Plan 05.6-228 evidence without protected user files. Register the
+next shared-attack hypothesis and implement worker-exit reclaim or heartbeat-
+outage renewal on the same real eight-node transaction fixture. Confirm the
+remaining adapters before building the next combined exact image; do not start
+production canaries or qualification.

@@ -1,0 +1,25 @@
+{
+  "attack_id": "progress-stall",
+  "config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+  "database_cleanup": {
+    "migration_role_count": 0,
+    "temporary_database_count": 0
+  },
+  "evidence_file_count": 72,
+  "executed_at": "2026-08-30T02:09:37Z",
+  "execution_scope": "disposable-exact-image",
+  "image": {
+    "architecture": "amd64",
+    "digest": "sha256:1452064dd351fccbd9c41abada2b993f74be8b08603c5e800e7f1b9e6a06fa8e",
+    "id": "sha256:dfd70b310b88a01f09e4f8fc0be81c368ef68650a466776562b738eb55fc249a",
+    "os": "linux",
+    "repository": "registry.fly.io/polyarb-control-worker-m1",
+    "size_bytes": 752013938,
+    "tag": "m1-runtime-v26-9b770d57",
+    "user": "polyarb"
+  },
+  "node_count": 8,
+  "proof_count": 8,
+  "release_id": "9b770d57c906dc792f640b0f9b02c347a7bb92c0",
+  "status": "pass"
+}
