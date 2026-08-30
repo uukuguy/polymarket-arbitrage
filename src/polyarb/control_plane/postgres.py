@@ -5056,22 +5056,6 @@ class PostgresControlPlane:
             )
             cursor.execute(
                 """
-                SELECT 1 FROM m1_jobs
-                WHERE job_type IN (
-                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
-                )
-                  AND state IN (
-                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
-                  )
-                LIMIT 1
-                """
-            )
-            if cursor.fetchone() is not None:
-                raise StructureSuccessorBusyError(
-                    "Structure certification is waiting for the current executable successor"
-                )
-            cursor.execute(
-                """
                 SELECT job_key, bundle_digest, component, ordinal, range_digest, admitted_at
                 FROM m1_structure_range_inputs
                 WHERE generation_key = %s
@@ -5179,6 +5163,26 @@ class PostgresControlPlane:
             if artifact_digest != manifest_digest:
                 raise CheckpointConflictError(
                     "Structure manifest digest does not match range receipts"
+                )
+            # Validate the entire candidate before applying the serialization
+            # gate.  A corrupt candidate must be quarantined immediately even
+            # while the prior Structure's executable successor is still live;
+            # only a valid publication is allowed to wait behind that chain.
+            cursor.execute(
+                """
+                SELECT 1 FROM m1_jobs
+                WHERE job_type IN (
+                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                )
+                  AND state IN (
+                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                  )
+                LIMIT 1
+                """
+            )
+            if cursor.fetchone() is not None:
+                raise StructureSuccessorBusyError(
+                    "Structure certification is waiting for the current executable successor"
                 )
             record_count = sum(int(row["record_count"]) for row in ordered)
             self._append_job_succeeded_cursor(

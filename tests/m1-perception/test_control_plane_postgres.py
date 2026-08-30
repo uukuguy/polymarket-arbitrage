@@ -2964,12 +2964,26 @@ def test_structure_certification_waits_when_older_quote_successor_already_won_lo
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
-    generation_key = f"structure:{'e' * 64}"
-    certifier_key = f"{generation_key}:certify"
-    control_plane.enqueue_job(
-        job_key=certifier_key,
-        job_type="structure-certify",
-        input_identity=generation_key,
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"serialized-race"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    normalizer = control_plane.claim_job(
+        worker_id="structure-race-normalizer",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert normalizer is not None
+    control_plane.complete_structure_range(
+        normalizer,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/serialized-race.ndjson",
+        artifact_digest="d" * 64,
+        record_count=1,
         now=now,
     )
     control_plane.enqueue_job(
@@ -2985,20 +2999,37 @@ def test_structure_certification_waits_when_older_quote_successor_already_won_lo
         now=now,
     )
     assert certifier is not None
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": "structure-ranges/serialized-race.ndjson",
+                    "artifact_digest": "d" * 64,
+                    "record_count": 1,
+                },
+            ),
+        )
+    ).hexdigest()
 
     with pytest.raises(StructureSuccessorBusyError):
         control_plane.certify_structure_generation(
             certifier,
-            generation_key=generation_key,
+            generation_key=spec.generation_key,
             artifact_key="structure-manifests/race.ndjson",
-            artifact_digest="f" * 64,
+            artifact_digest=manifest_digest,
             now=now,
         )
 
     with control_plane._connection_factory() as connection:
         state = connection.execute(
             "SELECT state FROM m1_jobs WHERE job_key = %s",
-            (certifier_key,),
+            (f"{spec.generation_key}:certify",),
         ).fetchone()
     assert state == ("leased",)
 
@@ -14166,6 +14197,16 @@ def _seed_freshness_pointers(
                 published_at = EXCLUDED.published_at
             """,
             (structure_key, published_at, quote_key, published_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_generation_inputs (
+                generation_key, structure_generation_key, universe_hash,
+                cadence_seconds, cadence_bucket, admitted_at
+            ) VALUES (%s, %s, %s, NULL, NULL, %s)
+            ON CONFLICT (generation_key) DO NOTHING
+            """,
+            (quote_key, structure_key, "f" * 64, published_at),
         )
         connection.execute(
             """

@@ -28,7 +28,11 @@ from .quote_admission import (
     QuoteAdmissionShardUnavailable,
     TransactionalQuoteAdmitter,
 )
-from .quote_artifact import QuoteBatchArtifact, canonical_quote_batch_bytes
+from .quote_artifact import (
+    QuoteBatchArtifact,
+    QuoteBatchInputArtifact,
+    canonical_quote_batch_bytes,
+)
 from .quote_worker import TransactionalQuoteBatchWorker
 from .reconciler import RuntimeReconciler
 from .recovery_executor import RecoveryExecutor
@@ -3816,7 +3820,9 @@ class StructureParityMismatchCommissioningAdapter:
         self._clock_at = self._started_at + timedelta(seconds=10)
         result = certifier.run_once()
         if result.outcome != "quarantined":
-            raise DisposableCommissioningError("parity-mismatch-not-quarantined")
+            raise DisposableCommissioningError(
+                f"parity-mismatch-not-quarantined:{result.outcome}:{result.job_key}"
+            )
         job_key = self._need(self._job_key, "parity-job-missing")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             row = connection.execute(
@@ -4011,15 +4017,41 @@ class StaleQuotePointerCommissioningAdapter:
     ) -> tuple[str, str]:
         structure_digest = self._need(self._structure_digest, "structure-digest-missing")
         legs = (
-            _leg(f"{identity.experiment_id}:{label}:a"),
-            _leg(f"{identity.experiment_id}:{label}:b"),
+            _leg(f"{identity.experiment_id}:authority:a"),
+            _leg(f"{identity.experiment_id}:authority:b"),
         )
-        universe_hash = sha256(f"{identity.experiment_id}:{label}:universe".encode()).hexdigest()
-        batch = self._control_plane.enqueue_quote_generation(
+        universe_hash = sha256(f"{identity.experiment_id}:authority:universe".encode()).hexdigest()
+        admission = _claim(self._control_plane, "quote-admit", admitted_at)
+        _structure, _bundle_key, _bundle_digest, quote_generation_key = (
+            self._control_plane.quote_admission_input(admission.job_key)
+        )
+        planned = self._control_plane.quote_batches_from_legs(
+            structure_receipt_digest=structure_digest,
+            quote_generation_digest=quote_generation_key.removeprefix("quote:"),
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=2,
+        )
+        input_artifacts: dict[str, tuple[str, str, int]] = {}
+        for item in planned:
+            input_artifact = QuoteBatchInputArtifact.from_spec(item)
+            self._objects.restore(
+                key=input_artifact.key,
+                payload=input_artifact.payload,
+                digest=input_artifact.sha256,
+            )
+            input_artifacts[item.job_key] = (
+                input_artifact.key,
+                input_artifact.sha256,
+                len(item.legs),
+            )
+        batch = self._control_plane.admit_quote_generation(
+            admission,
             structure_receipt_digest=structure_digest,
             universe_hash=universe_hash,
             legs=legs,
             batch_size=2,
+            input_artifacts=input_artifacts,
             now=admitted_at,
         )[0]
         payload = canonical_quote_batch_bytes(
@@ -4159,25 +4191,32 @@ class StaleQuotePointerCommissioningAdapter:
         detected: AttackStageReceipt,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        structure_generation, structure_digest = _structure_prerequisite(
-            self._control_plane,
-            f"{identity.experiment_id}:fresh-authority",
-            self._started_at + timedelta(seconds=2),
-        )
-        self._structure_generation = structure_generation
-        self._structure_digest = structure_digest
+        # A Quote refresh deliberately reuses the last certified Structure
+        # authority.  Creating a second Structure here would violate the same
+        # Structure -> Quote serialization that this attack is meant to prove.
+        self._need(self._structure_generation, "structure-generation-missing")
+        self._need(self._structure_digest, "structure-digest-missing")
         self._clock_at = self._started_at + timedelta(seconds=8)
-        fresh_generation, fresh_job_key = self._publish_quote(
-            identity=identity,
-            label="fresh",
-            quoted_at=self._clock_at,
-            admitted_at=self._clock_at,
+        admitted = self._control_plane.admit_due_quote_refresh(
+            cadence_seconds=1,
+            now=self._clock_at,
         )
+        repeated = self._control_plane.admit_due_quote_refresh(
+            cadence_seconds=1,
+            now=self._clock_at,
+        )
+        if admitted.state != "admitted" or admitted.job_key is None:
+            raise DisposableCommissioningError(
+                f"fresh-quote-refresh-not-admitted:{admitted.state}"
+            )
+        if repeated.state != "busy" or repeated.job_key is not None:
+            raise DisposableCommissioningError("same-bucket-refresh-not-deduplicated")
+        fresh_generation = admitted.job_key.removesuffix(":admit")
         self._fresh_generation = fresh_generation
-        self._fresh_job_key = fresh_job_key
+        self._fresh_job_key = f"{fresh_generation}:opportunity-certify"
         return AttackStageReceipt(
             stage="recovery-started",
-            receipt_id=f"pointer:quote:current:{fresh_generation}",
+            receipt_id=f"postgres:m1_quote_generation_inputs:{fresh_generation}",
             occurred_at=self._clock_at,
         )
 
@@ -4188,6 +4227,8 @@ class StaleQuotePointerCommissioningAdapter:
     ) -> AttackStageReceipt:
         self._require_identity(identity)
         stale_job = self._need(self._stale_job_key, "stale-job-missing")
+        stale_generation = self._need(self._stale_generation, "stale-generation-missing")
+        fresh_generation = self._need(self._fresh_generation, "fresh-generation-missing")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             shape = connection.execute(
                 """
@@ -4200,11 +4241,26 @@ class StaleQuotePointerCommissioningAdapter:
                 """,
                 (stale_job,),
             ).fetchone()
+            interrupted = connection.execute(
+                """
+                SELECT job.state,
+                       (SELECT count(*) FROM m1_quote_generation_inputs
+                        WHERE generation_key = %s),
+                       (SELECT count(*) FROM m1_generation_manifests
+                        WHERE generation_key = %s),
+                       (SELECT generation_key FROM m1_publication_pointers
+                        WHERE pointer_key = 'quote:current')
+                FROM m1_jobs AS job WHERE job.job_key = %s
+                """,
+                (fresh_generation, fresh_generation, f"{fresh_generation}:admit"),
+            ).fetchone()
         if shape != ("quarantined", 0, 0):
             raise DisposableCommissioningError("stale-quote-partial-business-fact")
+        if interrupted != ("runnable", 1, 0, stale_generation):
+            raise DisposableCommissioningError("refresh-interruption-not-resumable")
         return AttackStageReceipt(
             stage="cleanup",
-            receipt_id=f"postgres:m1_opportunity_projection_rows:{stale_job}:absent",
+            receipt_id=f"postgres:m1_jobs:{fresh_generation}:admit:runnable",
             occurred_at=self._started_at + timedelta(seconds=9),
         )
 
@@ -4216,6 +4272,17 @@ class StaleQuotePointerCommissioningAdapter:
     ) -> AttackStageReceipt:
         self._require_identity(identity)
         self._clock_at = self._started_at + timedelta(seconds=10)
+        published_generation, published_job = self._publish_quote(
+            identity=identity,
+            label="fresh",
+            quoted_at=self._clock_at,
+            admitted_at=self._clock_at,
+        )
+        if (
+            published_generation != self._fresh_generation
+            or published_job != self._fresh_job_key
+        ):
+            raise DisposableCommissioningError("resumed-refresh-changed-identity")
         result = self._worker.run_once()
         fresh_generation = self._need(self._fresh_generation, "fresh-generation-missing")
         if result.outcome.split(":", 1)[0] != "certified":
@@ -4647,10 +4714,13 @@ class ClobMissingLegCommissioningAdapter:
 
     def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
         self._require_identity(identity)
+        _structure_generation, structure_digest = _structure_prerequisite(
+            self._control_plane,
+            f"{identity.experiment_id}:clob-authority",
+            self._started_at - timedelta(seconds=10),
+        )
         batch = self._control_plane.enqueue_quote_generation(
-            structure_receipt_digest=sha256(
-                f"{identity.experiment_id}:structure".encode()
-            ).hexdigest(),
+            structure_receipt_digest=structure_digest,
             universe_hash=sha256(f"{identity.experiment_id}:universe".encode()).hexdigest(),
             legs=(_leg(f"{identity.experiment_id}:token"),),
             batch_size=1,

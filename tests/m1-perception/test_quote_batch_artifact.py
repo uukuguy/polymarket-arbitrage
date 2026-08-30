@@ -58,6 +58,7 @@ def test_quote_batch_artifact_is_canonical_content_addressed_and_head_verified()
 def test_quote_batch_input_artifact_round_trips_the_fenced_batch_spec() -> None:
     spec = QuoteBatchSpec.from_legs(
         structure_receipt_digest="a" * 64,
+        quote_generation_digest="c" * 64,
         universe_hash="b" * 64,
         ordinal=7,
         legs=(

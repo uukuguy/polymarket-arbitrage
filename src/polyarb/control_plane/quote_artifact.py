@@ -99,6 +99,7 @@ def canonical_quote_batch_input_bytes(spec: QuoteBatchSpec) -> bytes:
         raise ValueError("quote batch input artifact requires legs")
     header = {
         "ordinal": spec.ordinal,
+        "quote_generation_digest": spec.quote_generation_digest,
         "structure_receipt_digest": spec.structure_receipt_digest,
         "token_range_digest": spec.token_range_digest,
         "universe_hash": spec.universe_hash,
@@ -157,6 +158,12 @@ def parse_quote_batch_input_bytes(
             universe_hash=str(header["universe_hash"]),
             ordinal=int(header["ordinal"]),
             legs=legs,
+            quote_generation_digest=str(
+                header.get(
+                    "quote_generation_digest",
+                    header["structure_receipt_digest"],
+                )
+            ),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise QuoteArtifactError("quote-batch-input-artifact-invalid") from error
