@@ -1,4 +1,18 @@
 hypotheses:
+- id: H-051
+  description: A typed fail-once R2 GET at each reading production node can terminate
+    one exact attempt without a business receipt, then let the central retry policy
+    consume the same immutable artifact digest under the same job input identity and
+    publish exactly one success fact.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Replace unbounded whole-run timeout diagnosis with stage-exact object
+    boundary evidence, durable retry timing, and independently verifiable recovery
+    for all six R2-reading nodes.
+  cost_h: 1.0
+  ranking: 1.0
+  status: testing
+  created_at: '2026-08-30T18:45:00+08:00'
+  results: []
 - id: H-050
   description: Freezing each publication candidate's expected predecessor and enforcing
     one lineage compare-and-swap can reject stale Structure, Quote, and Opportunity

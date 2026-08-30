@@ -24,6 +24,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     PublicationPointerConflictCommissioningAdapter,
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
+    R2ReadTimeoutCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -1308,6 +1309,72 @@ def test_publication_pointer_conflict_adapter_preserves_current_lineage(
     assert str(proof["recovery_fact_id"]).startswith("event:")
     assert str(proof["postcondition_fact_id"]).startswith("pointer:")
     assert proof["cleanup_verified"] is True
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    (
+        "structure-materialize",
+        "structure-normalize",
+        "structure-certify",
+        "quote-admit",
+        "quote-certify",
+        "opportunity-certify",
+    ),
+)
+def test_r2_read_timeout_adapter_retries_same_artifact_and_input_identity(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    node_id: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{node_id}:r2-read-timeout",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=node_id,
+        attack_id="r2-read-timeout",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=R2ReadTimeoutCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=67),
+        ),
+        evidence_dir=tmp_path / node_id,
+    )
+
+    assert proof["qualification_impact"] == "pause"
+    assert str(proof["detector_fact_id"]).startswith("event:")
+    assert str(proof["recovery_action_id"]).startswith("retry:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        shape = connection.execute(
+            """
+            SELECT
+              count(DISTINCT attempt.attempt_id) FILTER (WHERE attempt.state = 'retryable'),
+              count(DISTINCT attempt.attempt_id) FILTER (WHERE attempt.state = 'succeeded'),
+              count(DISTINCT job.input_identity),
+              min(circuit.state), min(circuit.consecutive_failures),
+              min(incident.state),
+              count(DISTINCT runtime.event_id) FILTER (WHERE runtime.kind = 'job.succeeded')
+            FROM m1_job_attempts AS attempt
+            JOIN m1_jobs AS job USING (job_key)
+            JOIN m1_job_circuits AS circuit USING (job_key)
+            JOIN m1_incidents AS incident
+              ON incident.dedupe_key = 'job-retry:' || attempt.job_key
+            LEFT JOIN m1_job_runtime_events AS runtime
+              ON runtime.job_key = attempt.job_key
+             AND runtime.lease_epoch = attempt.lease_epoch
+            WHERE job.job_type = %s AND incident.summary = %s
+            """,
+            (node_id, f"{node_id} R2 read timeout"),
+        ).fetchone()
+
+    assert shape == (1, 1, 1, "closed", 0, "resolved", 1)
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

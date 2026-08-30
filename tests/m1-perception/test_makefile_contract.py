@@ -798,6 +798,16 @@ def test_make_help_lists_publication_pointer_conflict_commissioning_harness() ->
     assert "stale Structure, Quote, and Opportunity publishers" in result.stdout
 
 
+def test_make_help_lists_r2_read_timeout_commissioning_harness() -> None:
+    result = subprocess.run(
+        ["make", "help"], capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=10
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "m1-production-commissioning-r2-read-timeout:" in result.stdout
+    assert "six R2-reading production nodes" in result.stdout
+
+
 def test_make_stale_owner_commissioning_requires_test_dsn_before_fake_uv(
     tmp_path: Path,
 ) -> None:
@@ -1495,6 +1505,47 @@ def test_make_publication_pointer_conflict_commissioning_executes_exact_harness_
             "-m",
             "polyarb.control_plane.production_commissioning_harness",
             "publication-pointer-conflict",
+            "--root",
+            "evidence",
+            "--release-id",
+            release,
+            "--config-id",
+            config,
+            "--json",
+        ]
+    ]
+
+
+def test_make_r2_read_timeout_commissioning_executes_exact_harness_command(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    release = "a" * 40
+    config = f"sha256:{'b' * 64}"
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-r2-read-timeout",
+            "evidence_root=evidence",
+            f"expected_release={release}",
+            f"expected_config={config}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.production_commissioning_harness",
+            "r2-read-timeout",
             "--root",
             "evidence",
             "--release-id",

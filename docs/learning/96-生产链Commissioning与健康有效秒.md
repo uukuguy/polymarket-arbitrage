@@ -336,3 +336,22 @@ Opportunity worker 在 `quote_worker.py:655` 与 `opportunity_worker.py:153` 把
 superseded，同时写 warning incident 和 `publication.superseded` terminal fact；当前 generation 继续服务。
 commissioning 对三个指针节点逐一注入旧发布竞争（`production_commissioning_disposable.py:3551`），
 要求最终只有一个 current，且它精确匹配新 generation 的 success fact。
+
+### R2 读超时为什么不能用“给整个 commissioning 加 120 秒 timeout”来验证？
+
+整窗 timeout 只能证明 runner 在某个时刻被杀，无法回答是哪个 artifact、哪个 runtime
+stage、哪个 lease epoch 失败，也无法证明失败前没有发布半成品。更糟的是，它会把数据库迁移、
+容器调度抖动和对象存储故障混成同一种“超时”，再次形成单点停摆。
+
+`R2ReadTimeoutCommissioningAdapter`（`production_commissioning_disposable.py:1760`）因此不
+sleep：它对绑定当前 `input_identity` 的一个 immutable key 注入一次 botocore
+`ReadTimeoutError`。第一次 GET 必须通过中央 `finish_retryable_with_incident()` 留下
+stage-exact failure fact，且业务 postcondition 仍不存在；retry due-at 完全来自共享
+`RuntimeRetryPolicy`，adapter 不复制秒数公式。
+
+normal-turn fixture 也支持停在精确读取 stage（`prepare_normal_turn()` 与
+`_record_progress()`，同文件约 4174/4239 行）。否则 fixture 若已提前推进到 commit stage，
+incident 写 read、runtime event 写 commit，就会形成逻辑矛盾的假证据。恢复 epoch 才继续后续
+stage，第二次 GET 校验原 SHA-256，然后提交唯一业务事实并关闭 incident/circuit。6 个实际读
+节点由 `run_r2_read_timeout_commissioning()` 在 6 个独立迁移数据库中逐一执行；runner 本身仍
+没有任意外层超时。

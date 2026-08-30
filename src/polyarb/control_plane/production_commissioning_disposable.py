@@ -10,6 +10,7 @@ from hashlib import sha256
 from io import BytesIO
 from typing import Any
 
+from botocore.exceptions import ReadTimeoutError
 from psycopg.types.json import Jsonb
 
 from .models import JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
@@ -60,6 +61,16 @@ class _DisposableObjectStore:
 
     def __init__(self) -> None:
         self._objects: dict[str, tuple[bytes, dict[str, str]]] = {}
+        self._read_timeout_keys: set[str] = set()
+        self._read_counts: dict[str, int] = {}
+
+    def arm_read_timeout(self, key: str) -> None:
+        if key not in self._objects:
+            raise DisposableCommissioningError("read-timeout-artifact-missing")
+        self._read_timeout_keys.add(key)
+
+    def read_count(self, key: str) -> int:
+        return self._read_counts.get(key, 0)
 
     def restore(self, *, key: str, payload: bytes, digest: str) -> None:
         if sha256(payload).hexdigest() != digest:
@@ -71,6 +82,10 @@ class _DisposableObjectStore:
 
     def get_object(self, **kwargs: Any) -> dict[str, object]:
         key = str(kwargs["Key"])
+        self._read_counts[key] = self.read_count(key) + 1
+        if key in self._read_timeout_keys:
+            self._read_timeout_keys.remove(key)
+            raise ReadTimeoutError(endpoint_url=f"https://r2.invalid/{key}")
         try:
             payload, _metadata = self._objects[key]
         except KeyError as error:
@@ -1735,6 +1750,297 @@ class RetryBudgetCommissioningAdapter:
             raise DisposableCommissioningError("probe-recovery-not-closed")
         if attempt != (replacement.lease_epoch,):
             raise DisposableCommissioningError("probe-successor-proof-mismatch")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=2),
+        )
+
+
+class R2ReadTimeoutCommissioningAdapter:
+    """Fail one exact immutable GET, then retry the same node input durably."""
+
+    _READ_STAGES = {
+        "structure-materialize": "read-page-receipts",
+        "structure-normalize": "read-range",
+        "structure-certify": "verify-parity",
+        "quote-admit": "read-manifest",
+        "quote-certify": "verify-batches",
+        "opportunity-certify": "read-current-quote",
+    }
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._objects = _DisposableObjectStore()
+        self._prepared: PreparedNormalTurn | None = None
+        self._replacement: JobLease | None = None
+        self._artifact_key: str | None = None
+        self._artifact_digest: str | None = None
+        self._retry_due_at: datetime | None = None
+        self._failure_event_id: str | None = None
+        self._recovered_proof: dict[str, str] | None = None
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _require_identity(self, identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "r2-read-timeout"
+            or identity.node_id not in self._READ_STAGES
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = prepare_normal_turn(
+            self._control_plane,
+            node_id=identity.node_id,
+            experiment_id=identity.experiment_id,
+            now=self._started_at,
+            progress_through=self._READ_STAGES[identity.node_id],
+        )
+        payload = (
+            f"{identity.node_id}:{prepared.lease.input_identity}:immutable-r2-input\n"
+        ).encode()
+        digest = sha256(payload).hexdigest()
+        key = f"commissioning/r2-read/{digest}/artifact.bin"
+        self._objects.restore(key=key, payload=payload, digest=digest)
+        self._prepared = prepared
+        self._artifact_key = key
+        self._artifact_digest = digest
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (prepared.lease.job_key, prepared.lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("read-timeout-attempt-missing")
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"attempt:{row[0]}:artifact:{key}:{digest}",
+            occurred_at=self._started_at,
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        self._objects.arm_read_timeout(key)
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"r2:get:{key}:ReadTimeoutError",
+            occurred_at=self._started_at + timedelta(seconds=1),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "read-timeout-turn-missing")
+        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
+        try:
+            self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
+        except ReadTimeoutError as error:
+            failure_at = self._started_at + timedelta(seconds=2)
+            self._retry_due_at = self._control_plane.finish_retryable_with_incident(
+                prepared.lease,
+                error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{prepared.lease.job_key}",
+                dedupe_key=f"job-retry:{prepared.lease.job_key}",
+                component=identity.node_id,
+                summary=f"{identity.node_id} R2 read timeout",
+                detail={
+                    "job_key": prepared.lease.job_key,
+                    "lease_epoch": prepared.lease.lease_epoch,
+                    "stage": self._READ_STAGES[identity.node_id],
+                    "object_operation": "get",
+                    "artifact_key": key,
+                    "artifact_digest": digest,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
+                now=failure_at,
+            )
+        else:
+            raise DisposableCommissioningError("r2-read-timeout-not-injected")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key = %s AND lease_epoch = %s
+                  AND kind = 'job.retryable-failed'
+                """,
+                (prepared.lease.job_key, prepared.lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("r2-read-timeout-event-missing")
+        self._failure_event_id = str(row[0])
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{self._failure_event_id}",
+            occurred_at=self._started_at + timedelta(seconds=2),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "read-timeout-turn-missing")
+        due_at = self._need(self._retry_due_at, "read-timeout-retry-due-missing")
+        replacement = self._control_plane.claim_job(
+            worker_id=f"commissioning:r2-read-retry:{identity.node_id}",
+            job_types=(identity.node_id,),
+            lease_seconds=120,
+            now=due_at,
+        )
+        if (
+            replacement is None
+            or replacement.job_key != prepared.lease.job_key
+            or replacement.lease_epoch != prepared.lease.lease_epoch + 1
+            or replacement.input_identity != prepared.lease.input_identity
+        ):
+            raise DisposableCommissioningError("r2-read-replacement-mismatch")
+        self._replacement = replacement
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"retry:{replacement.job_key}:{replacement.lease_epoch}",
+            occurred_at=due_at,
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "read-timeout-turn-missing")
+        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            try:
+                _postcondition_fact(connection, prepared.lease)
+            except DisposableCommissioningError:
+                pass
+            else:
+                raise DisposableCommissioningError("r2-read-partial-postcondition")
+            attempt = connection.execute(
+                """
+                SELECT state, error_class FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (prepared.lease.job_key, prepared.lease.lease_epoch),
+            ).fetchone()
+        if attempt != ("retryable", "ReadTimeoutError"):
+            raise DisposableCommissioningError("r2-read-failure-shape")
+        if not self._objects.contains(key) or self._objects.read_count(key) != 1:
+            raise DisposableCommissioningError("r2-read-cleanup-shape")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"artifact:{key}:{digest}:unchanged",
+            occurred_at=self._need(self._retry_due_at, "read-timeout-retry-due-missing")
+            + timedelta(microseconds=1),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "read-timeout-turn-missing")
+        replacement = self._need(self._replacement, "read-timeout-replacement-missing")
+        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
+        response = self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
+        body = response.get("Body")
+        if not isinstance(body, BytesIO):
+            raise DisposableCommissioningError("r2-read-recovery-body-missing")
+        payload = body.read()
+        if sha256(payload).hexdigest() != digest:
+            raise DisposableCommissioningError("r2-read-recovery-digest-mismatch")
+        completed_at = self._need(
+            self._retry_due_at, "read-timeout-retry-due-missing"
+        ) + timedelta(seconds=2)
+        self._recovered_proof = prepared.complete(lease=replacement, now=completed_at)
+        if not self._control_plane.record_job_recovery(
+            replacement,
+            component=identity.node_id,
+            channels=("dashboard",),
+            now=completed_at + timedelta(seconds=1),
+        ):
+            raise DisposableCommissioningError("r2-read-incident-not-resolved")
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
+            occurred_at=completed_at + timedelta(seconds=1),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "read-timeout-turn-missing")
+        replacement = self._need(self._replacement, "read-timeout-replacement-missing")
+        proof = self._need(self._recovered_proof, "read-timeout-proof-missing")
+        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                """
+                SELECT job.input_identity, circuit.consecutive_failures, circuit.state,
+                       circuit.next_probe_at, incident.state,
+                       count(runtime.event_id) FILTER (
+                         WHERE runtime.kind = 'job.succeeded'
+                       ),
+                       (SELECT failed.stage FROM m1_job_runtime_events AS failed
+                        WHERE failed.job_key = job.job_key
+                          AND failed.lease_epoch = %s
+                          AND failed.kind = 'job.retryable-failed')
+                FROM m1_jobs AS job
+                JOIN m1_job_circuits AS circuit USING (job_key)
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key = 'job-retry:' || job.job_key
+                LEFT JOIN m1_job_runtime_events AS runtime USING (job_key)
+                WHERE job.job_key = %s
+                GROUP BY job.job_key, job.input_identity, circuit.consecutive_failures,
+                         circuit.state, circuit.next_probe_at, incident.state
+                """,
+                (prepared.lease.lease_epoch, prepared.lease.job_key),
+            ).fetchone()
+        if state != (
+            prepared.lease.input_identity,
+            0,
+            "closed",
+            None,
+            "resolved",
+            1,
+            self._READ_STAGES[identity.node_id],
+        ):
+            raise DisposableCommissioningError("r2-read-recovery-state")
+        if replacement.input_identity != prepared.lease.input_identity:
+            raise DisposableCommissioningError("r2-read-input-identity-changed")
+        if self._objects.read_count(key) != 2:
+            raise DisposableCommissioningError("r2-read-count-mismatch")
         return AttackStageReceipt(
             stage="verified",
             receipt_id=proof["postcondition_fact_id"],
@@ -3871,6 +4177,7 @@ def prepare_normal_turn(
     node_id: str,
     experiment_id: str,
     now: datetime,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     """Prepare one real transaction and stop immediately before its fenced commit."""
 
@@ -3891,7 +4198,12 @@ def prepare_normal_turn(
         "quote-certify": _prepare_quote_certify,
         "opportunity-certify": _prepare_opportunity_certify,
     }
-    return preparers[node_id](control_plane, experiment_id, now)
+    return preparers[node_id](
+        control_plane,
+        experiment_id,
+        now,
+        progress_through=progress_through,
+    )
 
 
 def _normal_turn_proof(control_plane: PostgresControlPlane, lease: JobLease) -> dict[str, str]:
@@ -3924,7 +4236,13 @@ def _normal_turn_proof(control_plane: PostgresControlPlane, lease: JobLease) -> 
     }
 
 
-def _record_progress(control_plane: PostgresControlPlane, lease: JobLease, now: datetime) -> None:
+def _record_progress(
+    control_plane: PostgresControlPlane,
+    lease: JobLease,
+    now: datetime,
+    *,
+    through: str | None = None,
+) -> None:
     runtime = AttemptRuntime(
         store=control_plane,
         lease=lease,
@@ -3932,6 +4250,11 @@ def _record_progress(control_plane: PostgresControlPlane, lease: JobLease, now: 
         clock=lambda: now + timedelta(seconds=1),
     )
     stages = RUNTIME_STAGE_REGISTRY[lease.job_type]
+    if through is not None:
+        try:
+            stages = stages[: stages.index(through) + 1]
+        except ValueError as error:
+            raise DisposableCommissioningError("unknown-runtime-progress-stage") from error
     for index, stage in enumerate(stages, start=1):
         runtime.progress(
             stage=stage, current=index, total=len(stages), detail={"component": lease.job_type}
@@ -4000,12 +4323,16 @@ def _generation(control_plane: PostgresControlPlane, tag: str, now: datetime):
 
 
 def _prepare_structure_fetch(
-    cp: PostgresControlPlane, tag: str, now: datetime
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     window = f"commissioning:{tag}:source"
     cp.admit_structure_source_window(window_key=window, now=now)
     lease = _claim(cp, "structure-fetch", now)
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
 
     def commit(active_lease: JobLease, completed_at: datetime) -> None:
         _require(
@@ -4025,7 +4352,11 @@ def _prepare_structure_fetch(
 
 
 def _prepare_structure_materialize(
-    cp: PostgresControlPlane, tag: str, now: datetime
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     window = f"commissioning:{tag}:materialize"
     cp.admit_structure_source_window(window_key=window, now=now)
@@ -4048,7 +4379,7 @@ def _prepare_structure_materialize(
         cp.structure_source_window_digest(window),
         "gamma-source-window-events-v3-sharded",
     )
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
 
     def commit(active_lease: JobLease, completed_at: datetime) -> None:
         specs = cp.admit_structure_source_bundle(
@@ -4064,11 +4395,15 @@ def _prepare_structure_materialize(
 
 
 def _prepare_structure_normalize(
-    cp: PostgresControlPlane, tag: str, now: datetime
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     spec, _bundle = _generation(cp, tag, now)
     lease = _claim(cp, "structure-normalize", now)
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
 
     def commit(active_lease: JobLease, completed_at: datetime) -> None:
         cp.complete_structure_range(
@@ -4084,7 +4419,11 @@ def _prepare_structure_normalize(
 
 
 def _prepare_structure_certify(
-    cp: PostgresControlPlane, tag: str, now: datetime
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     spec, bundle = _generation(cp, tag, now)
     range_digest = sha256(f"{tag}:range-artifact".encode()).hexdigest()
@@ -4098,7 +4437,7 @@ def _prepare_structure_certify(
         now=now,
     )
     lease = _claim(cp, "structure-certify", now)
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
     manifest = sha256(
         canonical_structure_manifest_bytes(
             generation_key=spec.generation_key,
@@ -4129,7 +4468,13 @@ def _prepare_structure_certify(
     return PreparedNormalTurn(cp, lease, commit)
 
 
-def _prepare_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
+def _prepare_quote_admit(
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
+) -> PreparedNormalTurn:
     structure = sha256(f"{tag}:structure".encode()).hexdigest()
     universe = sha256(f"{tag}:universe".encode()).hexdigest()
     generation = f"structure:{structure}"
@@ -4159,7 +4504,7 @@ def _prepare_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> P
             (job_key, generation, bundle_key, structure, now),
         )
     lease = _claim(cp, "quote-admit", now)
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
     legs = (_leg(f"{tag}-token"),)
     batches = cp.quote_batches_from_legs(
         structure_receipt_digest=structure, universe_hash=universe, legs=legs, batch_size=1
@@ -4187,7 +4532,13 @@ def _prepare_quote_admit(cp: PostgresControlPlane, tag: str, now: datetime) -> P
     return PreparedNormalTurn(cp, lease, commit)
 
 
-def _prepare_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
+def _prepare_quote_batch(
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
+) -> PreparedNormalTurn:
     batch = cp.enqueue_quote_generation(
         structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
@@ -4196,7 +4547,7 @@ def _prepare_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> P
         now=now,
     )[0]
     lease = _claim(cp, "quote-batch", now)
-    _record_progress(cp, lease, now)
+    _record_progress(cp, lease, now, through=progress_through)
 
     def commit(active_lease: JobLease, completed_at: datetime) -> None:
         cp.record_quote_batch(
@@ -4214,7 +4565,13 @@ def _prepare_quote_batch(cp: PostgresControlPlane, tag: str, now: datetime) -> P
     return PreparedNormalTurn(cp, lease, commit)
 
 
-def _prepare_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) -> PreparedNormalTurn:
+def _prepare_quote_certify(
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
+) -> PreparedNormalTurn:
     batches = cp.enqueue_quote_generation(
         structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
@@ -4237,7 +4594,7 @@ def _prepare_quote_certify(cp: PostgresControlPlane, tag: str, now: datetime) ->
         )
     at = now + timedelta(seconds=len(batches))
     lease = _claim(cp, "quote-certify", at)
-    _record_progress(cp, lease, at)
+    _record_progress(cp, lease, at, through=progress_through)
 
     def commit(active_lease: JobLease, completed_at: datetime) -> None:
         cp.certify_quote_generation(
@@ -4287,13 +4644,17 @@ def _quote_prerequisite(cp: PostgresControlPlane, tag: str, structure: str, now:
 
 
 def _prepare_opportunity_certify(
-    cp: PostgresControlPlane, tag: str, now: datetime
+    cp: PostgresControlPlane,
+    tag: str,
+    now: datetime,
+    *,
+    progress_through: str | None = None,
 ) -> PreparedNormalTurn:
     structure_generation, structure_digest = _structure_prerequisite(cp, tag, now)
     quote_generation = _quote_prerequisite(cp, tag, structure_digest, now + timedelta(seconds=10))
     claimed_at = now + timedelta(seconds=20)
     lease = _claim(cp, "opportunity-certify", claimed_at)
-    _record_progress(cp, lease, claimed_at)
+    _record_progress(cp, lease, claimed_at, through=progress_through)
     rows = (
         {
             "group_id": f"{tag}-group",
@@ -4398,6 +4759,7 @@ __all__ = [
     "PreparedNormalTurn",
     "PublicationPointerConflictCommissioningAdapter",
     "ProgressStallCommissioningAdapter",
+    "R2ReadTimeoutCommissioningAdapter",
     "QuoteAdmissionMissingShardCommissioningAdapter",
     "QuoteBatchIncompleteCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",

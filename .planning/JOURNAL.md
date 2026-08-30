@@ -12467,3 +12467,30 @@ one combined exact-image rebuild.
 shared R2 read/write timeout contracts and implement deterministic disposable
 fault adapters; do not introduce an arbitrary whole-run timeout. Rebuild the
 exact runtime image only after both timeout families are locally closed.
+
+### SESSION 371 — 2026-08-30 (stage-exact R2 read timeout recovery)
+
+- [CLIMB H-051] Registered the six-node R2 read timeout hypothesis.
+- [NO OUTER CLOCK] The attack injects one provider-shaped botocore
+  `ReadTimeoutError` at an exact immutable GET. It adds no sleep, orchestration
+  timeout, or copied retry formula.
+- [STAGE TRUTH] Extended the shared real normal-turn fixture to stop at an
+  exact runtime stage. Failure facts now name the actual read stage instead of
+  contradicting an already-advanced commit-stage runtime state.
+- [DURABLE RETRY] The first attempt becomes retryable through the central
+  policy with no business receipt. The policy-due replacement retains the same
+  job input identity, consumes the same SHA-256, and commits one success fact.
+- [SIX NODES] Structure materialize/normalize/certify, Quote admit/certify and
+  Opportunity certify passed the real PostgreSQL adapter and isolated database
+  harness; cleanup removed every disposable database.
+- [ENTRY/TEACHING] Added Make entry, exact argv/help contracts, climb gates,
+  Plan 239 summary and a learning FAQ explaining why whole-run timeout evidence
+  is structurally insufficient.
+- [BOUNDARY] Local disposable PostgreSQL and in-memory object boundary only;
+  no production provider/DB, Fly/SSH/deploy, Docker build/context mutation,
+  Colima, canary or qualification operation occurred.
+
+[NEXT] Commit Plan 05.6-239 without protected user files, pass exact-HEAD and
+full related regression, then confirm H-051 through climb cycle 56. Continue
+with the seven-node R2 write timeout contract before one combined exact-image
+rebuild.
