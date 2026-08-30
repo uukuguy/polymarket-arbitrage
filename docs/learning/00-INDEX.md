@@ -111,6 +111,7 @@
 | 97 | [PostgreSQL 连接池与压力可观测](97-PostgreSQL连接池与压力可观测.md) | 建连风暴为何不是“调大 timeout” / lazy bounded pool / 事务归还与进程关闭 / 503 池压力计数 / 数据库故障分类 |
 | 98 | [可恢复故障与终态隔离](98-可恢复故障与终态隔离.md) | retryability 判断 / stale Quote 终态隔离 / incident 与 job 状态分离 / successor generation 恢复链 |
 | 99 | [低内存控制器的单进程恢复事务](99-低内存控制器的单进程恢复事务.md) | SSH 双进程 OOM / 乐观进程替换 / lane-busy 有界等待 / action 后置证明 / exact restore |
+| 100 | [生产节点健康不能由累计事实推断](100-生产节点健康不能由累计事实推断.md) | 当前任务与历史计数 / source-fetch egress 门 / 告警写入原子链 / 最小权限迁移 |
 
 ## Phase 02.1 教学增量（2026-05）
 

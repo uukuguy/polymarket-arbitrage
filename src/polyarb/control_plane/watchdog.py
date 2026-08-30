@@ -298,7 +298,7 @@ class SoakEvidenceGate:
 
 
 class CloudUsageGate:
-    """Fail closed when active work has no recent metered cloud-input fact."""
+    """Fail closed when an overdue source fetch has no metered cloud-input fact."""
 
     def __init__(self, *, max_age: timedelta) -> None:
         self._max_age = max_age
@@ -312,11 +312,30 @@ class CloudUsageGate:
     ) -> RuntimeObservation:
         if payload is None:
             return observation
-        counts = payload.get("job_counts")
-        active = isinstance(counts, Mapping) and any(
-            int(counts.get(key, 0)) > 0 for key in ("runnable", "leased", "succeeded")
-        )
-        if not active:
+        active_tasks = payload.get("active_tasks")
+        items = active_tasks.get("items") if isinstance(active_tasks, Mapping) else None
+        source_started_at: list[datetime] = []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, Mapping) or item.get("job_type") != "structure-fetch":
+                    continue
+                started_at = item.get("started_at")
+                if not isinstance(started_at, str):
+                    return RuntimeObservation(
+                        False,
+                        (*observation.failures, "cloud-usage:source-start-invalid"),
+                    )
+                try:
+                    source_started_at.append(datetime.fromisoformat(started_at).astimezone(UTC))
+                except ValueError:
+                    return RuntimeObservation(
+                        False,
+                        (*observation.failures, "cloud-usage:source-start-invalid"),
+                    )
+        if not source_started_at or all(
+            now.astimezone(UTC) - started_at <= self._max_age
+            for started_at in source_started_at
+        ):
             return observation
         usage = payload.get("cloud_usage")
         latest = usage.get("latest_observation") if isinstance(usage, Mapping) else None

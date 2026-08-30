@@ -267,25 +267,78 @@ def test_watchdog_pages_when_latest_cloud_evidence_sample_is_stale() -> None:
     assert observation.failures == ("evidence:sample-stale:901s",)
 
 
-def test_watchdog_rejects_active_collection_without_fresh_cloud_usage() -> None:
+def test_watchdog_requires_cloud_usage_only_for_an_overdue_source_fetch() -> None:
     from polyarb.control_plane.watchdog import CloudUsageGate, RuntimeObservation
 
     gate = CloudUsageGate(max_age=timedelta(minutes=15))
     now = datetime(2026, 8, 18, 14, 15, 1, tzinfo=UTC)
+    healthy = RuntimeObservation(True, ())
+    certifying = gate.apply(
+        healthy,
+        {
+            "job_counts": {"leased": 1, "succeeded": 100},
+            "active_tasks": {
+                "items": [
+                    {
+                        "job_type": "structure-certify",
+                        "started_at": "2026-08-18T13:00:00+00:00",
+                    }
+                ]
+            },
+            "cloud_usage": {
+                "latest_observation": {"observed_at": "2026-08-18T13:00:00+00:00"}
+            },
+        },
+        now=now,
+    )
+    fresh_source_grace = gate.apply(
+        healthy,
+        {
+            "active_tasks": {
+                "items": [
+                    {
+                        "job_type": "structure-fetch",
+                        "started_at": "2026-08-18T14:14:00+00:00",
+                    }
+                ]
+            },
+            "cloud_usage": {},
+        },
+        now=now,
+    )
     missing = gate.apply(
-        RuntimeObservation(True, ()),
-        {"job_counts": {"succeeded": 1}, "cloud_usage": {}},
+        healthy,
+        {
+            "active_tasks": {
+                "items": [
+                    {
+                        "job_type": "structure-fetch",
+                        "started_at": "2026-08-18T14:00:00+00:00",
+                    }
+                ]
+            },
+            "cloud_usage": {},
+        },
         now=now,
     )
     stale = gate.apply(
-        RuntimeObservation(True, ()),
+        healthy,
         {
-            "job_counts": {"succeeded": 1},
+            "active_tasks": {
+                "items": [
+                    {
+                        "job_type": "structure-fetch",
+                        "started_at": "2026-08-18T14:00:00+00:00",
+                    }
+                ]
+            },
             "cloud_usage": {"latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}},
         },
         now=now,
     )
 
+    assert certifying == healthy
+    assert fresh_source_grace == healthy
     assert missing.failures == ("cloud-usage:observation-missing",)
     assert stale.failures == ("cloud-usage:observation-stale:901s",)
 
