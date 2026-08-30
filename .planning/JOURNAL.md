@@ -12787,3 +12787,21 @@ considering any production mutation.
 [NEXT] Commit Plan 05.6-246 without protected user files, rerun exact-HEAD gates,
 then generate the complete 66-proof bundle against an isolated OrbStack
 PostgreSQL 16 service and confirm H-057 through climb.
+
+### SESSION 385 — 2026-08-30 (commissioning interruption defect closed)
+
+- [DISCOVERY] The first real complete run stopped after 8 normal turns and 40
+  proofs: Gamma failure handling instantiated legacy-daemon Settings and hit its
+  unrelated scan-secret validation; cleanup then lacked the retry due-at.
+- [IDENTITY FIX] Complete commissioning now declares the truthful
+  `POLYARB_RUNTIME_ROLE=control-plane`; no empty-secret bypass was added.
+- [RESUME FIX] Partial attempts are atomically archived, not overwritten, before
+  retry. Nested failures expose safe owned codes without provider messages.
+- [REAL RESUME] The diagnostic rerun reused 40 verified proofs, archived two
+  Gamma failure attempts and reached 66/66 attacks, 8/8 nodes, real E2E and
+  `status=ready` for the prior `aba7a9a4` release.
+- [ORBSTACK] Both scoped PostgreSQL containers were removed; global context
+  remained `orbstack`, with no Colima or global Docker mutation.
+
+[NEXT] Commit Plan 05.6-247, rerun exact-HEAD regression, generate a fresh full
+bundle bound to the new commit, then run climb H-057 and record confirmation.

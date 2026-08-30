@@ -109,6 +109,16 @@ runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma�
 - 文件残缺、身份漂移或时间线错误立即 fail closed，绝不覆盖“修好”；
 - 最终 envelope 已存在时直接重新读取并验签，不重复 66 次攻击。
 
+如果单次攻击已写入 intent/stage 却未形成 proof，临时数据库退出时仍会完成数据库与
+角色清理；下一次完整命令把该目录原子移动到
+`failed-attempts/<node>/<attack>/attempt-NNNN`，再从新的固定 proof 路径重试。
+失败现场因此永久保留，但不会让 `evidence-dir-exists` 变成无法恢复的单点故障。
+
+commissioning 运行真实事务 worker 时还必须声明 `POLYARB_RUNTIME_ROLE=control-plane`。
+否则默认的 legacy-daemon 身份会在故障告警路径要求 `/scan` HMAC secret，把不相关的
+旧服务认证契约误判成 Gamma/CLOB 恢复失败。这里不使用“允许空 secret”逃生开关，而是
+给进程正确的生产角色身份。
+
 E2E proof 也不是手写三个 ID。harness 先真实认证 Structure manifest 并发布 shadow
 pointer，再认证消费该 bundle digest 的 Quote generation，最后发布同时引用该 Structure
 与 Quote 的 Opportunity projection；随后用一次数据库 join 读取三段当前指针并计算
@@ -134,6 +144,7 @@ lineage digest。这样“每个节点单测都过”仍不能冒充“整条生
    该节点能否 ready？为什么？
 3. 为什么 `cleanup_verified` 与业务 postcondition 必须同时存在？
 4. 一个已有 proof 的 config_id 与本次命令不同，为什么断点续跑必须停止而不是重做覆盖？
+5. 为什么 disposable control-plane worker 不应通过 legacy daemon 的 scan-secret 校验？
 4. Quote 的 `successful_count=3` 小于 Structure 的 `progress_count=10`，为何不能据此判定
    `progress.regressed`？
 5. 哪四类真实外部边界值得 production canary，哪些故障应留在 disposable exact-image？

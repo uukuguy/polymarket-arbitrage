@@ -1870,6 +1870,29 @@ def test_make_complete_commissioning_executes_exact_resumable_harness_command(
     ]
 
 
+def test_make_complete_commissioning_declares_control_plane_runtime_identity() -> None:
+    env = os.environ.copy()
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "m1-production-commissioning-complete",
+            "evidence_root=evidence",
+            f"expected_release={'a' * 40}",
+            f"expected_config=sha256:{'b' * 64}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "POLYARB_RUNTIME_ROLE=control-plane uv run python" in result.stdout
+
+
 def test_make_help_lists_rolling_qualification_targets() -> None:
     result = subprocess.run(
         ["make", "help"],

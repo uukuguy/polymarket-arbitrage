@@ -779,7 +779,7 @@ m1-production-commissioning-complete:
 	@test -n "$(evidence_root)" || (echo "usage: make m1-production-commissioning-complete evidence_root=<dir> expected_release=<40-char-sha> expected_config=<sha256:id>" >&2; exit 2)
 	@test -n "$(expected_release)" || (echo "ERROR: expected_release is required" >&2; exit 2)
 	@test -n "$(expected_config)" || (echo "ERROR: expected_config is required" >&2; exit 2)
-	@uv run python -m polyarb.control_plane.production_commissioning_harness complete --root "$(evidence_root)" --release-id "$(expected_release)" --config-id "$(expected_config)" --json
+	@POLYARB_RUNTIME_ROLE=control-plane uv run python -m polyarb.control_plane.production_commissioning_harness complete --root "$(evidence_root)" --release-id "$(expected_release)" --config-id "$(expected_config)" --json
 
 ## m1-production-commissioning-stale-owner: Prove all eight stale-owner fences in isolated migrated loopback databases; never contacts production.
 m1-production-commissioning-stale-owner:

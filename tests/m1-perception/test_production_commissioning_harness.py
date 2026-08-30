@@ -8,6 +8,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from polyarb.control_plane import production_commissioning_harness as harness_module
 from polyarb.control_plane import runtime_fault_matrix as matrix_module
 from polyarb.control_plane.production_commissioning_harness import (
     CommissioningHarnessError,
@@ -37,6 +38,46 @@ from polyarb.control_plane.runtime_fault_matrix import (
 
 RELEASE = "a" * 40
 CONFIG = f"sha256:{'b' * 64}"
+
+
+def test_incomplete_attack_is_archived_without_overwrite_before_resume(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    incomplete = root / "attacks/structure-fetch/gamma-timeout"
+    incomplete.mkdir(parents=True)
+    (incomplete / "00-intent.json").write_text('{"stage":"intent"}\n')
+
+    archived = harness_module._archive_incomplete_attack(  # noqa: SLF001
+        root=root,
+        node_id="structure-fetch",
+        attack_id="gamma-timeout",
+    )
+
+    assert not incomplete.exists()
+    assert (archived / "00-intent.json").read_text() == '{"stage":"intent"}\n'
+    assert archived == (
+        root / "failed-attempts/structure-fetch/gamma-timeout/attempt-0001"
+    )
+
+
+def test_nested_commissioning_error_summary_keeps_only_safe_owned_codes() -> None:
+    error = BaseExceptionGroup(
+        "outer provider body must not appear",
+        [
+            harness_module.DisposableCommissioningError("gamma-provider-detection-shape"),
+            TimeoutError("secret provider response"),
+        ],
+    )
+
+    summary = harness_module._safe_exception_summary(error)  # noqa: SLF001
+
+    assert summary == (
+        "ExceptionGroup[DisposableCommissioningError:gamma-provider-detection-shape,"
+        "TimeoutError]"
+    )
+    assert "secret" not in summary
+    assert "provider body" not in summary
 
 
 def _normalize_dsn(dsn: str) -> str:

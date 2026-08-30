@@ -23,6 +23,7 @@ from .production_commissioning import (
 from .production_commissioning_disposable import (
     Clob429CommissioningAdapter,
     ClobMissingLegCommissioningAdapter,
+    DisposableCommissioningError,
     GammaProviderCommissioningAdapter,
     HeartbeatOutageCommissioningAdapter,
     NormalizationPayloadCorruptCommissioningAdapter,
@@ -79,6 +80,45 @@ _END_TO_END_NOW: Final[datetime] = _BASE_NOW + timedelta(days=2)
 
 class CommissioningHarnessError(RuntimeError):
     """The isolated commissioning harness could not produce complete proof."""
+
+
+def _safe_exception_summary(error: BaseException) -> str:
+    """Render nested failures without copying provider or credential-bearing text."""
+
+    if isinstance(error, BaseExceptionGroup):
+        leaves = ",".join(_safe_exception_summary(child) for child in error.exceptions)
+        return f"ExceptionGroup[{leaves}]"
+    if isinstance(
+        error,
+        (
+            CommissioningAttackError,
+            CommissioningEvidenceError,
+            CommissioningHarnessError,
+            DisposableCommissioningError,
+            RuntimeFaultMatrixError,
+        ),
+    ):
+        return f"{type(error).__name__}:{error}"
+    return type(error).__name__
+
+
+def _archive_incomplete_attack(*, root: Path, node_id: str, attack_id: str) -> Path:
+    """Move one partial append-only attempt aside so a clean retry can start."""
+
+    source = root / "attacks" / node_id / attack_id
+    if not source.is_dir() or (source / "proof.json").is_file():
+        raise CommissioningHarnessError("incomplete-attack-archive-source-invalid")
+    archive_root = root / "failed-attempts" / node_id / attack_id
+    archive_root.mkdir(parents=True, exist_ok=True)
+    ordinal = 1
+    while (archive_root / f"attempt-{ordinal:04d}").exists():
+        ordinal += 1
+    destination = archive_root / f"attempt-{ordinal:04d}"
+    try:
+        source.rename(destination)
+    except OSError as error:
+        raise CommissioningHarnessError("incomplete-attack-archive-failed") from error
+    return destination
 
 
 _ATTACK_ADAPTER_FACTORIES: Final[
@@ -196,7 +236,7 @@ def _run_commissioning(
             proof_count += 1
     except Exception as error:
         raise CommissioningHarnessError(
-            f"commissioning-failed:{type(error).__name__}"
+            f"commissioning-failed:{_safe_exception_summary(error)}"
         ) from error
 
     return {
@@ -606,6 +646,14 @@ def run_complete_commissioning_bundle(
                     expected_config=config_id,
                 )
             if missing:
+                for node_id in missing:
+                    partial = root / "attacks" / node_id / attack_id
+                    if partial.is_dir():
+                        _archive_incomplete_attack(
+                            root=root,
+                            node_id=node_id,
+                            attack_id=attack_id,
+                        )
                 _run_commissioning(
                     attack_id=attack_id,
                     adapter_factory=_ATTACK_ADAPTER_FACTORIES[attack_id],
@@ -636,7 +684,7 @@ def run_complete_commissioning_bundle(
         raise
     except Exception as error:
         raise CommissioningHarnessError(
-            f"commissioning-bundle-failed:{type(error).__name__}"
+            f"commissioning-bundle-failed:{_safe_exception_summary(error)}"
         ) from error
 
 
