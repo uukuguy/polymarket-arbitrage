@@ -20,6 +20,7 @@ from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
+    QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
@@ -1069,6 +1070,81 @@ def test_quote_batch_incomplete_adapter_blocks_partial_pointer_then_certifies(
 
     assert shape == (2, 2, 2, 1, 1, 1, 1)
     assert incident == ("resolved", 0, "closed", ["attempt-failed", "recovered"])
+
+
+def test_quote_admission_missing_shard_adapter_restores_exact_input_then_admits(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:quote-admit:quote-admission-missing-shard",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="quote-admit",
+        attack_id="quote-admission-missing-shard",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=QuoteAdmissionMissingShardCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=62),
+        ),
+        evidence_dir=tmp_path / "quote-admit",
+    )
+
+    assert proof["qualification_impact"] == "pause"
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("artifact-restored:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith(
+        "postgres:m1_quote_batch_inputs:quote:"
+    )
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        admission = connection.execute(
+            """
+            SELECT job.state, count(attempt.attempt_id),
+                   array_agg(attempt.state ORDER BY attempt.lease_epoch)
+            FROM m1_jobs AS job
+            JOIN m1_job_attempts AS attempt ON attempt.job_key = job.job_key
+            WHERE job.job_type = 'quote-admit'
+            GROUP BY job.state
+            """
+        ).fetchone()
+        batch = connection.execute(
+            """
+            SELECT job.state, jsonb_array_length(input.legs),
+                   jsonb_array_length(input.token_ids),
+                   input.input_artifact_key IS NOT NULL,
+                   input.input_artifact_digest IS NOT NULL,
+                   input.leg_count
+            FROM m1_quote_batch_inputs AS input
+            JOIN m1_jobs AS job ON job.job_key = input.job_key
+            """
+        ).fetchone()
+        incident = connection.execute(
+            """
+            SELECT incident.state, circuit.consecutive_failures, circuit.state,
+                   array_agg(event.kind ORDER BY event.occurred_at, event.kind)
+            FROM m1_incidents AS incident
+            JOIN m1_job_circuits AS circuit
+              ON incident.dedupe_key = 'job-retry:' || circuit.job_key
+            JOIN m1_incident_events AS event
+              ON event.incident_key = incident.incident_key
+            WHERE incident.component = 'quote-admit'
+            GROUP BY incident.state, circuit.consecutive_failures, circuit.state
+            """
+        ).fetchone()
+        quote_pointer = connection.execute(
+            "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key = 'quote:current'"
+        ).fetchone()
+
+    assert admission == ("succeeded", 2, ["retryable", "succeeded"])
+    assert batch == ("runnable", None, None, True, True, 2)
+    assert incident == ("resolved", 0, "closed", ["attempt-failed", "recovered"])
+    assert quote_pointer == (0,)
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

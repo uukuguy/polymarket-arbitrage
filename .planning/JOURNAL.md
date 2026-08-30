@@ -12245,3 +12245,34 @@ all remaining disposable attacks can share one exact release/config run.
 barrier has public durable shard authority or whether the commissioning
 contract exposes a design gap. Do not emulate a shard with private SQL and do
 not rebuild an image until the remaining disposable matrix is ready.
+
+### SESSION 363 — 2026-08-30 (missing Quote admission shard commissioning)
+
+- [CLIMB H-047] Registered an in-flight hypothesis for one certified Structure
+  shard unavailable to Quote admission.
+- [DIAGNOSIS GAP FIXED] Provider/object errors previously produced only a class
+  and fingerprint. `QuoteAdmissionShardUnavailable` now carries the exact
+  manifest-authorized artifact key into incident detail without provider body,
+  credentials or arbitrary exception text.
+- [PUBLIC UPSTREAM CHAIN] Commissioning builds a real two-shard Structure v3
+  manifest, completes normalize and certify through fenced public APIs, and
+  lets the real `TransactionalQuoteAdmitter` claim the resulting job.
+- [NEGATIVE PROOF] With one shard absent, epoch 1 becomes retryable with one
+  warning incident/pending Dashboard alert. Zero Quote batch input, batch job,
+  running checkpoint and Quote pointer effects are committed.
+- [EXACT RESTORE] Restoring only the named key and reaching the shared retry
+  due-at lets epoch 2 read both shards, upload an authenticated batch artifact,
+  admit two legs and resolve the incident.
+- [AUTHORITY MODEL] V3 batch inputs are R2-backed: PostgreSQL stores artifact
+  key/digest/leg_count and intentionally leaves duplicated legs/token IDs null.
+  The adapter verifies the stored reference against object HEAD metadata.
+- [HARNESS/ENTRY] Typed-error unit test, real adapter, isolated migrated cleanup,
+  explicit DSN, exact Make argv and climb profile contracts pass. Ruff passes;
+  production-module Pyright reports zero errors.
+- [BOUNDARY] No production DB/provider, Fly action, SSH, deployment, Docker
+  build, canary, qualification, Colima or global context mutation occurred;
+  Docker context remained `orbstack`.
+
+[NEXT] Commit Plan 05.6-235 without protected user files, pass exact-HEAD and
+full related regressions, then confirm H-047 through climb. Continue with the
+remaining disposable matrix; do not rebuild an exact image yet.

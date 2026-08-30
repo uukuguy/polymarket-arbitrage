@@ -14,6 +14,7 @@ from polyarb.control_plane.models import JobLease, JobState
 from polyarb.control_plane.postgres import StaleLeaseError
 from polyarb.control_plane.quote_admission import (
     QuoteAdmissionError,
+    QuoteAdmissionShardUnavailable,
     TransactionalQuoteAdmitter,
 )
 from polyarb.control_plane.quote_worker import QuoteBatchWorkerResult
@@ -864,6 +865,82 @@ def test_quote_admitter_v3_manifest_reports_each_shard_and_batch() -> None:
     assert len(control_plane.recoveries) == 1
 
 
+def test_quote_admitter_missing_v3_shard_records_safe_exact_artifact_identity() -> None:
+    market = {
+        "market_id": "market-missing-shard",
+        "condition_id": "condition-missing-shard",
+        "slug": "missing-shard",
+        "yes_token_id": "yes-missing-shard",
+        "event_id": "event-missing-shard",
+        "active": True,
+        "closed": False,
+        "neg_risk": True,
+        "neg_risk_market_id": "neg-risk-missing-shard",
+    }
+    identity = StructureBundleIdentity(
+        publication_id="publication-missing-shard",
+        window_id="window-missing-shard",
+        snapshot_id=0,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="v3",
+        component_counts={
+            "events": 0,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 2,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    shards = tuple(
+        StructureShardArtifact.from_bytes(
+            canonical_structure_shard_bytes(
+                window_key=identity.window_id,
+                source_digest="b" * 64,
+                component="markets",
+                ordinal=index,
+                rows=(market | {"yes_token_id": f"yes-missing-shard-{index}"},),
+            )
+        )
+        for index in range(2)
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(
+            identity=identity,
+            shards=tuple(
+                StructureShardReceipt("markets", index, shard.key, shard.sha256, 1)
+                for index, shard in enumerate(shards)
+            ),
+        )
+    )
+    control_plane = _ControlPlane(manifest.sha256)
+    objects = _ObjectMap(
+        {
+            "bundles/current.ndjson": manifest.payload,
+            shards[0].key: shards[0].payload,
+        }
+    )
+    worker = TransactionalQuoteAdmitter(
+        control_plane=cast(Any, control_plane),
+        object_client=objects,
+        bucket="artifacts",
+        worker_id="quote-admitter",
+        now=lambda: NOW,
+        batch_size=10,
+    )
+
+    with pytest.raises(QuoteAdmissionShardUnavailable) as raised:
+        asyncio.run(worker.run_once())
+
+    assert raised.value.artifact_key == shards[1].key
+    assert control_plane.admitted is None
+    incident = control_plane.retry_incidents[0]
+    assert incident["error_class"] == "QuoteAdmissionShardUnavailable"
+    assert incident["detail"]["missing_artifact_key"] == shards[1].key
+    assert "provider" not in incident["detail"]
+
+
 def test_quote_admitter_resumes_231_shards_after_last_durable_checkpoint() -> None:
     markets = tuple(
         {
@@ -947,8 +1024,9 @@ def test_quote_admitter_resumes_231_shards_after_last_durable_checkpoint() -> No
         batch_size=20,
     )
 
-    with pytest.raises(QuoteAdmissionError, match="bundle digest or contract"):
+    with pytest.raises(QuoteAdmissionShardUnavailable) as unavailable:
         asyncio.run(worker.run_once())
+    assert unavailable.value.artifact_key == shards[128].key
     assert len(control_plane.checkpoints) == 12
     assert control_plane.checkpoints[-1][0].endswith(":120")
 

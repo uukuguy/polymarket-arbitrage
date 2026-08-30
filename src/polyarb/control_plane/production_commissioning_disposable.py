@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from io import BytesIO
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -17,6 +19,10 @@ from .postgres import (
     StaleLeaseError,
 )
 from .production_commissioning_runner import AttackIdentity, AttackStageReceipt
+from .quote_admission import (
+    QuoteAdmissionShardUnavailable,
+    TransactionalQuoteAdmitter,
+)
 from .reconciler import RuntimeReconciler
 from .recovery_executor import RecoveryExecutor
 from .recovery_models import RecoveryActionType
@@ -28,12 +34,58 @@ from .runtime_models import RuntimeDeadlineProfile, RuntimeEventKind
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    StructureShardArtifact,
+    StructureShardReceipt,
     canonical_structure_manifest_bytes,
+    canonical_structure_shard_bytes,
+    canonical_structure_shard_manifest_bytes,
 )
 
 
 class DisposableCommissioningError(RuntimeError):
     """A disposable database did not produce the required real durable fact."""
+
+
+class _DisposableObjectStore:
+    """Small exact-byte object boundary for provider-independent attacks."""
+
+    def __init__(self) -> None:
+        self._objects: dict[str, tuple[bytes, dict[str, str]]] = {}
+
+    def restore(self, *, key: str, payload: bytes, digest: str) -> None:
+        if sha256(payload).hexdigest() != digest:
+            raise DisposableCommissioningError("object-restore-digest-mismatch")
+        self._objects[key] = (payload, {"sha256": digest})
+
+    def contains(self, key: str) -> bool:
+        return key in self._objects
+
+    def get_object(self, **kwargs: Any) -> dict[str, object]:
+        key = str(kwargs["Key"])
+        try:
+            payload, _metadata = self._objects[key]
+        except KeyError as error:
+            raise FileNotFoundError("commissioning-object-unavailable") from error
+        return {"Body": BytesIO(payload)}
+
+    def put_object(self, **kwargs: Any) -> None:
+        key = str(kwargs["Key"])
+        body = kwargs["Body"]
+        metadata = kwargs.get("Metadata", {})
+        if not isinstance(body, bytes) or not isinstance(metadata, dict):
+            raise DisposableCommissioningError("invalid-disposable-object-write")
+        self._objects[key] = (
+            body,
+            {str(name): str(value) for name, value in metadata.items()},
+        )
+
+    def head_object(self, **kwargs: Any) -> dict[str, object]:
+        key = str(kwargs["Key"])
+        try:
+            payload, metadata = self._objects[key]
+        except KeyError as error:
+            raise FileNotFoundError("commissioning-object-unavailable") from error
+        return {"ContentLength": len(payload), "Metadata": dict(metadata)}
 
 
 @dataclass(frozen=True)
@@ -2373,6 +2425,453 @@ class QuoteBatchIncompleteCommissioningAdapter:
         )
 
 
+class QuoteAdmissionMissingShardCommissioningAdapter:
+    """Prove a manifest-named shard blocks, then safely resumes, admission."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._clock_at = self._started_at
+        self._objects = _DisposableObjectStore()
+        self._worker: TransactionalQuoteAdmitter | None = None
+        self._admission_job_key: str | None = None
+        self._missing_shard: StructureShardArtifact | None = None
+        self._retry_due_at: datetime | None = None
+        self._incident_key: str | None = None
+        self._incident_event_id: str | None = None
+        self._recovered_proof: dict[str, str] | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "quote-admission-missing-shard"
+            or identity.node_id != "quote-admit"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _assert_incomplete(self) -> tuple[str, str]:
+        job_key = self._need(self._admission_job_key, "quote-admission-job-missing")
+        missing = self._need(self._missing_shard, "missing-structure-shard-missing")
+        retry_due_at = self._need(self._retry_due_at, "quote-admission-retry-due-missing")
+        incident_key = f"incident:job-retry:{job_key}"
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            job = connection.execute(
+                """
+                SELECT state, lease_epoch, last_error_class, next_attempt_at
+                FROM m1_jobs WHERE job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+            circuit = connection.execute(
+                """
+                SELECT consecutive_failures, state, next_probe_at
+                FROM m1_job_circuits WHERE job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+            incident = connection.execute(
+                """
+                SELECT incident.incident_key, incident.state, incident.component,
+                       event.incident_event_id, event.kind,
+                       event.detail->>'missing_artifact_key',
+                       outbox.channel, outbox.state
+                FROM m1_incidents AS incident
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                JOIN m1_alert_outbox AS outbox
+                  ON outbox.incident_event_id = event.incident_event_id
+                WHERE incident.dedupe_key = %s
+                """,
+                (f"job-retry:{job_key}",),
+            ).fetchone()
+            partial = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_quote_batch_inputs),
+                  (SELECT count(*) FROM m1_jobs WHERE job_type = 'quote-batch'),
+                  (SELECT count(*) FROM m1_checkpoint_receipts
+                   WHERE job_key = %s AND checkpoint_sequence IS NOT NULL),
+                  (SELECT count(*) FROM m1_publication_pointers
+                   WHERE pointer_key = 'quote:current')
+                """,
+                (job_key,),
+            ).fetchone()
+        if job != (
+            "retryable",
+            1,
+            "QuoteAdmissionShardUnavailable",
+            retry_due_at,
+        ):
+            raise DisposableCommissioningError("quote-admission-retry-shape")
+        if circuit != (1, "closed", retry_due_at):
+            raise DisposableCommissioningError("quote-admission-circuit-shape")
+        if incident is None or incident[:3] != (incident_key, "open", "quote-admit"):
+            raise DisposableCommissioningError("quote-admission-incident-shape")
+        if incident[4:] != (
+            "attempt-failed",
+            missing.key,
+            "dashboard",
+            "pending",
+        ):
+            raise DisposableCommissioningError("quote-admission-alert-shape")
+        if partial != (0, 0, 0, 0):
+            raise DisposableCommissioningError("quote-admission-partial-effect")
+        if self._objects.contains(missing.key):
+            raise DisposableCommissioningError("missing-shard-unexpectedly-present")
+        return incident_key, str(incident[3])
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        bundle_identity = StructureBundleIdentity(
+            publication_id=f"commissioning:{identity.experiment_id}",
+            window_id=f"window:{identity.experiment_id}",
+            snapshot_id=42,
+            comparison_receipt_digest=sha256(
+                f"{identity.experiment_id}:comparison".encode()
+            ).hexdigest(),
+            normalization_contract_version="structure-v7",
+            component_counts={
+                "events": 0,
+                "event_tags": 0,
+                "memberships": 0,
+                "group_truth": 0,
+                "markets": 2,
+                "issues": 0,
+            },
+            source_kind="gamma-source-window-events-v3-sharded",
+        )
+        shards = tuple(
+            StructureShardArtifact.from_bytes(
+                canonical_structure_shard_bytes(
+                    window_key=bundle_identity.window_id,
+                    source_digest=sha256(
+                        f"{identity.experiment_id}:source".encode()
+                    ).hexdigest(),
+                    component="markets",
+                    ordinal=index,
+                    rows=(
+                        {
+                            "market_id": f"market-{index}",
+                            "condition_id": f"condition-{index}",
+                            "slug": f"market-{index}",
+                            "yes_token_id": f"yes-{index}",
+                            "event_id": "event-a",
+                            "active": True,
+                            "closed": False,
+                            "neg_risk": True,
+                            "neg_risk_market_id": f"neg-risk-{index}",
+                        },
+                    ),
+                )
+            )
+            for index in range(2)
+        )
+        manifest = StructureBundleArtifact.from_bytes(
+            canonical_structure_shard_manifest_bytes(
+                identity=bundle_identity,
+                shards=tuple(
+                    StructureShardReceipt("markets", index, shard.key, shard.sha256, 1)
+                    for index, shard in enumerate(shards)
+                ),
+            )
+        )
+        self._objects.restore(key=manifest.key, payload=manifest.payload, digest=manifest.sha256)
+        self._objects.restore(key=shards[0].key, payload=shards[0].payload, digest=shards[0].sha256)
+        self._missing_shard = shards[1]
+        specs = self._control_plane.enqueue_structure_generation(
+            identity=bundle_identity,
+            bundle=manifest,
+            ranges=(("markets", "", ""),),
+            now=self._started_at,
+        )
+        if len(specs) != 1:
+            raise DisposableCommissioningError("quote-admission-structure-plan-shape")
+        spec = specs[0]
+        range_artifact_digest = sha256(
+            f"{identity.experiment_id}:normalized-range".encode()
+        ).hexdigest()
+        normalizer = _claim(self._control_plane, "structure-normalize", self._started_at)
+        _record_progress(self._control_plane, normalizer, self._started_at)
+        self._control_plane.complete_structure_range(
+            normalizer,
+            range_digest=spec.range_digest,
+            artifact_key=f"structure-ranges/{identity.experiment_id}.ndjson",
+            artifact_digest=range_artifact_digest,
+            record_count=2,
+            now=self._started_at + timedelta(seconds=1),
+        )
+        certifier = _claim(
+            self._control_plane,
+            "structure-certify",
+            self._started_at + timedelta(seconds=2),
+        )
+        _record_progress(
+            self._control_plane,
+            certifier,
+            self._started_at + timedelta(seconds=2),
+        )
+        certification_manifest = sha256(
+            canonical_structure_manifest_bytes(
+                generation_key=spec.generation_key,
+                bundle_digest=manifest.sha256,
+                receipts=(
+                    {
+                        "job_key": spec.job_key,
+                        "component": "markets",
+                        "ordinal": 0,
+                        "range_digest": spec.range_digest,
+                        "artifact_key": f"structure-ranges/{identity.experiment_id}.ndjson",
+                        "artifact_digest": range_artifact_digest,
+                        "record_count": 2,
+                    },
+                ),
+            )
+        ).hexdigest()
+        self._control_plane.certify_structure_generation(
+            certifier,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{certification_manifest}/manifest.ndjson",
+            artifact_digest=certification_manifest,
+            now=self._started_at + timedelta(seconds=3),
+        )
+        self._admission_job_key = f"{spec.generation_key}:quote-admit"
+        self._clock_at = self._started_at + timedelta(seconds=4)
+        self._worker = TransactionalQuoteAdmitter(
+            control_plane=self._control_plane,
+            object_client=self._objects,
+            bucket="commissioning-artifacts",
+            worker_id="commissioning:quote-admit",
+            now=lambda: self._clock_at,
+            batch_size=10,
+            lease_seconds=120,
+        )
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"postgres:m1_quote_admission_inputs:{self._admission_job_key}",
+            occurred_at=self._clock_at,
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        worker = self._need(self._worker, "quote-admission-worker-missing")
+        missing = self._need(self._missing_shard, "missing-structure-shard-missing")
+        self._clock_at = self._started_at + timedelta(seconds=5)
+        try:
+            asyncio.run(worker.run_once())
+        except QuoteAdmissionShardUnavailable as error:
+            if error.artifact_key != missing.key:
+                raise DisposableCommissioningError("wrong-missing-structure-shard") from error
+        else:
+            raise DisposableCommissioningError("missing-structure-shard-not-detected")
+        job_key = self._need(self._admission_job_key, "quote-admission-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt.attempt_id, job.next_attempt_at
+                FROM m1_jobs AS job
+                JOIN m1_job_attempts AS attempt
+                  ON attempt.job_key = job.job_key AND attempt.lease_epoch = job.lease_epoch
+                WHERE job.job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("quote-admission-failure-fact-missing")
+        self._retry_due_at = row[1]
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{row[0]}",
+            occurred_at=self._clock_at,
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._incident_key, self._incident_event_id = self._assert_incomplete()
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=self._incident_key,
+            occurred_at=self._started_at + timedelta(seconds=6),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_incomplete()
+        missing = self._need(self._missing_shard, "missing-structure-shard-missing")
+        self._objects.restore(key=missing.key, payload=missing.payload, digest=missing.sha256)
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"artifact-restored:{missing.key}:{missing.sha256}",
+            occurred_at=self._started_at + timedelta(seconds=7),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._admission_job_key, "quote-admission-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            partial = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_quote_batch_inputs),
+                  (SELECT count(*) FROM m1_jobs WHERE job_type = 'quote-batch'),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s)
+                """,
+                (job_key,),
+            ).fetchone()
+        if partial != (0, 0, "retryable"):
+            raise DisposableCommissioningError("quote-admission-cleanup-shape")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"postgres:m1_quote_batch_inputs:{job_key}:absent",
+            occurred_at=self._started_at + timedelta(seconds=8),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        worker = self._need(self._worker, "quote-admission-worker-missing")
+        retry_due_at = self._need(self._retry_due_at, "quote-admission-retry-due-missing")
+        self._clock_at = retry_due_at
+        result = asyncio.run(worker.run_once())
+        if result.outcome != "admitted":
+            raise DisposableCommissioningError("quote-admission-recovery-outcome")
+        job_key = self._need(self._admission_job_key, "quote-admission-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            attempt = connection.execute(
+                """
+                SELECT attempt.attempt_id, attempt.finished_at, event.event_id,
+                       event.occurred_at, batch.job_key
+                FROM m1_job_attempts AS attempt
+                JOIN m1_job_runtime_events AS event
+                  ON event.job_key = attempt.job_key
+                 AND event.lease_epoch = attempt.lease_epoch
+                 AND event.kind = %s
+                JOIN m1_quote_batch_inputs AS batch
+                  ON batch.structure_receipt_digest =
+                     (SELECT bundle_digest FROM m1_quote_admission_inputs
+                      WHERE job_key = attempt.job_key)
+                WHERE attempt.job_key = %s AND attempt.lease_epoch = 2
+                  AND attempt.state = 'succeeded'
+                """,
+                (RuntimeEventKind.SUCCEEDED.value, job_key),
+            ).fetchone()
+        if attempt is None or attempt[1] is None:
+            raise DisposableCommissioningError("quote-admission-success-fact-missing")
+        self._recovered_proof = {
+            "attempt_id": str(attempt[0]),
+            "terminal_fact_id": f"attempt:{attempt[0]}",
+            "success_fact_id": str(attempt[2]),
+            "postcondition_fact_id": f"postgres:m1_quote_batch_inputs:{attempt[4]}",
+            "succeeded_at": attempt[3].astimezone(UTC).isoformat(),
+        }
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
+            occurred_at=attempt[3],
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._admission_job_key, "quote-admission-job-missing")
+        proof = self._need(self._recovered_proof, "quote-admission-proof-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT admission.state,
+                       (SELECT count(*) FROM m1_job_attempts WHERE job_key = admission.job_key),
+                       (SELECT array_agg(state ORDER BY lease_epoch)
+                        FROM m1_job_attempts WHERE job_key = admission.job_key),
+                       batch.state, jsonb_array_length(input.legs),
+                       jsonb_array_length(input.token_ids),
+                       input.input_artifact_key, input.input_artifact_digest,
+                       input.leg_count
+                FROM m1_jobs AS admission
+                JOIN m1_quote_admission_inputs AS admitted
+                  ON admitted.job_key = admission.job_key
+                JOIN m1_quote_batch_inputs AS input
+                  ON input.structure_receipt_digest = admitted.bundle_digest
+                JOIN m1_jobs AS batch ON batch.job_key = input.job_key
+                WHERE admission.job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+            incident = connection.execute(
+                """
+                SELECT incident.state, circuit.consecutive_failures, circuit.state,
+                       array_agg(event.kind ORDER BY event.occurred_at, event.kind)
+                FROM m1_incidents AS incident
+                JOIN m1_job_circuits AS circuit
+                  ON incident.dedupe_key = 'job-retry:' || circuit.job_key
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                WHERE circuit.job_key = %s
+                GROUP BY incident.state, circuit.consecutive_failures, circuit.state
+                """,
+                (job_key,),
+            ).fetchone()
+            pointer = connection.execute(
+                "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key = 'quote:current'"
+            ).fetchone()
+        if shape is None or shape[:6] != (
+            "succeeded",
+            2,
+            ["retryable", "succeeded"],
+            "runnable",
+            None,
+            None,
+        ):
+            raise DisposableCommissioningError("quote-admission-recovery-shape")
+        if shape[8] != 2:
+            raise DisposableCommissioningError("quote-admission-artifact-count")
+        artifact_key, artifact_digest = str(shape[6]), str(shape[7])
+        head = self._objects.head_object(Bucket="commissioning-artifacts", Key=artifact_key)
+        if (
+            not isinstance(head["ContentLength"], int)
+            or head["ContentLength"] <= 0
+            or head["Metadata"] != {"sha256": artifact_digest}
+            or incident != ("resolved", 0, "closed", ["attempt-failed", "recovered"])
+            or pointer != (0,)
+        ):
+            raise DisposableCommissioningError("quote-admission-recovery-proof")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=1),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -2928,6 +3427,7 @@ __all__ = [
     "HeartbeatOutageCommissioningAdapter",
     "PreparedNormalTurn",
     "ProgressStallCommissioningAdapter",
+    "QuoteAdmissionMissingShardCommissioningAdapter",
     "QuoteBatchIncompleteCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",
     "SourceReceiptGapCommissioningAdapter",

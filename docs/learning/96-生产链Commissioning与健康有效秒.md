@@ -274,3 +274,19 @@ receipt 并用 `record_job_recovery()` 关闭原 incident；最后一条 termina
 certifier。certifier 再一次性校验全部 receipt，原子提交 manifest、`quote:current` 和下游 job。
 所以故障可见性属于出错节点，完整性门属于消费节点，两者各守一个职责，不需要 Machine restart
 或 barrier 私有 timeout。
+
+### “Structure shard 读不到”为什么必须报告 artifact key，而不能只报 TimeoutError？
+
+因为恢复动作需要知道哪一个 immutable input 缺失。只有 `TimeoutError + fingerprint`，操作员最多
+知道 quote-admit 失败，却不知道该检查 manifest 的哪一片；这会把可自动定位的对象故障升级成
+人工翻日志。反过来，直接保存 provider response/body 又可能泄露签名、请求头或账户信息。
+
+现在 v3 manifest 先授权每个 `artifact_key + artifact_digest`。读取某片失败时，worker 抛出
+`QuoteAdmissionShardUnavailable`，incident detail 只加入 manifest 中已经公开的
+`missing_artifact_key`；底层 provider exception 只保留为 Python cause，不进入运维 payload。
+恢复者因此能精确 HEAD/恢复这一 key，同时没有扩大秘密面。
+
+commissioning 还验证了一个容易误解的存储边界：Quote admission 成功后，PostgreSQL 的
+`m1_quote_batch_inputs` 不会再次存两份 legs/token IDs。真实 authority 是已 HEAD 验证的 Quote batch
+artifact，数据库只存 key、SHA-256 和 `leg_count`。恢复证据必须核对这三者，而不是为了测试方便
+要求冗余 JSON 字段存在。

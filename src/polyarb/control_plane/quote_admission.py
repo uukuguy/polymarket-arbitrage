@@ -35,6 +35,16 @@ class QuoteAdmissionError(RuntimeError):
     """A certified Structure bundle cannot safely freeze Quote work."""
 
 
+class QuoteAdmissionShardUnavailable(QuoteAdmissionError):
+    """One manifest-authorized Structure shard cannot be read safely."""
+
+    def __init__(self, artifact_key: str) -> None:
+        if not artifact_key or "\x00" in artifact_key or len(artifact_key) > 512:
+            raise ValueError("missing Structure shard key is invalid")
+        self.artifact_key = artifact_key
+        super().__init__(f"Quote admission Structure shard unavailable: {artifact_key}")
+
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -349,6 +359,16 @@ class TransactionalQuoteAdmitter:
         except StaleLeaseError:
             raise
         except Exception as error:
+            detail: dict[str, object] = {
+                "job_key": lease.job_key,
+                "lease_epoch": lease.lease_epoch,
+                "error_class": type(error).__name__,
+                "failure_fingerprint": retry_failure_fingerprint(
+                    error, component="quote-admit"
+                ),
+            }
+            if isinstance(error, QuoteAdmissionShardUnavailable):
+                detail["missing_artifact_key"] = error.artifact_key
             await _to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,
@@ -357,14 +377,7 @@ class TransactionalQuoteAdmitter:
                 dedupe_key=f"job-retry:{lease.job_key}",
                 component="quote-admit",
                 summary="quote-admit retryable failure",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": type(error).__name__,
-                    "failure_fingerprint": retry_failure_fingerprint(
-                        error, component="quote-admit"
-                    ),
-                },
+                detail=detail,
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
@@ -559,7 +572,15 @@ class TransactionalQuoteAdmitter:
         chunk_start = resume_index
         chunk_legs: list[QuoteBatchLeg] = []
         for index, shard in enumerate(markets[resume_index:], start=resume_index + 1):
-            payload = await _to_thread(self._read_bundle, getattr(shard, "artifact_key"))
+            artifact_key = str(getattr(shard, "artifact_key"))
+            try:
+                payload = await _to_thread(self._read_bundle, artifact_key)
+            except asyncio.CancelledError:
+                raise
+            except QuoteAdmissionShardUnavailable:
+                raise
+            except Exception as error:
+                raise QuoteAdmissionShardUnavailable(artifact_key) from error
             header, rows = parse_structure_shard_bytes(
                 payload, expected_sha256=getattr(shard, "artifact_digest")
             )

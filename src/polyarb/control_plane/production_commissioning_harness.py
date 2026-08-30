@@ -14,6 +14,7 @@ from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
+    QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
@@ -39,6 +40,7 @@ _HEARTBEAT_OUTAGE_ATTACK_ID: Final[str] = "heartbeat-outage"
 _WORKER_EXIT_ATTACK_ID: Final[str] = "worker-exit"
 _SOURCE_RECEIPT_GAP_ATTACK_ID: Final[str] = "source-receipt-gap"
 _QUOTE_BATCH_INCOMPLETE_ATTACK_ID: Final[str] = "quote-batch-incomplete"
+_QUOTE_ADMISSION_MISSING_SHARD_ATTACK_ID: Final[str] = "quote-admission-missing-shard"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -255,6 +257,24 @@ def run_quote_batch_incomplete_commissioning(
     )
 
 
+def run_quote_admission_missing_shard_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove exact missing-shard diagnosis and recovery on Quote admission."""
+
+    return _run_commissioning(
+        attack_id=_QUOTE_ADMISSION_MISSING_SHARD_ATTACK_ID,
+        adapter_factory=QuoteAdmissionMissingShardCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("quote-admit",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -266,6 +286,7 @@ def _parser() -> argparse.ArgumentParser:
         "worker-exit",
         "source-receipt-gap",
         "quote-batch-incomplete",
+        "quote-admission-missing-shard",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -285,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "worker-exit": run_worker_exit_commissioning,
         "source-receipt-gap": run_source_receipt_gap_commissioning,
         "quote-batch-incomplete": run_quote_batch_incomplete_commissioning,
+        "quote-admission-missing-shard": run_quote_admission_missing_shard_commissioning,
     }
     try:
         result = runners[args.command](
@@ -304,6 +326,7 @@ __all__ = [
     "main",
     "run_heartbeat_outage_commissioning",
     "run_progress_stall_commissioning",
+    "run_quote_admission_missing_shard_commissioning",
     "run_quote_batch_incomplete_commissioning",
     "run_retry_budget_commissioning",
     "run_source_receipt_gap_commissioning",

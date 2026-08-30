@@ -304,6 +304,21 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-047
+  description: Translating a manifest-named missing Structure shard into one safe
+    typed Quote admission incident can identify the exact unavailable artifact,
+    prevent partial batch admission, and let the policy-due fenced retry admit the
+    complete generation after that artifact is restored.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Close the operator diagnosis gap for missing certified Structure
+    shards without exposing provider bodies, adding a private timeout, or using
+    direct database mutation, then prove exact-artifact restoration resumes Quote
+    admission through its normal transaction.
+  cost_h: 1.0
+  ranking: 1.0
+  status: in-flight
+  created_at: '2026-08-30T11:48:00+08:00'
+  results: []
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
