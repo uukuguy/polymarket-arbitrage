@@ -778,10 +778,11 @@ def test_scoped_connection_factory_uses_one_bounded_lazy_pool_per_process(
     assert pool.connection_calls == 2
     assert pool.conninfo == "postgresql://runtime:secret@example.test/role_test"
     assert pool.kwargs["min_size"] == 0
-    assert pool.kwargs["max_size"] == 32
+    assert pool.kwargs["max_size"] == 2
     assert pool.kwargs["open"] is True
     assert pool.kwargs["timeout"] == 5
     assert pool.kwargs["max_waiting"] == 32
+    assert pool.kwargs["max_idle"] == 60.0
     assert pool.kwargs["reconnect_timeout"] == 5
     assert pool.kwargs["kwargs"] == {
         "connect_timeout": 5,
@@ -817,7 +818,47 @@ def test_scoped_connection_factory_honors_explicit_owner_pool_budget(
     factory.close()
 
     assert pool_kwargs[0]["max_size"] == 7
-    assert pool_kwargs[0]["max_waiting"] == 7
+    assert pool_kwargs[0]["max_waiting"] == 32
+
+
+def test_scoped_connection_factory_honors_process_pool_budget_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    pool_kwargs: list[dict[str, object]] = []
+
+    class FakePool:
+        def __init__(self, _conninfo: str, **kwargs: object) -> None:
+            pool_kwargs.append(kwargs)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool)
+    monkeypatch.setenv("POLYARB_DB_POOL_MAX_SIZE", "3")
+
+    factory = db_role_contract.scoped_connection_factory(
+        "postgresql://runtime:secret@example.test/role_test"
+    )
+    factory.close()
+
+    assert pool_kwargs[0]["max_size"] == 3
+
+
+@pytest.mark.parametrize("value", ["", "many", "0", "33"])
+def test_scoped_connection_factory_rejects_invalid_process_pool_budget_env(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+
+    monkeypatch.setenv("POLYARB_DB_POOL_MAX_SIZE", value)
+
+    with pytest.raises(ValueError, match="(?:POLYARB_DB_POOL_MAX_SIZE|pool_max_size)"):
+        scoped_connection_factory(
+            "postgresql://runtime:secret@example.test/role_test"
+        )
 
 
 @pytest.mark.parametrize("pool_max_size", [0, 33])
@@ -916,11 +957,12 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
                     ),
                 },
                 "min_size": 0,
-                "max_size": 32,
+                "max_size": 2,
                 "open": True,
                 "configure": calls[0][1]["configure"],
                 "timeout": 5,
                 "max_waiting": 32,
+                "max_idle": 60.0,
                 "reconnect_timeout": 5,
             },
         )

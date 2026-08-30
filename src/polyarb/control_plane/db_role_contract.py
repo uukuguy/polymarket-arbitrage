@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -16,7 +17,10 @@ from psycopg_pool import ConnectionPool
 
 from .db_deadlines import (
     CONTROL_PLANE_DB_POLICY,
+    CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE,
+    CONTROL_PLANE_DB_POOL_MAX_IDLE_SECONDS,
     CONTROL_PLANE_DB_POOL_MAX_SIZE,
+    CONTROL_PLANE_DB_POOL_MAX_WAITING,
     DatabaseDeadlinePolicy,
 )
 
@@ -172,11 +176,19 @@ def scoped_connection_factory(
     dsn: str,
     *,
     deadline_policy: DatabaseDeadlinePolicy = CONTROL_PLANE_DB_POLICY,
-    pool_max_size: int = CONTROL_PLANE_DB_POOL_MAX_SIZE,
+    pool_max_size: int | None = None,
 ) -> ScopedConnectionFactory:
     """Return one lazy bounded pool with a non-overridable application namespace."""
 
     _reject_dsn_namespace_override(dsn)
+    if pool_max_size is None:
+        raw_pool_max_size = os.environ.get(
+            "POLYARB_DB_POOL_MAX_SIZE", str(CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE)
+        )
+        try:
+            pool_max_size = int(raw_pool_max_size)
+        except ValueError as error:
+            raise ValueError("POLYARB_DB_POOL_MAX_SIZE must be an integer") from error
     if not 1 <= pool_max_size <= CONTROL_PLANE_DB_POOL_MAX_SIZE:
         raise ValueError(
             f"pool_max_size must be between 1 and {CONTROL_PLANE_DB_POOL_MAX_SIZE}"
@@ -196,7 +208,8 @@ def scoped_connection_factory(
             deadline_policy=deadline_policy,
         ),
         timeout=deadline_policy.connect_timeout_seconds,
-        max_waiting=pool_max_size,
+        max_waiting=CONTROL_PLANE_DB_POOL_MAX_WAITING,
+        max_idle=CONTROL_PLANE_DB_POOL_MAX_IDLE_SECONDS,
         reconnect_timeout=deadline_policy.connect_timeout_seconds,
     )
     return ScopedConnectionFactory(pool)

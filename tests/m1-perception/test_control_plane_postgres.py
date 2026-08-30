@@ -285,23 +285,20 @@ def test_scoped_connection_pool_bounds_and_reuses_twelve_concurrent_lanes(
     postgres_dsn: str,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
 
-    from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
     from polyarb.control_plane.db_role_contract import scoped_connection_factory
 
     lane_count = 12
-    factory = scoped_connection_factory(postgres_dsn)
+    factory = scoped_connection_factory(postgres_dsn, pool_max_size=2)
 
     def run_wave() -> set[int]:
-        all_checked_out = Barrier(lane_count)
-
         def checkout() -> int:
             with factory() as connection:
-                row = connection.execute("SELECT pg_backend_pid()").fetchone()
+                row = connection.execute(
+                    "SELECT pg_backend_pid() FROM pg_sleep(0.05)"
+                ).fetchone()
                 assert row is not None
                 backend_pid = int(row[0])
-                all_checked_out.wait(timeout=CONTROL_PLANE_DB_POLICY.stop_grace_seconds)
                 return backend_pid
 
         with ThreadPoolExecutor(max_workers=lane_count) as executor:
@@ -312,11 +309,11 @@ def test_scoped_connection_pool_bounds_and_reuses_twelve_concurrent_lanes(
         first_connections = factory.pool_stats()["connections_num"]
         second_wave = run_wave()
 
-        assert len(first_wave) == lane_count
-        assert len(second_wave) == lane_count
+        assert 1 <= len(first_wave) <= 2
+        assert 1 <= len(second_wave) <= 2
         assert second_wave == first_wave
-        assert first_connections == lane_count
-        assert factory.pool_stats()["connections_num"] == lane_count
+        assert first_connections == 2
+        assert factory.pool_stats()["connections_num"] == 2
     finally:
         factory.close()
 

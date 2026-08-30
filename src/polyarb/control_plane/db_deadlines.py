@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Settings permits at most 32 concurrent Quote/Structure lanes in one process.
-# A lazy pool may grow to that same authority but never creates idle sessions
-# merely because the process started.
+# Settings permits at most 32 concurrent Quote/Structure lanes in one process,
+# but the production Supavisor session-mode role has only 15 client slots across
+# the deployment.  Lanes therefore queue behind a much smaller per-process pool.
 CONTROL_PLANE_DB_POOL_MAX_SIZE = 32
+CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE = 2
+CONTROL_PLANE_DB_POOL_MAX_WAITING = 32
+
+# The slowest persistent database owner ticks every 30 seconds.  Two complete
+# idle ticks are enough evidence that a burst connection can be returned while
+# avoiding connect churn for a healthy owner.
+CONTROL_PLANE_DB_POOL_MAX_IDLE_SECONDS = 60.0
 
 # The HTTP API isolates its one-statement readiness probe so a stalled health
 # read cannot consume an operational lane. The remaining process budget stays
 # available to operator projections; the two owners still sum to the global cap.
 CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE = 1
-CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE = (
-    CONTROL_PLANE_DB_POOL_MAX_SIZE - CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE
-)
+CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +106,10 @@ MIGRATION_DB_POLICY = DatabaseDeadlinePolicy(
 __all__ = [
     "CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE",
     "CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE",
+    "CONTROL_PLANE_DB_POOL_DEFAULT_MAX_SIZE",
+    "CONTROL_PLANE_DB_POOL_MAX_IDLE_SECONDS",
     "CONTROL_PLANE_DB_POOL_MAX_SIZE",
+    "CONTROL_PLANE_DB_POOL_MAX_WAITING",
     "CONTROL_PLANE_DB_POLICY",
     "CONTROL_PLANE_HEALTH_DB_POLICY",
     "DatabaseDeadlinePolicy",

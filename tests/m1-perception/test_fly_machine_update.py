@@ -288,7 +288,7 @@ def test_machine_update_verifier_requires_exact_remote_config_except_resolved_im
         )
 
 
-def test_machine_update_allows_only_explicit_qualification_identity_overlay(
+def test_machine_update_allows_only_explicit_release_and_database_budget_overlay(
     tmp_path: Path,
 ) -> None:
     from polyarb.control_plane.fly_machine_update import (
@@ -303,6 +303,7 @@ def test_machine_update_allows_only_explicit_qualification_identity_overlay(
     assert isinstance(current_env, dict)
     current_env["POLYARB_QUALIFICATION_RELEASE_ID"] = "old-release"
     current_env["POLYARB_QUALIFICATION_CONFIG_ID"] = "sha256:old-config"
+    current_env["POLYARB_DB_POOL_MAX_SIZE"] = "32"
     config_path = tmp_path / "qualification.toml"
     config_path.write_text(
         "\n".join(
@@ -313,6 +314,7 @@ def test_machine_update_allows_only_explicit_qualification_identity_overlay(
                 "[env]",
                 'POLYARB_QUALIFICATION_RELEASE_ID = "new-release"',
                 'POLYARB_QUALIFICATION_CONFIG_ID = "sha256:new-config"',
+                'POLYARB_DB_POOL_MAX_SIZE = "1"',
                 'MODE = "must-not-overlay"',
                 "",
             )
@@ -328,6 +330,7 @@ def test_machine_update_allows_only_explicit_qualification_identity_overlay(
         update_env_from_fly=(
             "POLYARB_QUALIFICATION_RELEASE_ID",
             "POLYARB_QUALIFICATION_CONFIG_ID",
+            "POLYARB_DB_POOL_MAX_SIZE",
         ),
     )
 
@@ -336,8 +339,10 @@ def test_machine_update_allows_only_explicit_qualification_identity_overlay(
         "ALLOWED": "",
         "POLYARB_QUALIFICATION_CONFIG_ID": "sha256:new-config",
         "POLYARB_QUALIFICATION_RELEASE_ID": "new-release",
+        "POLYARB_DB_POOL_MAX_SIZE": "1",
     }
     assert proof["updated_env_keys"] == [
+        "POLYARB_DB_POOL_MAX_SIZE",
         "POLYARB_QUALIFICATION_CONFIG_ID",
         "POLYARB_QUALIFICATION_RELEASE_ID",
     ]

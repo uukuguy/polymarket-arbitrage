@@ -137,6 +137,7 @@ def test_runtime_controller_template_is_private_observe_only_recovery_topology()
     assert payload["app"] == "__RUNTIME_CONTROLLER_APP__"
     assert payload["env"] == {
         "POLYARB_DB_EXPECTED_DATABASE": "__EXPECTED_DATABASE__",
+        "POLYARB_DB_POOL_MAX_SIZE": "1",
         "POLYARB_RUNTIME_ROLE": "control-plane",
         "POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS": "__RUNTIME_RECOVERY_ALLOWED_TARGETS__",
         "POLYARB_RUNTIME_RECOVERY_MODE": "observe-only",
@@ -174,6 +175,42 @@ def test_runtime_controller_template_is_private_observe_only_recovery_topology()
     assert "optional exact Fly recovery token" in text
 
 
+def test_database_session_budgets_leave_recovery_capacity() -> None:
+    api = tomllib.loads((ROOT / "deploy/control-plane/fly-control-api.toml.template").read_text())
+    worker = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-control-worker.toml.template").read_text()
+    )
+    controller = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-runtime-controller.toml.template").read_text()
+    )
+    qualification = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-qualification-worker.toml.template").read_text()
+    )
+    alert_delivery = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-control-alert-delivery.toml.template").read_text()
+    )
+    runtime_writer = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-runtime-event-writer.toml.template").read_text()
+    )
+
+    assert api["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "2"
+    assert worker["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "2"
+    assert controller["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "1"
+    assert qualification["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "1"
+    assert alert_delivery["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "1"
+    assert runtime_writer["env"]["POLYARB_DB_POOL_MAX_SIZE"] == "1"
+    all_deployed_session_owners = (
+        int(api["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+        + 3 * int(worker["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+        + int(controller["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+        + int(qualification["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+        + int(alert_delivery["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+        + int(runtime_writer["env"]["POLYARB_DB_POOL_MAX_SIZE"])
+    )
+    assert all_deployed_session_owners == 12
+    assert 15 - all_deployed_session_owners == 3
+
+
 def test_qualification_worker_template_has_only_scoped_database_and_no_recovery_authority() -> None:
     template = ROOT / "deploy/control-plane/fly-qualification-worker.toml.template"
     text = template.read_text()
@@ -182,6 +219,7 @@ def test_qualification_worker_template_has_only_scoped_database_and_no_recovery_
     assert payload["app"] == "__QUALIFICATION_WORKER_APP__"
     assert payload["env"] == {
         "POLYARB_DB_EXPECTED_DATABASE": "__EXPECTED_DATABASE__",
+        "POLYARB_DB_POOL_MAX_SIZE": "1",
         "POLYARB_QUALIFICATION_CONFIG_ID": "__QUALIFICATION_CONFIG_ID__",
         "POLYARB_QUALIFICATION_RELEASE_ID": "__QUALIFICATION_RELEASE_ID__",
         "POLYARB_QUALIFICATION_ROLE_IDENTITY": "opportunity,quote,structure",

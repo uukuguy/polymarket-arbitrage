@@ -6,8 +6,9 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+from contextlib import AbstractContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import psycopg
@@ -21,6 +22,7 @@ from starlette.routing import Route
 
 from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
 from .db_deadlines import CONTROL_PLANE_DB_POLICY
+from .db_role_contract import ConnectionFactory, scoped_connection_factory
 
 _FAILURE_CODE = re.compile(r"^[a-z0-9:/._-]{1,256}$")
 _BOUNDED_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:/._ @#=+-]{0,255}$")
@@ -76,18 +78,30 @@ async def append_runtime_event(request: Request) -> JSONResponse:
         if source == "independent-runtime-watchdog"
         else f"runtime-watchdog:{source}"
     )
-    dsn = request.app.state.dsn
-    with (
-        psycopg.connect(
-            dsn,
+    connection_factory = cast(
+        ConnectionFactory | None,
+        getattr(request.app.state, "connection_factory", None),
+    )
+    connection_owner: AbstractContextManager[psycopg.Connection[Any]]
+    if connection_factory is not None:
+        connection_owner = connection_factory()
+    else:
+        connection_owner = psycopg.connect(
+            request.app.state.dsn,
             connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
-        ) as connection,
+        )
+    with (
+        connection_owner as connection,
         connection.cursor(row_factory=dict_row) as cursor,
     ):
         cursor.execute(
-            f"SET LOCAL statement_timeout = '{CONTROL_PLANE_DB_POLICY.statement_setting}'"
+            """SELECT pg_catalog.set_config('statement_timeout', %s, true),
+                      pg_catalog.set_config('lock_timeout', %s, true)""",
+            (
+                CONTROL_PLANE_DB_POLICY.statement_setting,
+                CONTROL_PLANE_DB_POLICY.lock_setting,
+            ),
         )
-        cursor.execute(f"SET LOCAL lock_timeout = '{CONTROL_PLANE_DB_POLICY.lock_setting}'")
         cursor.execute(
             "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key=%s",
             (f"runtime:{key}",),
@@ -466,17 +480,33 @@ def _alert_transition_payload(
     )
 
 
-def main() -> int:
-    dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "")
-    if not dsn:
-        raise SystemExit("POLYARB_SUPABASE_DB_DSN is required")
+def create_runtime_event_writer_app(dsn: str) -> Starlette:
+    """Build one writer app that owns exactly one reusable database session."""
+    connection_factory = scoped_connection_factory(dsn, pool_max_size=1)
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette):
+        try:
+            yield
+        finally:
+            connection_factory.close()
+
     app = Starlette(
         routes=[
             Route("/healthz", healthz),
             Route("/runtime-events", append_runtime_event, methods=["POST"]),
-        ]
+        ],
+        lifespan=lifespan,
     )
-    app.state.dsn = dsn
+    app.state.connection_factory = connection_factory
+    return app
+
+
+def main() -> int:
+    dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "")
+    if not dsn:
+        raise SystemExit("POLYARB_SUPABASE_DB_DSN is required")
+    app = create_runtime_event_writer_app(dsn)
     uvicorn.run(
         app, host="0.0.0.0", port=int(os.environ.get("POLYARB_HTTP_PORT", "8080")), log_config=None
     )

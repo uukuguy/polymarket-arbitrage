@@ -7,6 +7,7 @@ kill_signal = "SIGTERM"
 kill_timeout = 40
 
 [env]
+POLYARB_DB_POOL_MAX_SIZE = "2"
 POLYARB_RUNTIME_ROLE = "control-plane"
 
 [build]

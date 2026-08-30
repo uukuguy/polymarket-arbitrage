@@ -34,5 +34,6 @@ def _isolate_production_cloud_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     for name in empty_vars:
         monkeypatch.setenv(name, "")
+    monkeypatch.delenv("POLYARB_DB_POOL_MAX_SIZE", raising=False)
     for name in false_vars:
         monkeypatch.setenv(name, "false")

@@ -245,7 +245,7 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
             "-csearch_path=pg_catalog,public -cstatement_timeout=1000ms -clock_timeout=250ms"
         ),
     }
-    assert sum(cast(int, call[1]["max_size"]) for call in pool_calls) == 32
+    assert sum(cast(int, call[1]["max_size"]) for call in pool_calls) == 2
     assert pool_calls[1][1]["max_size"] == 1
     assert bootstrap_calls[-1] == (
         bootstrap_calls[-1][0],

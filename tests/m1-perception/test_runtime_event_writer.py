@@ -1,11 +1,16 @@
 """Contract tests for the private watchdog event writer boundary."""
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from polyarb.control_plane.alert_delivery import render_runtime_incident_message
 from polyarb.control_plane.runtime_event_writer import append_runtime_event, healthz
+
+
+def _is_setup_query(sql: str) -> bool:
+    return "pg_catalog.set_config('statement_timeout'" in sql
 
 
 def _runtime_transition_payload(
@@ -77,7 +82,7 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
         def __exit__(self, *_args): return None
         def execute(self, sql, params=()):
             self.calls.append(sql)
-            if not sql.startswith("SET LOCAL"):
+            if not _is_setup_query(sql):
                 self.parameters.append(params)
         def fetchone(self): return {"incident_event_id": "event-existing"}
 
@@ -114,10 +119,7 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
     assert response.status_code == 201
     assert response.json() == {"status": "duplicate", "incident_event_id": "event-existing"}
     assert cursor.parameters[0] == ("runtime:" + "a" * 64,)
-    assert cursor.calls[:2] == [
-        "SET LOCAL statement_timeout = '5000ms'",
-        "SET LOCAL lock_timeout = '1000ms'",
-    ]
+    assert _is_setup_query(cursor.calls[0])
     assert connect_calls == [{"connect_timeout": 5}]
 
 
@@ -136,13 +138,13 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
         def __exit__(self, *_args): return None
         def execute(self, sql, params=()):
             self.calls.append(sql)
-            if not sql.startswith("SET LOCAL"):
+            if not _is_setup_query(sql):
                 self.parameters.append(params)
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
 
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -184,10 +186,7 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
     assert response.status_code == 201
     assert response.json()["incident_key"] == "persisted-incident"
     assert cursor.parameters[1] == ("runtime-watchdog:cloudflare-watchdog-supervisor",)
-    assert cursor.calls[:2] == [
-        "SET LOCAL statement_timeout = '5000ms'",
-        "SET LOCAL lock_timeout = '1000ms'",
-    ]
+    assert _is_setup_query(cursor.calls[0])
     assert any("RETURNING incident_key" in call for call in cursor.calls)
     event_parameters = next(
         params
@@ -256,10 +255,7 @@ def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
         )
     assert response.status_code == 201
     assert response.json() == {"status": "noop"}
-    assert cursor.calls[:2] == [
-        "SET LOCAL statement_timeout = '5000ms'",
-        "SET LOCAL lock_timeout = '1000ms'",
-    ]
+    assert _is_setup_query(cursor.calls[0])
     assert connect_calls == [{"connect_timeout": 5}]
 
 
@@ -277,7 +273,7 @@ def test_runtime_transition_writer_suppresses_restart_duplicate_from_open_incide
         def __exit__(self, *_args): return None
         def execute(self, sql, _params=()): self.calls.append(sql)
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -343,7 +339,7 @@ def test_runtime_transition_writer_returns_escalated_payload_after_durable_remin
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -430,7 +426,7 @@ def test_runtime_transition_writer_records_recovered_once_and_suppresses_replay(
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -517,7 +513,7 @@ def test_runtime_transition_writer_rejects_stale_recovered_before_latest_detecte
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -583,7 +579,7 @@ def test_runtime_transition_writer_rejects_stale_detected_before_latest_recovere
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -647,7 +643,7 @@ def test_runtime_transition_writer_uses_recovery_started_as_ordering_not_reminde
             if "INSERT INTO m1_alert_outbox" in sql:
                 self.outbox_payloads.append(params[3])
         def fetchone(self):
-            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            query_count = sum(not _is_setup_query(call) for call in self.calls)
             if query_count == 1:
                 return None
             if query_count == 2:
@@ -703,3 +699,61 @@ def test_runtime_transition_writer_uses_recovery_started_as_ordering_not_reminde
     assert early.json() == {"status": "noop"}
     assert first_reminder.json()["transition_payload"]["transition"] == "escalated"
     assert [len(cursor.outbox_payloads) for cursor in all_cursors] == [0, 2]
+def test_runtime_event_writer_app_owns_one_bounded_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import runtime_event_writer
+
+    calls: list[tuple[str, int]] = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, _sql, _params=()): return None
+        def fetchone(self): return {"incident_event_id": "event-from-pool"}
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return Cursor()
+
+    class Factory:
+        def __init__(self) -> None:
+            self.closed = False
+            self.checkout_count = 0
+
+        def __call__(self) -> Connection:
+            self.checkout_count += 1
+            return Connection()
+
+        def close(self) -> None:
+            self.closed = True
+
+    factory = Factory()
+
+    def build(dsn: str, *, pool_max_size: int):
+        calls.append((dsn, pool_max_size))
+        return factory
+
+    monkeypatch.setattr(runtime_event_writer, "scoped_connection_factory", build)
+
+    app = runtime_event_writer.create_runtime_event_writer_app("postgresql://runtime")
+    assert app.state.connection_factory is factory
+    assert calls == [("postgresql://runtime", 1)]
+
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    with TestClient(app) as client:
+        assert factory.closed is False
+        response = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "f" * 64},
+            json={
+                "kind": "detected",
+                "failures": ["control-api:timeout"],
+                "occurred_at": "2026-08-18T15:00:00+00:00",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["incident_event_id"] == "event-from-pool"
+        assert factory.checkout_count == 1
+    assert factory.closed is True

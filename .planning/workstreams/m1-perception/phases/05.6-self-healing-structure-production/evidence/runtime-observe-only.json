@@ -10,20 +10,25 @@
     "reviewed_artifacts": [
       {
         "path": "deploy/control-plane/fly-runtime-controller.toml.template",
-        "sha256": "7d0d3113dc8d614a70bc6e91f0121a0d68dab1daba8c0a6e38782cb34d3e0a4c"
+        "sha256": "667b95228f40eeed2acbabf268069e0226059cf5ef84017a02d49cd8d03e006f"
       },
       {
         "path": "deploy/control-plane/fly-qualification-worker.toml.template",
-        "sha256": "f2d1e789985822533d022fe787d0ede6ea2ba9c848516839d472cb6c3b7dc4b2"
+        "sha256": "7f1afa005db32ab6c0c6be958fccb278624c4cf6857d4c945f1d1de8be8bf942"
       }
     ],
     "default_recovery_mode": "observe-only",
     "local_fault_matrix": "pass",
     "production_decision_window_seconds": 0,
     "template_review_amendment": {
-      "recorded_at": "2026-08-29T01:46:54+08:00",
-      "reason": "Task 13 adds the reviewed SIGTERM/40 platform shutdown backstop; this not-run artifact remains non-qualifying and records no production window.",
-      "production_mutation": false
+      "recorded_at": "2026-08-31T00:55:23+08:00",
+      "reason": "Deployment database budgets now bound the runtime controller and qualification worker to one session each; this not-run artifact remains non-qualifying and records no production window.",
+      "production_mutation": false,
+      "previous": {
+        "recorded_at": "2026-08-29T01:46:54+08:00",
+        "reason": "Task 13 adds the reviewed SIGTERM/40 platform shutdown backstop; this not-run artifact remains non-qualifying and records no production window.",
+        "production_mutation": false
+      }
     }
   },
   "production_database": {
