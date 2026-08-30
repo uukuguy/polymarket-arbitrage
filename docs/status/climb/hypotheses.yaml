@@ -244,18 +244,35 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-045
   description: Withholding one required Structure source-page receipt can keep the
-    materializer barrier non-terminal without publishing a partial bundle, after
-    which completing that exact fenced receipt releases one materializer turn that
-    commits one complete source bundle.
+    materializer barrier non-terminal without publishing a partial bundle, after which
+    completing that exact fenced receipt releases one materializer turn that commits
+    one complete source bundle.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Prove a durable source receipt gap pauses qualification without a
     restart or private timeout, names the missing input exactly, and recovers through
     the normal source-to-materializer transaction boundary.
   cost_h: 0.75
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T11:08:35+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 50
+    run: 20260830-032239-h-045
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent

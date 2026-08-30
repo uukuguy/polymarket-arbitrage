@@ -1,8 +1,6 @@
 {
-  "in_flight": {
-    "hypothesis_id": "H-045"
-  },
-  "last_cycle": 49,
-  "next_action": "implement and evaluate H-045 source-receipt-gap commissioning",
+  "in_flight": null,
+  "last_cycle": 50,
+  "next_action": "rank next pending hypothesis",
   "session": "2026-07-31-m1-self-healing-structure"
 }
