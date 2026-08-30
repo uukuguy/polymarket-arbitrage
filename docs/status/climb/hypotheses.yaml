@@ -1,4 +1,16 @@
 hypotheses:
+- id: H-059
+  description: A sequential qualification consumer can treat a full bounded source
+    page as a backlog hint, yield for cancellation, and immediately read the next
+    page while reserving its polling cadence for an idle source.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Remove the fixed 200-facts-per-minute qualification ceiling so
+    a healthy successor Opportunity freshness fact becomes eligible without an
+    epoch reset, unbounded transaction, or concurrent writer.
+  cost_h: 0.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-31T04:33:00+08:00'
 - id: H-058
   description: A single fenced Opportunity publisher can replace serial certified
     Quote-batch loading with bounded ordered waves, preserving frozen input order,

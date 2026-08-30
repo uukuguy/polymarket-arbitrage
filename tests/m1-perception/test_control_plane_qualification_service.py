@@ -25,6 +25,7 @@ from polyarb.control_plane.qualification_service import (
     QualificationFactRecord,
     QualificationService,
     QualificationServiceStopRequested,
+    QualificationTickResult,
     StaticQualificationFactSource,
     freshness_row_to_fact_record,
     incident_event_row_to_fact_record,
@@ -36,6 +37,41 @@ from polyarb.control_plane.qualification_service import (
 from polyarb.control_plane.qualification_store import certificate_digest
 
 NOW = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
+
+
+def test_qualification_service_immediately_drains_a_full_source_batch() -> None:
+    stop = asyncio.Event()
+    calls: list[datetime] = []
+    emitted: list[dict[str, object]] = []
+
+    class Service:
+        def tick(self, now: datetime) -> QualificationTickResult:
+            calls.append(now)
+            return QualificationTickResult(
+                status="ok",
+                applied=100,
+                cursor=None,
+                epoch_id="epoch-a",
+                state=QualificationState.ACCUMULATING,
+                source_batch_full=len(calls) == 1,
+            )
+
+    def emit(payload: dict[str, object]) -> None:
+        emitted.append(payload)
+        if len(emitted) == 2:
+            stop.set()
+
+    result = asyncio.run(
+        run_qualification_service(
+            cast(Any, Service()),
+            interval_seconds=30,
+            emit=emit,
+            stop_event=stop,
+        )
+    )
+
+    assert result == {"status": "stopped", "ticks": 2}
+    assert len(calls) == 2
 
 
 def test_qualification_service_stop_detaches_a_stalled_tick_after_database_grace(

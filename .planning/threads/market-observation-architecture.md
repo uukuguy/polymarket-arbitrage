@@ -2653,3 +2653,19 @@ success is not user receipt/read evidence.
   against disposable migrated PostgreSQL; exact-image orchestration must still
   create one isolated database per proof before these eight obligations count
   toward the production commissioning envelope.
+
+### §2.82 Poll cadence is not a backlog throughput limit (2026-08-31)
+
+- The qualification worker read exactly 100 ordered facts and then slept 30
+  seconds even when the source page was full. Runtime ingress could match that
+  fixed 200-facts/minute ceiling, so a newly published Opportunity remained
+  invisible to the qualification cursor despite a healthy data pipeline.
+- Page size remains the transaction, memory and shutdown bound. A full page now
+  commits its cursor, yields once for cancellation and immediately reads the
+  next page; only a short page enters the idle polling interval.
+- This keeps one writer and one cursor CAS. Adding concurrent qualification
+  writers or increasing the page to an arbitrary large number would trade a
+  scheduling defect for lock, memory and shutdown risk.
+- Observer commands are separate workloads. Starting a second Python process
+  inside a 256 MB resident Machine caused an OOM restart; control API and
+  platform logs are the operator read path for low-memory nodes.

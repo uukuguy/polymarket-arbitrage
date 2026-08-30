@@ -232,6 +232,7 @@ class QualificationTickResult:
     epoch_id: str
     state: QualificationState
     certificate_digest: str | None = None
+    source_batch_full: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,6 +539,7 @@ class QualificationService:
             certificate_digest=(
                 None if certificate is None else cast(str, certificate.get("certificate_digest"))
             ),
+            source_batch_full=len(records) == self._batch_size,
         )
 
 
@@ -1034,6 +1036,13 @@ async def run_qualification_service(
         ticks += 1
         if emit is not None:
             emit(_tick_payload(result))
+        if result.source_batch_full:
+            # A full source page is evidence of possible backlog, so yielding for
+            # the normal polling interval would cap throughput below the event
+            # production rate.  Keep each transaction bounded, yield back to the
+            # event loop for cancellation, then immediately claim the next page.
+            await asyncio.sleep(0)
+            continue
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:
@@ -1392,9 +1401,7 @@ def _runtime_epoch_from_row(row: Mapping[str, object]) -> _RuntimeEpochProjectio
         runtime_fact_count=int(cast(int, row["runtime_fact_count"])),
         eligibility_state=_persisted_eligibility_state(state=state, slo=slo),
         eligibility_reason=(
-            None
-            if slo.get("eligibility_reason") is None
-            else str(slo["eligibility_reason"])
+            None if slo.get("eligibility_reason") is None else str(slo["eligibility_reason"])
         ),
     )
 
@@ -2051,6 +2058,7 @@ def _tick_payload(result: QualificationTickResult) -> dict[str, object]:
         "epoch_id": result.epoch_id,
         "state": result.state.value,
         "certificate_digest": result.certificate_digest,
+        "source_batch_full": result.source_batch_full,
     }
 
 
@@ -2196,9 +2204,7 @@ def _status_epoch_from_row(row: Mapping[str, object]) -> _QualificationStatusEpo
         ),
         eligibility_state=_persisted_eligibility_state(state=state, slo=slo),
         eligibility_reason=(
-            None
-            if slo.get("eligibility_reason") is None
-            else str(slo["eligibility_reason"])
+            None if slo.get("eligibility_reason") is None else str(slo["eligibility_reason"])
         ),
     )
 

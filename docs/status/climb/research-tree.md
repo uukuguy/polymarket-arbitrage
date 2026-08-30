@@ -66,6 +66,7 @@
 - **H-056** [confirmed]: Gamma timeout and body-free malformed-response failures can be commissioned on the real PostgreSQL Structure source worker, reset the transport generation, leave no R2/page receipt, and recover the exact source page at the shared retry due-at.
 - **H-057** [confirmed]: A resumable exact-image commissioning harness can persist and independently reverify eight real normal turns, all 66 node-level attack proofs, and one database-backed Structure-to-Quote-to-Opportunity lineage before assembling a release/config-bound envelope.
 - **H-058** [confirmed]: A single fenced Opportunity publisher can replace serial certified Quote-batch loading with bounded ordered waves, preserving frozen input order, lease heartbeat, interruption drain, and one terminal pointer publication.
+- **H-059** [pending]: A sequential qualification consumer can treat a full bounded source page as a backlog hint, yield for cancellation, and immediately read the next page while reserving its polling cadence for an idle source.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
