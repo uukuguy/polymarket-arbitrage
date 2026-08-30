@@ -1,4 +1,16 @@
 hypotheses:
+- id: H-060
+  description: A rolling qualification freshness pause can resume without resetting
+    its epoch only when an explicit within-SLO freshness fact names the exact product
+    that caused the pause; unrelated products and generic recovery events cannot unlock it.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Preserve truthful effective-time accumulation across ordinary product
+    staleness while preventing cross-product or generic recovery facts from manufacturing
+    eligibility.
+  cost_h: 0.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-31T05:10:00+08:00'
 - id: H-059
   description: A sequential qualification consumer can treat a full bounded source
     page as a backlog hint, yield for cancellation, and immediately read the next

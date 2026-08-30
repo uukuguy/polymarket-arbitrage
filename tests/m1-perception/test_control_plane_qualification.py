@@ -342,6 +342,89 @@ def test_unresolved_p1_and_three_freshness_classes_pause_without_reset() -> None
         assert result.invalidated_at is None
 
 
+def test_fresh_product_observation_resumes_only_its_matching_freshness_pause() -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    paused = policy.apply(
+        _state(policy),
+        _fact(
+            "structure-stale",
+            NOW + timedelta(seconds=10),
+            freshness_product="structure",
+            freshness_seconds=901,
+            freshness_slo_seconds=900,
+        ),
+    )
+
+    unrelated = policy.apply(
+        paused,
+        _fact(
+            "quote-fresh",
+            NOW + timedelta(seconds=15),
+            freshness_product="quote",
+            freshness_seconds=1,
+            freshness_slo_seconds=900,
+        ),
+    )
+    resumed = policy.apply(
+        unrelated,
+        _fact(
+            "structure-fresh",
+            NOW + timedelta(seconds=20),
+            freshness_product="structure",
+            freshness_seconds=1,
+            freshness_slo_seconds=900,
+        ),
+    )
+    advancing = policy.apply(resumed, _fact("healthy", NOW + timedelta(seconds=30)))
+
+    assert unrelated.eligibility_reason == "freshness.structure"
+    assert unrelated.coverage_seconds == 0
+    assert resumed.eligibility_state == "eligible"
+    assert resumed.eligibility_reason is None
+    assert resumed.coverage_seconds == 0
+    assert advancing.coverage_seconds == 10
+
+
+@pytest.mark.parametrize(
+    ("reason", "kwargs"),
+    (
+        (
+            "recovery.retry",
+            {
+                "signature": "unrelated-runtime-retry",
+                "recovery_duration_seconds": 1,
+                "recovery_slo_seconds": 60,
+            },
+        ),
+        ("recovery.confirmed", {"recovery_confirmed": True}),
+    ),
+)
+def test_generic_recovery_cannot_resume_a_product_freshness_pause(
+    reason: str,
+    kwargs: dict[str, object],
+) -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    paused = policy.apply(
+        _state(policy),
+        _fact(
+            "structure-stale",
+            NOW + timedelta(seconds=10),
+            freshness_product="structure",
+            freshness_seconds=901,
+            freshness_slo_seconds=900,
+        ),
+    )
+
+    unrelated = policy.apply(
+        paused,
+        _fact("unrelated-recovery", NOW + timedelta(seconds=20), reason=reason, **kwargs),
+    )
+
+    assert unrelated.eligibility_reason == "freshness.structure"
+    assert unrelated.pending_recovery_started is True
+    assert unrelated.coverage_seconds == 0
+
+
 def test_repeated_signature_budget_blocks_without_resetting_epoch() -> None:
     policy = _policy(signature_budget=2)
     state = _state(policy)
@@ -449,12 +532,9 @@ def test_duplicate_fact_is_idempotent_and_conflict_fails_closed() -> None:
 
 def test_terminal_epochs_replay_exact_fact_but_reject_new_mutation() -> None:
     policy = _policy()
-    invalidated = policy.apply(
-        _state(policy), _fact("break", NOW, reason="integrity.conflict")
-    )
+    invalidated = policy.apply(_state(policy), _fact("break", NOW, reason="integrity.conflict"))
     assert (
-        policy.apply(invalidated, _fact("break", NOW, reason="integrity.conflict"))
-        is invalidated
+        policy.apply(invalidated, _fact("break", NOW, reason="integrity.conflict")) is invalidated
     )
     with pytest.raises(QualificationTerminalError):
         policy.apply(invalidated, _fact("new", NOW + timedelta(seconds=1)))

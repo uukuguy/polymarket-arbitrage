@@ -426,21 +426,28 @@ class QualificationDecision:
                 if fact.reason == "recovery.started" or fact.reason in BLOCKING_REASONS:
                     pending_recovery_started = True
                     eligibility_reason = fact.reason
-                elif fact.reason in CONTAINED_REASONS or (
-                    fact.reason == "recovery.confirmed" and fact.recovery_confirmed
+                elif (
+                    eligibility_reason == f"freshness.{fact.freshness_product}"
+                    and fact.freshness_seconds is not None
+                    and fact.freshness_slo_seconds is not None
+                    and fact.freshness_seconds <= fact.freshness_slo_seconds
                 ):
                     pending_recovery_started = False
                     eligibility_reason = None
-            pending_recovery_started = (
-                pending_recovery_started or self.pending_recovery_started
-            )
+                elif not (
+                    eligibility_reason is not None and eligibility_reason.startswith("freshness.")
+                ) and (
+                    fact.reason in CONTAINED_REASONS
+                    or (fact.reason == "recovery.confirmed" and fact.recovery_confirmed)
+                ):
+                    pending_recovery_started = False
+                    eligibility_reason = None
+            pending_recovery_started = pending_recovery_started or self.pending_recovery_started
             eligibility_reason = self.eligibility_reason or eligibility_reason
             object.__setattr__(self, "pending_recovery_started", pending_recovery_started)
             object.__setattr__(self, "eligibility_reason", eligibility_reason)
         if self.pending_recovery_started != (self.eligibility_reason is not None):
-            raise QualificationError(
-                "pending recovery and eligibility reason must agree"
-            )
+            raise QualificationError("pending recovery and eligibility reason must agree")
         if self.last_fact_at is None and facts:
             object.__setattr__(self, "last_fact_at", facts[-1].observed_at)
         if self.state is QualificationState.QUALIFIED and self.qualified_at is None:
@@ -701,15 +708,24 @@ class RollingQualificationPolicy:
             )
 
         blocking_reason = self._blocking_reason(state, fact)
-        appended = self._append_fact(
+        freshness_confirmed = self._confirms_freshness_pause(
             state,
             fact,
             blocking_reason=blocking_reason,
         )
+        generic_recovery_confirmed = not self._is_freshness_pause(state) and (
+            fact.reason in CONTAINED_REASONS or self._is_recovery_confirmation(fact)
+        )
+        appended = self._append_fact(
+            state,
+            fact,
+            blocking_reason=blocking_reason,
+            pause_confirmed=freshness_confirmed or generic_recovery_confirmed,
+        )
         if blocking_reason is not None or fact.reason == "recovery.started":
             return appended
         if self._has_pending_recovery_start(state):
-            if fact.reason not in CONTAINED_REASONS and not self._is_recovery_confirmation(fact):
+            if not generic_recovery_confirmed and not freshness_confirmed:
                 return appended
         if appended.coverage_seconds >= self.required_seconds and fact.evidence_complete:
             surplus = appended.coverage_seconds - self.required_seconds
@@ -751,6 +767,29 @@ class RollingQualificationPolicy:
         if fact.reason in BREAKING_REASONS:
             return fact.reason
         return None
+
+    @staticmethod
+    def _confirms_freshness_pause(
+        state: QualificationDecision,
+        fact: QualificationFact,
+        *,
+        blocking_reason: str | None,
+    ) -> bool:
+        """Resume only the exact freshness product that previously paused eligibility."""
+        return (
+            blocking_reason is None
+            and fact.freshness_product is not None
+            and fact.freshness_seconds is not None
+            and fact.freshness_slo_seconds is not None
+            and fact.freshness_seconds <= fact.freshness_slo_seconds
+            and state.eligibility_reason == f"freshness.{fact.freshness_product}"
+        )
+
+    @staticmethod
+    def _is_freshness_pause(state: QualificationDecision) -> bool:
+        return state.eligibility_reason is not None and state.eligibility_reason.startswith(
+            "freshness."
+        )
 
     def _blocking_reason(
         self,
@@ -798,6 +837,7 @@ class RollingQualificationPolicy:
         *,
         next_state: QualificationState | None = None,
         blocking_reason: str | None = None,
+        pause_confirmed: bool = False,
     ) -> QualificationDecision:
         gap = 0.0
         gap_anchor = current.last_fact_at or current.started_at
@@ -822,7 +862,7 @@ class RollingQualificationPolicy:
         if fact.reason == "recovery.started" or blocking_reason is not None:
             pending_recovery_started = True
             eligibility_reason = blocking_reason or "recovery.started"
-        elif fact.reason in CONTAINED_REASONS or self._is_recovery_confirmation(fact):
+        elif pause_confirmed:
             pending_recovery_started = False
             eligibility_reason = None
         progress_count = current.progress_count

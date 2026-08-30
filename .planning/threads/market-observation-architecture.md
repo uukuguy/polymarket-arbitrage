@@ -2669,3 +2669,16 @@ success is not user receipt/read evidence.
 - Observer commands are separate workloads. Starting a second Python process
   inside a 256 MB resident Machine caused an OOM restart; control API and
   platform logs are the operator read path for low-memory nodes.
+
+### §2.83 Freshness recovery is product-scoped (2026-08-31)
+
+- A freshness pause names its causal product. It is not a global red/green bit:
+  fresh Quote or Opportunity evidence cannot repair stale Structure evidence.
+- The exact matching product must emit explicit age and SLO fields and be within
+  that SLO before the same epoch resumes. Generic contained recovery and
+  `recovery.confirmed` remain valid only for non-freshness pauses.
+- The confirmation fact establishes a new effective-time anchor. Wall time spent
+  paused remains excluded from qualification coverage.
+- Runtime folding and restart replay use the same transition. This correction
+  does not solve a source window whose natural publication interval exceeds the
+  product SLO; cadence and product identity require a separate design audit.
