@@ -63,6 +63,33 @@ def _fake_uv_calls(log_path: Path) -> list[list[str]]:
     return [json.loads(line)["argv"] for line in log_path.read_text().splitlines() if line]
 
 
+def test_quote_refresh_admit_make_target_is_bounded_and_explicit(tmp_path: Path) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_SUPABASE_DB_DSN"] = "postgresql://operator@example.test/control"
+
+    result = subprocess.run(
+        ["make", "quote-refresh-admit-once", "enable=1"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "quote-refresh-admit-once",
+            "--enable",
+            "--json",
+        ]
+    ]
+
+
 def _fake_curl_env(
     tmp_path: Path, *, body: str, status: str = "200"
 ) -> tuple[dict[str, str], Path]:

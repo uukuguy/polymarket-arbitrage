@@ -287,6 +287,50 @@ def test_structure_source_once_admits_one_window_then_runs_one_source_page(
     }
 
 
+def test_quote_refresh_admit_once_requires_enable_before_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["quote-refresh-admit-once", "--json"]) == 2
+    assert "--enable is required" in capsys.readouterr().err
+
+
+def test_quote_refresh_admit_once_runs_lightweight_300_second_lane(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    class Worker:
+        async def run_once(self):
+            return type(
+                "Result",
+                (),
+                {"job_key": f"quote:{'a' * 64}:admit", "outcome": "admitted"},
+            )()
+
+    control_plane = object()
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: control_plane)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_transactional_quote_refresh_admitter",
+        lambda actual: Worker()
+        if actual is control_plane
+        else (_ for _ in ()).throw(AssertionError("wrong control plane")),
+    )
+
+    assert (
+        cli_control_plane.main(["quote-refresh-admit-once", "--enable", "--json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "admission": {"job_key": f"quote:{'a' * 64}:admit", "outcome": "admitted"},
+        "cadence_seconds": 300,
+        "status": "ok",
+    }
+
+
 def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 

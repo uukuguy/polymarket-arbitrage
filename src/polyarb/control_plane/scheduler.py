@@ -23,6 +23,7 @@ class TransactionalControlPlaneScheduler:
         self,
         *,
         structure_source_admitter: _Worker,
+        quote_refresh_admitter: _Worker | None = None,
         structure_source_worker: _Worker,
         structure_source_materializer: _Worker,
         structure_worker: _Worker,
@@ -61,11 +62,11 @@ class TransactionalControlPlaneScheduler:
             ),
         }
         workers: list[tuple[str, _Worker]] = [("structure-source-admit", structure_source_admitter)]
-        workers.extend(
-            worker
-            for job_type in RUNTIME_JOB_ORDER
-            if (worker := runtime_workers[job_type]) is not None
-        )
+        for job_type in RUNTIME_JOB_ORDER:
+            if job_type == "quote-admit" and quote_refresh_admitter is not None:
+                workers.append(("quote-refresh-admit", quote_refresh_admitter))
+            if (worker := runtime_workers[job_type]) is not None:
+                workers.append(worker)
         self._workers = tuple(workers)
         self._max_turns = max_turns
         self._structure_materializer_worker = (

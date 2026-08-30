@@ -338,8 +338,18 @@ SELECT
         AS retryable_quote_age,
     (SELECT to_jsonb(pointer_row) FROM (
         SELECT pointer.generation_key, pointer.published_at,
-               manifest.artifact_key, manifest.artifact_digest, manifest.record_count
+               manifest.artifact_key, manifest.artifact_digest, manifest.record_count,
+               lineage.structure_generation_key, lineage.cadence_seconds,
+               lineage.cadence_bucket,
+               CASE
+                   WHEN lineage.cadence_seconds IS NULL THEN NULL
+                   ELSE to_timestamp(
+                       (lineage.cadence_bucket + 1) * lineage.cadence_seconds
+                   )
+               END AS next_eligible_at
         FROM m1_publication_pointers AS pointer
+        JOIN m1_quote_generation_inputs AS lineage
+          ON lineage.generation_key = pointer.generation_key
         JOIN m1_generation_manifests AS manifest
           ON manifest.generation_key = pointer.generation_key
         WHERE pointer.pointer_key = 'quote:current'
@@ -8351,6 +8361,30 @@ class PostgresControlPlane:
                     if quote_pointer is None
                     else {
                         "generation_key": str(quote_pointer["generation_key"]),
+                        "parent_structure_generation_key": str(
+                            quote_pointer["structure_generation_key"]
+                        ),
+                        "cadence_seconds": (
+                            None
+                            if quote_pointer["cadence_seconds"] is None
+                            else _snapshot_int(
+                                quote_pointer["cadence_seconds"], "quote.cadence_seconds"
+                            )
+                        ),
+                        "cadence_bucket": (
+                            None
+                            if quote_pointer["cadence_bucket"] is None
+                            else _snapshot_int(
+                                quote_pointer["cadence_bucket"], "quote.cadence_bucket"
+                            )
+                        ),
+                        "next_eligible_at": (
+                            None
+                            if quote_pointer["next_eligible_at"] is None
+                            else _snapshot_aware(
+                                quote_pointer["next_eligible_at"], "quote.next_eligible_at"
+                            ).isoformat()
+                        ),
                         "published_at": _snapshot_aware(
                             quote_pointer["published_at"], "quote.published_at"
                         ).isoformat(),

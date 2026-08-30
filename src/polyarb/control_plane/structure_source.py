@@ -992,6 +992,32 @@ class TransactionalStructureSourceAdmitter:
         return StructureWorkerResult(job_key=decision.job_key, outcome=decision.state)
 
 
+class TransactionalQuoteRefreshAdmitter:
+    """Open one recurring Quote run using only durable control-plane lineage."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        cadence_seconds: int,
+        now: Callable[[], datetime],
+    ) -> None:
+        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
+            raise ValueError("Quote refresh cadence must be positive")
+        self._control_plane = control_plane
+        self._cadence_seconds = cadence_seconds
+        self._now = now
+        self._terminal_grace_seconds = CONTROL_PLANE_DB_POLICY.stop_grace_seconds
+
+    async def run_once(self) -> StructureWorkerResult:
+        decision = await _to_thread(
+            self._control_plane.admit_due_quote_refresh,
+            cadence_seconds=self._cadence_seconds,
+            now=self._now(),
+        )
+        return StructureWorkerResult(job_key=decision.job_key, outcome=decision.state)
+
+
 def _canonical_json(value: Mapping[str, object]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 

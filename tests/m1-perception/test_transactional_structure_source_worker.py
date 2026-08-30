@@ -19,6 +19,7 @@ from polyarb.control_plane.models import (
 from polyarb.control_plane.structure_source import (
     DEFAULT_MAX_MARKET_BATCHES,
     StructureSourcePageArtifact,
+    TransactionalQuoteRefreshAdmitter,
     TransactionalStructureSourceAdmitter,
     TransactionalStructureSourcePool,
     TransactionalStructureSourceWorker,
@@ -528,6 +529,32 @@ def test_source_admitter_returns_quote_backpressure_without_claiming_gamma_work(
     assert asyncio.run(worker.run_once()) == StructureWorkerResult(
         job_key=None, outcome="backpressured:quote"
     )
+
+
+def test_quote_refresh_admitter_uses_only_durable_cadence_admission() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, datetime]] = []
+
+        def admit_due_quote_refresh(self, *, cadence_seconds: int, now: datetime):
+            self.calls.append((cadence_seconds, now))
+            return SourceAdmissionDecision(
+                state="admitted",
+                job_key=f"quote:{'a' * 64}:admit",
+            )
+
+    control_plane = ControlPlane()
+    worker = TransactionalQuoteRefreshAdmitter(
+        control_plane=control_plane,  # type: ignore[arg-type]
+        cadence_seconds=300,
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key=f"quote:{'a' * 64}:admit",
+        outcome="admitted",
+    )
+    assert control_plane.calls == [(300, NOW)]
 
 
 def test_source_worker_fetches_one_event_page_uploads_then_records_receipt() -> None:

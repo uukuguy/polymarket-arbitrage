@@ -2816,6 +2816,16 @@ def test_due_quote_refresh_admits_distinct_run_on_current_structure_once_per_buc
             """
         ).fetchone()
     assert pointer == (recurring_generation,)
+    pointer_status = control_plane.operational_snapshot(now=now + timedelta(seconds=2))["quote"][
+        "current_pointer"
+    ]
+    assert pointer_status["parent_structure_generation_key"] == structure_generation
+    assert pointer_status["cadence_seconds"] == 300
+    assert pointer_status["cadence_bucket"] == int(now.timestamp()) // 300
+    assert pointer_status["next_eligible_at"] == datetime.fromtimestamp(
+        (int(now.timestamp()) // 300 + 1) * 300,
+        tz=UTC,
+    ).isoformat()
 
 
 def test_quote_refresh_defers_to_leased_structure_certifier_and_only_new_parent_admits(
@@ -4679,6 +4689,11 @@ def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
     assert quote_status["certifier_job_states"] == {"succeeded": 1}
     assert quote_status["current_pointer"] is not None
     assert quote_status["current_pointer"]["generation_key"] == batches[0].generation_key
+    assert quote_status["current_pointer"]["parent_structure_generation_key"] == (
+        f"structure:{'a' * 64}"
+    )
+    assert quote_status["current_pointer"]["cadence_seconds"] is None
+    assert quote_status["current_pointer"]["next_eligible_at"] is None
 
 
 def test_incomplete_quote_generation_cannot_switch_current_pointer(

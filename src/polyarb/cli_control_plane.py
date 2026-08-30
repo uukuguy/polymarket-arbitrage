@@ -104,6 +104,7 @@ from polyarb.control_plane.structure_shadow import (
     read_legacy_structure_bundle,
 )
 from polyarb.control_plane.structure_source import (
+    TransactionalQuoteRefreshAdmitter,
     TransactionalStructureSourceAdmitter,
     TransactionalStructureSourceMaterializer,
     TransactionalStructureSourcePool,
@@ -208,6 +209,12 @@ def _parser() -> argparse.ArgumentParser:
     structure_source_once.add_argument("--window-key", required=True)
     structure_source_once.add_argument("--worker-id", default="structure-source-operator-once")
     structure_source_once.add_argument("--json", action="store_true")
+    quote_refresh_once = subcommands.add_parser(
+        "quote-refresh-admit-once",
+        help="admit at most one due recurring Quote run from durable current lineage",
+    )
+    quote_refresh_once.add_argument("--enable", action="store_true")
+    quote_refresh_once.add_argument("--json", action="store_true")
     structure_shadow_once = subcommands.add_parser(
         "structure-shadow-once",
         help="export and admit one current legacy Structure publication without pointer changes",
@@ -1237,6 +1244,17 @@ def _transactional_structure_source_admitter(
     )
 
 
+def _transactional_quote_refresh_admitter(
+    control_plane: PostgresControlPlane,
+) -> TransactionalQuoteRefreshAdmitter:
+    """Create the lightweight 300-second executable-data cadence lane."""
+    return TransactionalQuoteRefreshAdmitter(
+        control_plane=control_plane,
+        cadence_seconds=300,
+        now=lambda: datetime.now(UTC),
+    )
+
+
 def _transactional_quote_admitter(
     control_plane: PostgresControlPlane,
     *,
@@ -1283,6 +1301,7 @@ def _transactional_scheduler(
             structure_high_water=structure_high_water,
             quote_high_water=quote_high_water,
         ),
+        quote_refresh_admitter=_transactional_quote_refresh_admitter(control_plane),
         structure_source_worker=_transactional_structure_source_worker(
             control_plane, worker_id=f"{worker_id}:structure-source"
         ),
@@ -1912,6 +1931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "quote-once",
         "structure-once",
         "structure-source-once",
+        "quote-refresh-admit-once",
         "structure-shadow-once",
         "structure-shadow-publish",
         "tick-once",
@@ -2383,6 +2403,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         worker_id=args.worker_id,
                     )
                 ),
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "quote-refresh-admit-once":
+            result = asyncio.run(_transactional_quote_refresh_admitter(control_plane).run_once())
+            _write(
+                {
+                    "status": "ok",
+                    "admission": {"job_key": result.job_key, "outcome": result.outcome},
+                    "cadence_seconds": 300,
+                },
                 as_json=args.json,
             )
             return 0

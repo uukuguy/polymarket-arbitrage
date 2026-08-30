@@ -245,6 +245,37 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     ]
 
 
+def test_coordinator_places_quote_refresh_before_quote_admission() -> None:
+    idle = _AsyncWorker("idle")
+    refresh = _AsyncWorker("recurring-refresh")
+    quote_admit = _AsyncWorker("quote-admit")
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=idle,
+        quote_refresh_admitter=refresh,
+        structure_source_worker=idle,
+        structure_source_materializer=idle,
+        structure_worker=idle,
+        structure_certifier=idle,
+        quote_admitter=quote_admit,
+        quote_worker=idle,
+        quote_certifier=idle,
+        max_turns=7,
+    )
+
+    result = asyncio.run(scheduler.run_tick())
+
+    workers = [turn["worker"] for turn in result["turns"]]
+    assert workers.index("quote-refresh-admit") < workers.index("quote-admit")
+    refresh_turn = next(
+        turn for turn in result["turns"] if turn["worker"] == "quote-refresh-admit"
+    )
+    assert refresh_turn == {
+        "worker": "quote-refresh-admit",
+        "job_key": "recurring-refresh",
+        "outcome": "succeeded",
+    }
+
+
 def test_range_budget_appends_only_serial_structure_range_turns() -> None:
     structure = _AsyncWorker("structure-range")
     scheduler = TransactionalControlPlaneScheduler(
