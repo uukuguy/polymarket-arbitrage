@@ -11995,3 +11995,32 @@ remaining shared adapters can be executed together on one release/config.
 [NEXT] Commit the H-042 confirmation state. Register and implement the next
 shared eight-node commissioning adapter for worker-exit/heartbeat loss, then
 confirm it before building one combined exact image for all shared attacks.
+
+### SESSION 354 — 2026-08-30 (heartbeat-outage commissioning)
+
+- [CLIMB H-043] Registered an in-flight production-enablement hypothesis for a
+  scoped heartbeat transport outage while the real node lease remains current.
+- [NO PRIVATE AGING] Injection simply omits the worker renewal and advances to
+  the persisted heartbeat deadline. It does not update runtime clocks, lease
+  rows, action rows or incident rows directly.
+- [EXACT CLASSIFICATION] Every node must produce the warning/non-breaking
+  `job.lease-at-risk -> heartbeat-job` decision before lease expiry; reclaim or
+  process/Machine restart is a failure for this stage.
+- [FENCED RENEWAL] The real executor renews the same attempt ID, owner and epoch
+  by exactly the persisted lease duration. The renewed lease object becomes the
+  sole capability used for terminal commit and incident closure.
+- [BUSINESS CLOSURE] All eight real-PostgreSQL node variants finish with exactly
+  one succeeded epoch-1 attempt, one completed heartbeat action, one resolved
+  warning incident and the node-specific business postcondition.
+- [TIME IDENTITY] A red test exposed that action `finished_at` uses database
+  wall-clock while heartbeat mutation uses logical action `started_at`. The
+  corrected contract verifies both clocks for their distinct responsibilities.
+- [HARNESS/ENTRY] The isolated one-node migrated harness, zero-residue cleanup,
+  Make help/DSN guard/exact argv and climb profile contracts all pass.
+- [BOUNDARY] OrbStack remained the global context. No production DB/provider,
+  Fly action, SSH, deployment, Colima or global Docker mutation occurred.
+
+[NEXT] Commit Plan 05.6-230 without protected user files, rerun the exact-HEAD
+image guard and confirm H-043 through climb. Then implement worker-exit reclaim;
+after all shared adapters are confirmed, build one combined exact image and run
+them on one release/config before any production canary or qualification.

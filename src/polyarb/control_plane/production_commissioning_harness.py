@@ -12,6 +12,7 @@ from typing import Final
 
 from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
+    HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -31,6 +32,7 @@ from .runtime_fault_matrix import (
 _STALE_OWNER_ATTACK_ID: Final[str] = "stale-owner-terminal-write"
 _PROGRESS_STALL_ATTACK_ID: Final[str] = "progress-stall"
 _RETRY_BUDGET_ATTACK_ID: Final[str] = "retry-budget-exhaustion"
+_HEARTBEAT_OUTAGE_ATTACK_ID: Final[str] = "heartbeat-outage"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -173,10 +175,34 @@ def run_retry_budget_commissioning(
     )
 
 
+def run_heartbeat_outage_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+    node_ids: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Prove controller-renewed heartbeat recovery on selected transactions."""
+
+    return _run_commissioning(
+        attack_id=_HEARTBEAT_OUTAGE_ATTACK_ID,
+        adapter_factory=HeartbeatOutageCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=node_ids,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
-    for command in ("stale-owner", "progress-stall", "retry-budget"):
+    for command in (
+        "stale-owner",
+        "progress-stall",
+        "retry-budget",
+        "heartbeat-outage",
+    ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
         attack.add_argument("--release-id", required=True)
@@ -191,6 +217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "stale-owner": run_stale_owner_commissioning,
         "progress-stall": run_progress_stall_commissioning,
         "retry-budget": run_retry_budget_commissioning,
+        "heartbeat-outage": run_heartbeat_outage_commissioning,
     }
     try:
         result = runners[args.command](
@@ -208,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "CommissioningHarnessError",
     "main",
+    "run_heartbeat_outage_commissioning",
     "run_progress_stall_commissioning",
     "run_retry_budget_commissioning",
     "run_stale_owner_commissioning",

@@ -202,3 +202,21 @@ failure fingerprint/next probe，并关闭事故。
 所以“停止”只停止同一错误的盲目重放，不停止生产控制面：控制器、incident 和恢复预案
 仍持续运行。只有 probe 成功且业务后置条件成立，节点才重新进入可用状态；这正是
 `public.digest` 一类重复缺陷不应耗尽整个系统重试后永久停摆的边界。
+
+### heartbeat 短暂失败，为什么不应立刻回收 job 或重启 Machine？
+
+heartbeat 到期和 lease 到期是两个不同边界。前者说明 worker 的续租通道需要帮助，后者
+才说明旧 owner 已失去排他能力。只要 lease 仍有效，controller 可以用带 attempt ID、
+lease epoch 和 worker owner 的 fenced `heartbeat-job` 替它续租；这不会创建新 attempt，
+也不会改变业务 checkpoint。此时直接 reclaim 会破坏仍有效的 owner，直接重启 Machine
+则把一个数据库通道抖动升级成平台级故障。
+
+commissioning 因此刻意不调用 worker heartbeat，而只把虚拟观测时间推进到持久化
+`profile_heartbeat_seconds`。reconciler 必须给出 warning、non-breaking 的
+`job.lease-at-risk`，executor 再按 `profile_lease_seconds` 延长同一 lease。最终只有 epoch 1
+的一条 attempt，且由 renewed lease 完成真实业务提交，才能证明预案成立。
+
+还要区分两种时间：action `started_at` 与 heartbeat mutation 使用同一个策略输入；action
+`finished_at` 是 PostgreSQL 真正提交 ledger 时的 `clock_timestamp()`。把两者强行判等会
+混淆确定性故障时间和真实事务完成时间。证据应分别验证“何时按策略续租”和“动作确实
+完成”，而不是制造一条假的全局时钟。

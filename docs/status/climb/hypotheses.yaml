@@ -180,6 +180,20 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-043
+  description: A scoped heartbeat transport outage can be classified while the exact
+    lease remains current, schedule one non-breaking fenced heartbeat action, renew
+    the same attempt under its persisted policy, and let that attempt complete its
+    real business transaction across all eight production nodes.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Prove a recoverable heartbeat fault does not wait for lease expiry,
+    bump the epoch, restart a process, invent a private renewal timeout, or reset the
+    qualification window.
+  cost_h: 1.0
+  ranking: 1.0
+  status: in-flight
+  created_at: '2026-08-30T19:00:00+08:00'
+  results: []
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent

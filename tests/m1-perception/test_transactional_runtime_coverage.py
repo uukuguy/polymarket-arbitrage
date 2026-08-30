@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
+    HeartbeatOutageCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -669,6 +670,83 @@ def test_progress_stall_adapter_executes_real_policy_recovery_and_successor_turn
     assert incident == ("warning", "resolved", True)
     assert recovery_started == (1,)
     assert incident_recovered == (1,)
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_heartbeat_outage_adapter_renews_and_completes_the_same_attempt(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{job_type}:heartbeat-outage",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=job_type,
+        attack_id="heartbeat-outage",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=HeartbeatOutageCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 30),
+        ),
+        evidence_dir=tmp_path / job_type,
+    )
+
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("action:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        attempts = connection.execute(
+            """
+            SELECT lease_epoch, state, error_class
+            FROM m1_job_attempts
+            WHERE job_key = (
+                SELECT target_id FROM m1_recovery_actions WHERE action_id = %s
+            )
+            ORDER BY lease_epoch
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchall()
+        recovery = connection.execute(
+            """
+            SELECT a.action_type, a.state, a.result_code,
+                   i.severity, i.state, i.resolved_at IS NOT NULL,
+                   a.finished_at IS NOT NULL,
+                   r.last_heartbeat_at = a.started_at,
+                   r.lease_deadline_at = a.started_at
+                       + make_interval(secs => r.profile_lease_seconds)
+            FROM m1_recovery_actions AS a
+            JOIN m1_incidents AS i ON i.incident_key = a.incident_key
+            JOIN m1_job_runtime_state AS r ON r.job_key = a.target_id
+            WHERE a.action_id = %s
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchone()
+        recovery_started = connection.execute(
+            """
+            SELECT count(*) FROM m1_job_runtime_events
+            WHERE kind = 'job.recovery-started'
+              AND detail->>'reason_code' = 'job.lease-at-risk'
+            """
+        ).fetchone()
+
+    assert attempts == [(1, "succeeded", None)]
+    assert recovery == (
+        "heartbeat-job",
+        "completed",
+        "succeeded",
+        "warning",
+        "resolved",
+        True,
+        True,
+        True,
+        True,
+    )
+    assert recovery_started == (1,)
 
 
 @pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
