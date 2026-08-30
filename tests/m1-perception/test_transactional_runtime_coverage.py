@@ -19,6 +19,7 @@ from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
     ProgressStallCommissioningAdapter,
+    RetryBudgetCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
     complete_normal_turn,
     prepare_normal_turn,
@@ -612,10 +613,10 @@ def test_progress_stall_adapter_executes_real_policy_recovery_and_successor_turn
         evidence_dir=tmp_path / job_type,
     )
 
-    assert proof["detector_fact_id"].startswith("incident:")
-    assert proof["recovery_action_id"].startswith("action:")
-    assert proof["recovery_fact_id"].startswith("event:")
-    assert proof["postcondition_fact_id"].startswith("postgres:")
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("action:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
     assert proof["cleanup_verified"] is True
 
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -668,6 +669,95 @@ def test_progress_stall_adapter_executes_real_policy_recovery_and_successor_turn
     assert incident == ("warning", "resolved", True)
     assert recovery_started == (1,)
     assert incident_recovered == (1,)
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_retry_budget_adapter_opens_one_incident_and_releases_one_successful_probe(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{job_type}:retry-budget-exhaustion",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=job_type,
+        attack_id="retry-budget-exhaustion",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=RetryBudgetCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 40),
+        ),
+        evidence_dir=tmp_path / job_type,
+    )
+
+    assert str(proof["detector_fact_id"]).startswith("incident:")
+    assert str(proof["recovery_action_id"]).startswith("action:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        attempts = connection.execute(
+            """
+            SELECT lease_epoch, state, error_class
+            FROM m1_job_attempts
+            WHERE job_key = (
+                SELECT target_id FROM m1_recovery_actions WHERE action_id = %s
+            )
+            ORDER BY lease_epoch
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchall()
+        circuit = connection.execute(
+            """
+            SELECT consecutive_failures, state, next_probe_at, failure_fingerprint
+            FROM m1_job_circuits
+            WHERE job_key = (
+                SELECT target_id FROM m1_recovery_actions WHERE action_id = %s
+            )
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchone()
+        retry_incidents = connection.execute(
+            """
+            SELECT count(*), min(state), bool_and(resolved_at IS NOT NULL)
+            FROM m1_incidents WHERE dedupe_key LIKE 'job-retry:%'
+            """
+        ).fetchone()
+        retry_events = connection.execute(
+            """
+            SELECT kind FROM m1_incident_events
+            WHERE incident_key = %s ORDER BY occurred_at, incident_event_id
+            """,
+            (str(proof["detector_fact_id"]).removeprefix("incident:"),),
+        ).fetchall()
+        probe_action = connection.execute(
+            """
+            SELECT action_type, state, result_code FROM m1_recovery_actions
+            WHERE action_id = %s
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchone()
+
+    assert attempts == [
+        (1, "retryable", "CommissioningValidationFault"),
+        (2, "retryable", "CommissioningValidationFault"),
+        (3, "retryable", "CommissioningValidationFault"),
+        (4, "succeeded", None),
+    ]
+    assert circuit is not None
+    assert circuit[:3] == (0, "closed", None)
+    assert circuit[3] is None
+    assert retry_incidents == (1, "resolved", True)
+    assert [row[0] for row in retry_events] == [
+        "attempt-failed",
+        "attempt-failed",
+        "circuit-opened",
+        "recovered",
+    ]
+    assert probe_action == ("probe-circuit", "completed", "succeeded")
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

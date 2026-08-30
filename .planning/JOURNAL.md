@@ -11941,3 +11941,34 @@ next shared-attack hypothesis and implement worker-exit reclaim or heartbeat-
 outage renewal on the same real eight-node transaction fixture. Confirm the
 remaining adapters before building the next combined exact image; do not start
 production canaries or qualification.
+
+### SESSION 352 — 2026-08-30 (retry-budget circuit commissioning)
+
+- [CLIMB H-042] Registered an in-flight production-enablement hypothesis for
+  exhausting the same typed failure across every real node transaction without
+  stopping the production control plane.
+- [POLICY AUTHORITY] The adapter uses each node's shared retry budget and the
+  timestamps returned by `finish_retryable_with_incident`; it never edits job,
+  attempt, circuit, incident or deadline state directly.
+- [DEDUPE/TRIP] Three identical `CommissioningValidationFault` attempts become
+  retryable. The third opens one durable circuit and one deduplicated retry
+  incident whose event stream records both earlier failures and the trip.
+- [NEGATIVE PROBE PROOF] At `next_probe_at`, an ordinary worker is explicitly
+  denied a claim. Only a fresh controller lease and the reconciler's exact
+  non-breaking `circuit.probe-due -> probe-circuit` decision can release work.
+- [BUSINESS RECOVERY] The real executor completes the fenced probe; epoch 4
+  completes the same node transaction, resets the circuit, resolves incidents
+  and emits the runtime success plus node-specific business postcondition.
+- [EIGHT-NODE/HARNESS] All eight real-PostgreSQL variants pass. The shared
+  harness and Make entry also pass a migrated isolated-node lifecycle with zero
+  temporary databases or owned roles afterward.
+- [REGRESSION] Ruff and all functional grouped cases pass. The sole grouped
+  failure is expected: the exact-image guard rejects dirty release inputs until
+  this plan is committed.
+- [BOUNDARY] OrbStack remained the global context. No production DB/provider,
+  Fly action, SSH, deployment, Colima or global Docker mutation occurred.
+
+[NEXT] Commit Plan 05.6-229 without protected user files. Rerun the exact-HEAD
+image guard, then confirm H-042 through climb. Continue with heartbeat-outage or
+worker-exit on the same fixture; build the next exact image only after the
+remaining shared adapters can be executed together on one release/config.

@@ -12,6 +12,7 @@ from polyarb.control_plane import runtime_fault_matrix as matrix_module
 from polyarb.control_plane.production_commissioning_harness import (
     CommissioningHarnessError,
     run_progress_stall_commissioning,
+    run_retry_budget_commissioning,
     run_stale_owner_commissioning,
 )
 from polyarb.control_plane.runtime_fault_matrix import (
@@ -75,6 +76,23 @@ def test_progress_stall_harness_requires_explicit_test_dsn_before_artifact_mutat
 
     with pytest.raises(CommissioningHarnessError, match="POLYARB_CONTROL_PLANE_TEST_DSN"):
         run_progress_stall_commissioning(
+            root=root,
+            release_id=RELEASE,
+            config_id=CONFIG,
+        )
+
+    assert not root.exists()
+
+
+def test_retry_budget_harness_requires_explicit_test_dsn_before_artifact_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("POLYARB_CONTROL_PLANE_TEST_DSN", raising=False)
+    root = tmp_path / "evidence"
+
+    with pytest.raises(CommissioningHarnessError, match="POLYARB_CONTROL_PLANE_TEST_DSN"):
+        run_retry_budget_commissioning(
             root=root,
             release_id=RELEASE,
             config_id=CONFIG,
@@ -169,6 +187,49 @@ def test_progress_stall_harness_runs_real_isolated_node_and_cleans_database_and_
         "status": "pass",
     }
     assert (root / "attacks/structure-normalize/progress-stall/proof.json").is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+        roles = connection.execute(
+            """
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability'
+            )
+            ORDER BY rolname
+            """
+        ).fetchall()
+    assert databases == []
+    assert roles == []
+
+
+def test_retry_budget_harness_runs_real_isolated_node_and_cleans_database_and_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_retry_budget_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+        node_ids=("structure-normalize",),
+    )
+
+    assert result == {
+        "attack_id": "retry-budget-exhaustion",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 1,
+        "proof_count": 1,
+        "status": "pass",
+    }
+    assert (root / "attacks/structure-normalize/retry-budget-exhaustion/proof.json").is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"

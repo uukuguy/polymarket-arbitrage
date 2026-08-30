@@ -185,3 +185,20 @@ attempt 进入 `RecoveryProgressStalled/retryable`、清除 lease，并使旧 te
 `StaleLeaseError`。等数据库记录的 backoff 到期，新 epoch 重跑同一个节点事务，产出
 `job.succeeded` 和业务 postcondition，最后用 `record_job_recovery` 关闭原 warning incident。
 这条链证明的是“故障期间不计健康秒，恢复后继续积累”，不是用一次普通停滞重置整窗。
+
+### 同一个缺陷耗尽重试后，为什么不能让普通 worker 继续抢任务？
+
+重试次数本身不是恢复策略。若同一 failure fingerprint 连续出现，继续无条件领取只会形成
+高频失败、告警风暴和下游资源挤占。正式链路让前两次失败按共享 `RuntimeRetryPolicy`
+退避；第三次达到预算后把 circuit 设为 `open`，并通过 `job-retry:<job_key>` 只维护一条
+incident 生命周期，而不是每次失败新建一个事故。
+
+关键负证明发生在 `next_probe_at`：普通 `claim_job` 即使已经到达 job 的重试时间，也必须
+仍被 open circuit 拒绝。只有持有新鲜 controller lease 的 reconciler 能把
+`circuit.probe-due` 排成一个 fenced `probe-circuit` action；executor 成功后才释放一个
+retryable successor。successor 的真实业务提交成功会把 circuit 重置成 `0/closed`、清除
+failure fingerprint/next probe，并关闭事故。
+
+所以“停止”只停止同一错误的盲目重放，不停止生产控制面：控制器、incident 和恢复预案
+仍持续运行。只有 probe 成功且业务后置条件成立，节点才重新进入可用状态；这正是
+`public.digest` 一类重复缺陷不应耗尽整个系统重试后永久停摆的边界。
