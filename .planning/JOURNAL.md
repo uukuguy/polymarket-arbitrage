@@ -12712,3 +12712,22 @@ never bridge the legacy SQLite chaos evidence.
 [NEXT] Commit Plan 05.6-244 without protected user files, run exact-HEAD and
 climb H-055. Then implement Gamma timeout and malformed-page at the PostgreSQL
 `structure-fetch` boundary using real worker recovery and config-bound proof.
+
+### SESSION 381 — 2026-08-30 (H-055 typed CLOB 429 confirmed)
+
+- [EXACT HEAD] Commit `6120e6f6` passed the complete deterministic
+  production-enablement profile.
+- [CLIMB H-055] Cycle 60 passed all nine gates at 100%; integration passed 176
+  selected tests, CLI passed 22, and `disaster_pattern=false`.
+- [PROVIDER SAFETY] HTTP 429 becomes body-free `ClobRateLimitError`; no provider
+  response body, request URL or token identity enters durable runtime evidence.
+- [RECOVERY] Same immutable Quote batch recovered only at the central retry
+  due-at, wrote one 1/1 receipt, closed its circuit and resolved its incident.
+- [ONLINE TARGET] No external target is configured; local confirmation remains
+  complete.
+- [CONTEXT SAFETY] Docker context remained `orbstack`; no Colima, Fly,
+  production provider/DB, Machine, canary or qualification mutation occurred.
+
+[NEXT] Commit H-055 confirmation state without protected user files. Implement
+Gamma timeout and malformed-page on the real PostgreSQL `structure-fetch`
+worker boundary, with exact-image commissioning and no legacy evidence alias.
