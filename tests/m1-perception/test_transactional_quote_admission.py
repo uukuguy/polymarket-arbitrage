@@ -262,9 +262,14 @@ class _ControlPlane:
         assert job_key == "structure:digest:quote-admit"
         return tuple(record[:3] for record in self.checkpoints)
 
-    def quote_admission_input(self, job_key: str) -> tuple[str, str, str]:
+    def quote_admission_input(self, job_key: str) -> tuple[str, str, str, str]:
         assert job_key == "structure:digest:quote-admit"
-        return ("structure:digest", "bundles/current.ndjson", self.digest)
+        return (
+            "structure:digest",
+            "bundles/current.ndjson",
+            self.digest,
+            f"quote:{self.digest}",
+        )
 
     def admit_quote_generation(self, lease: JobLease, **kwargs: object) -> None:
         now = kwargs.get("now")

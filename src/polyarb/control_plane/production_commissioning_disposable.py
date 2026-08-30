@@ -11,7 +11,6 @@ from io import BytesIO
 from typing import Any
 
 from botocore.exceptions import ReadTimeoutError
-from psycopg.types.json import Jsonb
 
 from polyarb.clients.clob_client import ClobRateLimitError
 from polyarb.clients.gamma_client import EventPage, GammaMalformedResponseError
@@ -2592,7 +2591,11 @@ class QuoteBatchIncompleteCommissioningAdapter:
 
     def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
         self._require_identity(identity)
-        structure_digest = sha256(f"{identity.experiment_id}:structure".encode()).hexdigest()
+        _generation, structure_digest = _structure_prerequisite(
+            self._control_plane,
+            identity.experiment_id,
+            self._started_at - timedelta(seconds=10),
+        )
         universe_hash = sha256(f"{identity.experiment_id}:universe".encode()).hexdigest()
         self._batches = self._control_plane.enqueue_quote_generation(
             structure_receipt_digest=structure_digest,
@@ -5666,35 +5669,14 @@ def _prepare_quote_admit(
     *,
     progress_through: str | None = None,
 ) -> PreparedNormalTurn:
-    structure = sha256(f"{tag}:structure".encode()).hexdigest()
-    universe = sha256(f"{tag}:universe".encode()).hexdigest()
-    generation = f"structure:{structure}"
-    job_key = f"{generation}:quote-admit"
-    bundle_key = f"bundles/{tag}.ndjson"
-    cp.enqueue_job(
-        job_key=job_key,
-        job_type="quote-admit",
-        input_identity=f"{generation}:{bundle_key}:{structure}",
-        now=now,
+    generation, structure = _structure_prerequisite(
+        cp, tag, now - timedelta(seconds=10)
     )
-    with cp._connection_factory() as connection:  # noqa: SLF001
-        connection.execute(
-            """
-            INSERT INTO m1_structure_generation_inputs
-                (generation_key, bundle_key, bundle_digest, identity, admitted_at)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (generation, bundle_key, structure, Jsonb({}), now),
-        )
-        connection.execute(
-            """
-            INSERT INTO m1_quote_admission_inputs
-                (job_key, generation_key, bundle_key, bundle_digest, admitted_at)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (job_key, generation, bundle_key, structure, now),
-        )
+    universe = sha256(f"{tag}:universe".encode()).hexdigest()
+    job_key = f"{generation}:quote-admit"
     lease = _claim(cp, "quote-admit", now)
+    if lease.job_key != job_key:
+        raise RuntimeError("Structure prerequisite exposed another Quote admission")
     _record_progress(cp, lease, now, through=progress_through)
     legs = (_leg(f"{tag}-token"),)
     batches = cp.quote_batches_from_legs(
@@ -5730,8 +5712,11 @@ def _prepare_quote_batch(
     *,
     progress_through: str | None = None,
 ) -> PreparedNormalTurn:
+    _generation, structure = _structure_prerequisite(
+        cp, tag, now - timedelta(seconds=10)
+    )
     batch = cp.enqueue_quote_generation(
-        structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
+        structure_receipt_digest=structure,
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
         legs=(_leg(f"{tag}-token"),),
         batch_size=1,
@@ -5763,8 +5748,11 @@ def _prepare_quote_certify(
     *,
     progress_through: str | None = None,
 ) -> PreparedNormalTurn:
+    _generation, structure = _structure_prerequisite(
+        cp, tag, now - timedelta(seconds=10)
+    )
     batches = cp.enqueue_quote_generation(
-        structure_receipt_digest=sha256(f"{tag}:structure".encode()).hexdigest(),
+        structure_receipt_digest=structure,
         universe_hash=sha256(f"{tag}:universe".encode()).hexdigest(),
         legs=(_leg(f"{tag}-a"), _leg(f"{tag}-b")),
         batch_size=1,

@@ -171,6 +171,7 @@ def test_database_pool_snapshot_is_secret_free_and_close_is_idempotent_per_owner
     assert operational.close_calls == 1
     assert readiness.close_calls == 1
 
+
 # Diagnostic watchdog only: concurrent PostgreSQL contracts do not assert wall
 # time. Reuse the named full transaction/shutdown envelope so host load cannot
 # turn a magic test-only wait into a false product failure, while a missing peer
@@ -294,9 +295,7 @@ def test_scoped_connection_pool_bounds_and_reuses_twelve_concurrent_lanes(
     def run_wave() -> set[int]:
         def checkout() -> int:
             with factory() as connection:
-                row = connection.execute(
-                    "SELECT pg_backend_pid() FROM pg_sleep(0.05)"
-                ).fetchone()
+                row = connection.execute("SELECT pg_backend_pid() FROM pg_sleep(0.05)").fetchone()
                 assert row is not None
                 backend_pid = int(row[0])
                 return backend_pid
@@ -707,6 +706,7 @@ def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
                 "generation_key": "generation-1",
                 "bundle_key": "bundles/current.ndjson",
                 "bundle_digest": "a" * 64,
+                "quote_generation_key": f"quote:{'a' * 64}",
             }
 
     class Connection:
@@ -723,13 +723,18 @@ def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
     factory = cast(Callable[[], psycopg.Connection[Any]], lambda: Connection())
     result = PostgresControlPlane(factory).quote_admission_input("generation:quote-admit")
 
-    assert result == ("generation-1", "bundles/current.ndjson", "a" * 64)
+    assert result == (
+        "generation-1",
+        "bundles/current.ndjson",
+        "a" * 64,
+        f"quote:{'a' * 64}",
+    )
     assert commands[:4] == [
         "SET TRANSACTION READ ONLY",
         "SET LOCAL statement_timeout = '5000ms'",
         "SET LOCAL lock_timeout = '1000ms'",
         (
-            "SELECT generation_key, bundle_key, bundle_digest "
+            "SELECT generation_key, bundle_key, bundle_digest, quote_generation_key "
             "FROM m1_quote_admission_inputs WHERE job_key = %s"
         ),
     ]
@@ -737,6 +742,56 @@ def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
 
 def _now() -> datetime:
     return datetime(2030, 1, 1, 12, tzinfo=UTC)
+
+
+def _seed_structure_parent(
+    control_plane: PostgresControlPlane,
+    *,
+    structure_digest: str,
+    now: datetime,
+) -> None:
+    """Persist the authoritative parent required by Quote lineage."""
+    with control_plane._connection_factory() as connection:
+        structure_generation = f"structure:{structure_digest}"
+        producer_job = f"{structure_generation}:certify"
+        connection.execute(
+            """
+            INSERT INTO m1_jobs (
+                job_key, job_type, input_identity, state, created_at, updated_at
+            ) VALUES (%s, 'structure-certify', %s, 'succeeded', %s, %s)
+            """,
+            (producer_job, structure_generation, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_structure_generation_inputs (
+                generation_key, bundle_key, bundle_digest, identity, admitted_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                structure_generation,
+                f"bundles/{structure_digest}.ndjson",
+                structure_digest,
+                Jsonb({}),
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES (%s, %s, %s, %s, %s, 1, %s)
+            """,
+            (
+                structure_generation,
+                producer_job,
+                structure_digest,
+                f"structures/{structure_digest}.ndjson",
+                structure_digest,
+                now,
+            ),
+        )
 
 
 def _leg(token_id: str, *, suffix: str = "") -> QuoteBatchLeg:
@@ -775,9 +830,17 @@ def _seed_quote_admission_job(
         )
         connection.execute(
             "INSERT INTO m1_quote_admission_inputs "
-            "(job_key, generation_key, bundle_key, bundle_digest, admitted_at) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (job_key, generation_key, "bundles/current.ndjson", bundle_digest, now),
+            "(job_key, generation_key, bundle_key, bundle_digest, "
+            "quote_generation_key, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                job_key,
+                generation_key,
+                "bundles/current.ndjson",
+                bundle_digest,
+                f"quote:{bundle_digest}",
+                now,
+            ),
         )
     lease = control_plane.claim_job(
         worker_id="quote-admitter",
@@ -2528,6 +2591,7 @@ def test_deployment_preflight_is_independent_of_connection_search_path(
 
 def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresControlPlane) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     first = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -2548,7 +2612,10 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
     connection = control_plane._connection_factory()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT job_key,job_type FROM m1_jobs ORDER BY job_key")
+            cursor.execute(
+                "SELECT job_key,job_type FROM m1_jobs "
+                "WHERE job_type IN ('quote-batch', 'quote-certify') ORDER BY job_key"
+            )
             assert cursor.fetchall() == [
                 (f"quote:{'a' * 64}:batch:0", "quote-batch"),
                 (f"quote:{'a' * 64}:batch:1", "quote-batch"),
@@ -2557,10 +2624,204 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
     finally:
         connection.close()
 
+
+def test_due_quote_refresh_admits_distinct_run_on_current_structure_once_per_bucket(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure_digest = "a" * 64
+    universe_hash = "b" * 64
+    structure_generation = f"structure:{structure_digest}"
+    quote_generation = f"quote:{structure_digest}"
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_jobs (
+                job_key, job_type, input_identity, state, created_at, updated_at
+            ) VALUES
+                ('structure-certifier', 'structure-certify', 'structure-input',
+                 'succeeded', %s, %s),
+                ('initial-quote-admit', 'quote-admit', 'initial-admit-input',
+                 'succeeded', %s, %s),
+                ('quote-certifier', 'quote-certify', 'quote-input',
+                 'succeeded', %s, %s)
+            """,
+            (now, now, now, now, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_structure_generation_inputs (
+                generation_key, bundle_key, bundle_digest, identity, admitted_at
+            ) VALUES (%s, 'bundles/current.ndjson', %s, %s, %s)
+            """,
+            (structure_generation, structure_digest, Jsonb({}), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES
+                (%s, 'structure-certifier', %s, 'structure-artifact', %s, 1, %s),
+                (%s, 'quote-certifier', %s, 'quote-artifact', %s, 1, %s)
+            """,
+            (
+                structure_generation,
+                "c" * 64,
+                "d" * 64,
+                now,
+                quote_generation,
+                universe_hash,
+                "e" * 64,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_generation_inputs (
+                generation_key, structure_generation_key, universe_hash,
+                cadence_seconds, cadence_bucket, admitted_at
+            ) VALUES (%s, %s, %s, NULL, NULL, %s)
+            """,
+            (quote_generation, structure_generation, universe_hash, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_admission_inputs (
+                job_key, generation_key, bundle_key, bundle_digest,
+                quote_generation_key, admitted_at
+            ) VALUES (
+                'initial-quote-admit', %s, 'bundles/current.ndjson', %s, %s, %s
+            )
+            """,
+            (structure_generation, structure_digest, quote_generation, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_publication_pointers (
+                pointer_key, generation_key, expected_generation_key,
+                lease_epoch, published_at
+            ) VALUES ('quote:current', %s, NULL, 1, %s)
+            """,
+            (quote_generation, now),
+        )
+
+    first = control_plane.admit_due_quote_refresh(cadence_seconds=300, now=now)
+    repeated = control_plane.admit_due_quote_refresh(cadence_seconds=300, now=now)
+
+    assert first.state == "admitted"
+    assert first.job_key is not None
+    assert first.job_key.startswith("quote:")
+    assert first.job_key.endswith(":admit")
+    assert repeated.state == "busy"
+    with control_plane._connection_factory() as connection:
+        rows = connection.execute(
+            """
+            SELECT lineage.generation_key, lineage.structure_generation_key,
+                   lineage.universe_hash, lineage.cadence_seconds,
+                   lineage.cadence_bucket, admission.job_key
+            FROM m1_quote_generation_inputs AS lineage
+            JOIN m1_quote_admission_inputs AS admission
+              ON admission.quote_generation_key = lineage.generation_key
+            WHERE lineage.cadence_seconds = 300
+            """
+        ).fetchall()
+    assert rows == [
+        (
+            first.job_key.removesuffix(":admit"),
+            structure_generation,
+            universe_hash,
+            300,
+            int(now.timestamp()) // 300,
+            first.job_key,
+        )
+    ]
+    recurring_generation = first.job_key.removesuffix(":admit")
+    recurring_digest = recurring_generation.removeprefix("quote:")
+    admit_lease = control_plane.claim_job(
+        worker_id="recurring-admitter",
+        job_types=("quote-admit",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert admit_lease is not None and admit_lease.job_key == first.job_key
+    leg = _leg("recurring-token")
+    expected = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=structure_digest,
+        quote_generation_digest=recurring_digest,
+        universe_hash=universe_hash,
+        legs=(leg,),
+        batch_size=10,
+    )
+    input_digest = "f" * 64
+    admitted = control_plane.admit_quote_generation(
+        admit_lease,
+        structure_receipt_digest=structure_digest,
+        universe_hash=universe_hash,
+        legs=(leg,),
+        batch_size=10,
+        input_artifacts={
+            expected[0].job_key: (
+                f"quote-inputs/{input_digest}/batch.ndjson",
+                input_digest,
+                1,
+            )
+        },
+        now=now,
+    )
+    assert admitted == expected
+    assert admitted[0].generation_key == recurring_generation
+    assert admitted[0].structure_receipt_digest == structure_digest
+
+    batch_lease = control_plane.claim_job(
+        worker_id="recurring-quote-worker",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert batch_lease is not None and batch_lease.job_key == admitted[0].job_key
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=admitted[0].token_range_digest,
+        quote_digest="1" * 64,
+        artifact_key="quote-batches/recurring.ndjson",
+        artifact_digest="2" * 64,
+        successful_response_count=1,
+        quoted_at=now + timedelta(seconds=1),
+        now=now + timedelta(seconds=1),
+    )
+    control_plane.finish(
+        batch_lease,
+        state=JobState.SUCCEEDED,
+        now=now + timedelta(seconds=1),
+    )
+    certifier = control_plane.claim_job(
+        worker_id="recurring-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert certifier is not None and certifier.job_key == f"{recurring_generation}:certify"
+    control_plane.certify_quote_generation(
+        certifier,
+        generation_key=recurring_generation,
+        now=now + timedelta(seconds=2),
+    )
+    with control_plane._connection_factory() as connection:
+        pointer = connection.execute(
+            """
+            SELECT generation_key FROM m1_publication_pointers
+            WHERE pointer_key = 'quote:current'
+            """
+        ).fetchone()
+    assert pointer == (recurring_generation,)
+
+
 def test_quote_batch_input_survives_admission_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     admitted = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3065,6 +3326,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         specs[0].generation_key,
         bundle.key,
         bundle.sha256,
+        f"quote:{bundle.sha256}",
     )
     prepared_batches = control_plane.quote_batches_from_legs(
         structure_receipt_digest=bundle.sha256,
@@ -3142,9 +3404,17 @@ def test_quote_admission_success_event_failure_rolls_back_terminal_rows(
         )
         connection.execute(
             "INSERT INTO m1_quote_admission_inputs "
-            "(job_key, generation_key, bundle_key, bundle_digest, admitted_at) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (job_key, generation_key, "bundles/current.ndjson", bundle_digest, now),
+            "(job_key, generation_key, bundle_key, bundle_digest, "
+            "quote_generation_key, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                job_key,
+                generation_key,
+                "bundles/current.ndjson",
+                bundle_digest,
+                f"quote:{bundle_digest}",
+                now,
+            ),
         )
     lease = control_plane.claim_job(
         worker_id="quote-admitter", job_types=("quote-admit",), lease_seconds=120, now=now
@@ -3494,16 +3764,22 @@ def test_structure_shadow_pointer_rejects_stale_expected_predecessor(
                 ),
             )
 
-    assert control_plane.publish_structure_shadow(
-        generation_key=first,
-        expected_generation_key=None,
-        now=now,
-    ) == first
-    assert control_plane.publish_structure_shadow(
-        generation_key=second,
-        expected_generation_key=first,
-        now=now + timedelta(seconds=1),
-    ) == second
+    assert (
+        control_plane.publish_structure_shadow(
+            generation_key=first,
+            expected_generation_key=None,
+            now=now,
+        )
+        == first
+    )
+    assert (
+        control_plane.publish_structure_shadow(
+            generation_key=second,
+            expected_generation_key=first,
+            now=now + timedelta(seconds=1),
+        )
+        == second
+    )
     with pytest.raises(PublicationPointerConflictError):
         control_plane.publish_structure_shadow(
             generation_key=first,
@@ -3518,6 +3794,7 @@ def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     admitted = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3534,6 +3811,7 @@ def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
 
 def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresControlPlane) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3593,6 +3871,7 @@ def test_quote_batch_terminal_success_event_rolls_back_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3663,6 +3942,7 @@ def test_checkpointed_quote_batch_stays_with_original_lease_until_expiry(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3710,6 +3990,7 @@ def test_replacement_lease_can_finish_an_already_recorded_quote_batch(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3764,6 +4045,7 @@ def test_transactional_quote_worker_commits_fenced_artifact_receipt(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3795,6 +4077,7 @@ def test_quote_worker_takeover_after_upload_before_receipt_has_one_receipt(
 ) -> None:
     """Quote retry reuses frozen batch input and creates one durable effect."""
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3878,6 +4161,7 @@ def test_quote_certifier_claim_waits_for_all_terminal_batch_receipts(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batches = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3932,6 +4216,7 @@ def test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batches = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -3997,6 +4282,7 @@ def test_terminal_quote_receipt_skips_busy_certifier_and_repairs_from_durable_fa
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4061,6 +4347,7 @@ def test_quote_receipt_cannot_wake_certifier_before_producer_is_terminal(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4110,6 +4397,7 @@ def test_quote_certifier_repairs_historical_lost_wakeup(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4162,6 +4450,7 @@ def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batches = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4220,6 +4509,7 @@ def test_incomplete_quote_generation_cannot_switch_current_pointer(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batches = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4274,6 +4564,7 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batches = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4345,6 +4636,8 @@ def test_quote_pointer_lineage_rejects_late_older_certifier(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="1" * 64, now=now)
+    _seed_structure_parent(control_plane, structure_digest="2" * 64, now=now)
     older = control_plane.enqueue_quote_generation(
         structure_receipt_digest="1" * 64,
         universe_hash="a" * 64,
@@ -4436,6 +4729,7 @@ def test_quote_certifier_success_event_rolls_back_manifest_and_pointer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4511,6 +4805,7 @@ def test_quote_certification_terminal_transaction_has_bounded_timeout(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
         universe_hash="b" * 64,
@@ -4869,9 +5164,15 @@ def test_current_quote_projection_inputs_follows_quote_to_structure_admission_co
         )
         connection.execute(
             """INSERT INTO m1_quote_admission_inputs
-               (job_key,generation_key,bundle_key,bundle_digest,admitted_at)
-               VALUES (%s,%s,'bundle',%s,%s)""",
-            (f"{structure_generation}:quote-admit", structure_generation, "b" * 64, now),
+               (job_key,generation_key,bundle_key,bundle_digest,quote_generation_key,admitted_at)
+               VALUES (%s,%s,'bundle',%s,%s,%s)""",
+            (
+                f"{structure_generation}:quote-admit",
+                structure_generation,
+                "b" * 64,
+                f"quote:{'b' * 64}",
+                now,
+            ),
         )
         connection.execute(
             """INSERT INTO m1_quote_batch_inputs
@@ -10521,9 +10822,9 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
         "release_id": "release-a",
         "config_id": "config-a",
         "role_identity": ["m1", "structure"],
-            "certificate": None,
-            "eligibility_state": "blocked",
-            "eligibility_reason": None,
+        "certificate": None,
+        "eligibility_state": "blocked",
+        "eligibility_reason": None,
     }
     assert "must-not-leak" not in json.dumps(snapshot, sort_keys=True)
     assert second.job_key not in json.dumps(snapshot["active_tasks"]["items"])
@@ -12605,9 +12906,7 @@ def test_qualification_malformed_quote_pointer_fails_structure_freshness_closed(
     result = _qualification_service(control_plane, batch_size=20).tick(now)
 
     assert result.state is QualificationState.ACCUMULATING
-    status = PostgresQualificationServiceStore(
-        control_plane._connection_factory
-    ).status(now=now)
+    status = PostgresQualificationServiceStore(control_plane._connection_factory).status(now=now)
     epoch = cast(dict[str, object], status["epoch"])
     assert epoch["eligibility_state"] == "blocked"
     assert epoch["eligibility_reason"] == "evidence.gap"
@@ -12719,9 +13018,9 @@ def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
     assert accumulating_row[1] == 0
     assert accumulating_row[4] >= 6
     assert accumulating_row[3] >= accumulating_row[2]
-    status = PostgresQualificationServiceStore(
-        control_plane._connection_factory
-    ).status(now=now + timedelta(seconds=3))
+    status = PostgresQualificationServiceStore(control_plane._connection_factory).status(
+        now=now + timedelta(seconds=3)
+    )
     epoch = cast(dict[str, object], status["epoch"])
     assert epoch["eligibility_state"] == "eligible"
     assert epoch["eligibility_reason"] is None

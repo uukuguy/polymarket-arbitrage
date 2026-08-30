@@ -27,6 +27,7 @@ from .models import (
     QuoteBatchLeg,
     QuoteBatchReceipt,
     QuoteBatchSpec,
+    QuoteRunIdentity,
     SourceAdmissionDecision,
     StructureRangeReceipt,
     StructureRangeSpec,
@@ -143,12 +144,10 @@ def _frozen_quote_certification_identity(
     cursor.execute("SELECT input_identity FROM m1_jobs WHERE job_key = %s", (job_key,))
     existing = cursor.fetchone()
     if existing is None:
-        return _quote_certification_identity(
-            generation_key, universe_hash, expected_generation_key
-        )
+        return _quote_certification_identity(generation_key, universe_hash, expected_generation_key)
     input_identity = str(existing["input_identity"])
-    frozen_generation, frozen_universe, _expected, _fenced = (
-        _parse_quote_certification_identity(input_identity)
+    frozen_generation, frozen_universe, _expected, _fenced = _parse_quote_certification_identity(
+        input_identity
     )
     if frozen_generation != generation_key or frozen_universe != universe_hash:
         raise JobIdentityConflict(f"job key {job_key!r} names another input")
@@ -1753,6 +1752,116 @@ class PostgresControlPlane:
             self._enqueue_structure_source_page_cursor(cursor, spec=first, now=now)
         return SourceAdmissionDecision(state="admitted", job_key=first.job_key)
 
+    def admit_due_quote_refresh(
+        self,
+        *,
+        cadence_seconds: int,
+        now: datetime,
+    ) -> SourceAdmissionDecision:
+        """Admit one run-scoped Quote refresh over current certified Structure truth."""
+        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
+            raise ValueError("quote refresh cadence_seconds must be positive")
+        self._validate_aware(now, "now")
+        cadence_bucket = int(now.timestamp()) // cadence_seconds
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("m1:quote-generation-admission",),
+            )
+            cursor.execute(
+                """
+                SELECT 1 FROM m1_jobs
+                WHERE job_type IN (
+                    'quote-admit', 'quote-batch', 'quote-certify', 'opportunity-certify'
+                )
+                  AND state IN (
+                    'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                  )
+                LIMIT 1
+                """
+            )
+            if cursor.fetchone() is not None:
+                return SourceAdmissionDecision(state="busy", job_key=None)
+            cursor.execute(
+                """
+                SELECT lineage.structure_generation_key, lineage.universe_hash,
+                       admission.bundle_key, admission.bundle_digest
+                FROM m1_publication_pointers AS pointer
+                JOIN m1_quote_generation_inputs AS lineage
+                  ON lineage.generation_key = pointer.generation_key
+                JOIN m1_quote_admission_inputs AS admission
+                  ON admission.generation_key = lineage.structure_generation_key
+                WHERE pointer.pointer_key = 'quote:current'
+                ORDER BY admission.admitted_at, admission.job_key
+                LIMIT 1
+                """
+            )
+            current = cursor.fetchone()
+            if current is None:
+                return SourceAdmissionDecision(state="busy", job_key=None)
+            identity = QuoteRunIdentity.create(
+                structure_generation_key=str(current["structure_generation_key"]),
+                universe_hash=str(current["universe_hash"]),
+                cadence_seconds=cadence_seconds,
+                cadence_bucket=cadence_bucket,
+            )
+            job_key = f"{identity.generation_key}:admit"
+            cursor.execute(
+                "SELECT generation_key FROM m1_quote_generation_inputs WHERE generation_key = %s",
+                (identity.generation_key,),
+            )
+            if cursor.fetchone() is not None:
+                return SourceAdmissionDecision(state="busy", job_key=None)
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_generation_inputs (
+                    generation_key, structure_generation_key, universe_hash,
+                    cadence_seconds, cadence_bucket, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    identity.generation_key,
+                    identity.structure_generation_key,
+                    identity.universe_hash,
+                    identity.cadence_seconds,
+                    identity.cadence_bucket,
+                    now,
+                ),
+            )
+            bundle_key = str(current["bundle_key"])
+            bundle_digest = str(current["bundle_digest"])
+            input_identity = (
+                f"{identity.structure_generation_key}:{bundle_key}:{bundle_digest}:"
+                f"{identity.generation_key}"
+            )
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=job_key,
+                job_type="quote-admit",
+                input_identity=input_identity,
+                now=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_admission_inputs (
+                    job_key, generation_key, bundle_key, bundle_digest,
+                    quote_generation_key, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    job_key,
+                    identity.structure_generation_key,
+                    bundle_key,
+                    bundle_digest,
+                    identity.generation_key,
+                    now,
+                ),
+            )
+        return SourceAdmissionDecision(state="admitted", job_key=job_key)
+
     def structure_source_page_spec(self, job_key: str) -> StructureSourcePageSpec:
         """Load an admitted source page exactly as a replacement worker sees it."""
         self._validate_nonempty(job_key=job_key)
@@ -2716,14 +2825,36 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            structure_generation_key = f"structure:{structure_receipt_digest}"
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_generation_inputs (
+                    generation_key, structure_generation_key, universe_hash,
+                    cadence_seconds, cadence_bucket, admitted_at
+                ) VALUES (%s, %s, %s, NULL, NULL, %s)
+                ON CONFLICT (generation_key) DO NOTHING
+                """,
+                (generation_key, structure_generation_key, universe_hash, now),
+            )
+            cursor.execute(
+                """
+                SELECT structure_generation_key, universe_hash
+                FROM m1_quote_generation_inputs WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            lineage = cursor.fetchone()
+            if lineage is None or (
+                str(lineage["structure_generation_key"]) != structure_generation_key
+                or str(lineage["universe_hash"]) != universe_hash
+            ):
+                raise JobIdentityConflict("Quote generation lineage conflicts")
             cursor.execute(
                 "SELECT generation_key FROM m1_publication_pointers "
                 "WHERE pointer_key = 'quote:current' FOR UPDATE"
             )
             pointer = cursor.fetchone()
-            expected_generation_key = (
-                None if pointer is None else str(pointer["generation_key"])
-            )
+            expected_generation_key = None if pointer is None else str(pointer["generation_key"])
             for batch in batches:
                 self._enqueue_job_cursor(
                     cursor,
@@ -2786,7 +2917,7 @@ class PostgresControlPlane:
             )
         return batches
 
-    def quote_admission_input(self, job_key: str) -> tuple[str, str, str]:
+    def quote_admission_input(self, job_key: str) -> tuple[str, str, str, str]:
         """Load the immutable Structure bundle identity for one Quote-admit job."""
         self._validate_nonempty(job_key=job_key)
         with (
@@ -2796,7 +2927,7 @@ class PostgresControlPlane:
             _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """
-                SELECT generation_key, bundle_key, bundle_digest
+                SELECT generation_key, bundle_key, bundle_digest, quote_generation_key
                 FROM m1_quote_admission_inputs WHERE job_key = %s
                 """,
                 (job_key,),
@@ -2804,7 +2935,12 @@ class PostgresControlPlane:
             row = cursor.fetchone()
         if row is None:
             raise ControlPlaneError(f"Quote admission input is unavailable for {job_key!r}")
-        return (str(row["generation_key"]), str(row["bundle_key"]), str(row["bundle_digest"]))
+        return (
+            str(row["generation_key"]),
+            str(row["bundle_key"]),
+            str(row["bundle_digest"]),
+            str(row["quote_generation_key"]),
+        )
 
     def admit_quote_generation(
         self,
@@ -2825,14 +2961,6 @@ class PostgresControlPlane:
             raise ValueError("Quote admission digests must be sha256")
         if not legs or batch_size <= 0:
             raise ValueError("Quote admission requires legs and positive batch_size")
-        batches = self.quote_batches_from_legs(
-            structure_receipt_digest=structure_receipt_digest,
-            universe_hash=universe_hash,
-            legs=legs,
-            batch_size=batch_size,
-        )
-        if set(input_artifacts) != {batch.job_key for batch in batches}:
-            raise JobIdentityConflict("Quote admission requires one R2 input reference per batch")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -2840,13 +2968,28 @@ class PostgresControlPlane:
             # Keep every terminal lock and statement bounded below the live
             # lease.  SET LOCAL makes both limits rollback-scoped.
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
-            generation_key, bundle_key, bundle_digest = self._quote_admission_input_cursor(
-                cursor, lease.job_key
+            generation_key, bundle_key, bundle_digest, quote_generation_key = (
+                self._quote_admission_input_cursor(cursor, lease.job_key)
             )
-            if lease.input_identity != f"{generation_key}:{bundle_key}:{bundle_digest}":
+            legacy_job_key = f"{generation_key}:quote-admit"
+            expected_input_identity = f"{generation_key}:{bundle_key}:{bundle_digest}"
+            if lease.job_key != legacy_job_key:
+                expected_input_identity = f"{expected_input_identity}:{quote_generation_key}"
+            if lease.input_identity != expected_input_identity:
                 raise JobIdentityConflict("Quote admission lease names another Structure bundle")
             if structure_receipt_digest != bundle_digest:
                 raise CheckpointConflictError("Quote admission names another Structure bundle")
+            batches = self.quote_batches_from_legs(
+                structure_receipt_digest=structure_receipt_digest,
+                quote_generation_digest=quote_generation_key.removeprefix("quote:"),
+                universe_hash=universe_hash,
+                legs=legs,
+                batch_size=batch_size,
+            )
+            if set(input_artifacts) != {batch.job_key for batch in batches}:
+                raise JobIdentityConflict(
+                    "Quote admission requires one R2 input reference per batch"
+                )
             self._append_quote_admission_success_cursor(cursor, lease=lease, now=now)
             cursor.execute(
                 """
@@ -3477,6 +3620,7 @@ class PostgresControlPlane:
     def quote_batches_from_legs(
         *,
         structure_receipt_digest: str,
+        quote_generation_digest: str | None = None,
         universe_hash: str,
         legs: Sequence[QuoteBatchLeg],
         batch_size: int,
@@ -3489,6 +3633,7 @@ class PostgresControlPlane:
         return tuple(
             QuoteBatchSpec.from_legs(
                 structure_receipt_digest=structure_receipt_digest,
+                quote_generation_digest=quote_generation_digest,
                 universe_hash=universe_hash,
                 ordinal=ordinal,
                 legs=normalized_legs[start : start + batch_size],
@@ -3499,10 +3644,10 @@ class PostgresControlPlane:
     @staticmethod
     def _quote_admission_input_cursor(
         cursor: psycopg.Cursor[dict[str, Any]], job_key: str
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         cursor.execute(
             """
-            SELECT generation_key, bundle_key, bundle_digest
+            SELECT generation_key, bundle_key, bundle_digest, quote_generation_key
             FROM m1_quote_admission_inputs WHERE job_key = %s
             """,
             (job_key,),
@@ -3510,7 +3655,12 @@ class PostgresControlPlane:
         row = cursor.fetchone()
         if row is None:
             raise ControlPlaneError(f"Quote admission input is unavailable for {job_key!r}")
-        return (str(row["generation_key"]), str(row["bundle_key"]), str(row["bundle_digest"]))
+        return (
+            str(row["generation_key"]),
+            str(row["bundle_key"]),
+            str(row["bundle_digest"]),
+            str(row["quote_generation_key"]),
+        )
 
     def _enqueue_quote_generation_cursor(
         self,
@@ -3590,6 +3740,30 @@ class PostgresControlPlane:
                     f"quote batch {batch.job_key!r} names another immutable input"
                 )
         generation_key = batches[0].generation_key
+        structure_generation_key = f"structure:{batches[0].structure_receipt_digest}"
+        cursor.execute(
+            """
+            INSERT INTO m1_quote_generation_inputs (
+                generation_key, structure_generation_key, universe_hash,
+                cadence_seconds, cadence_bucket, admitted_at
+            ) VALUES (%s, %s, %s, NULL, NULL, %s)
+            ON CONFLICT (generation_key) DO NOTHING
+            """,
+            (generation_key, structure_generation_key, batches[0].universe_hash, now),
+        )
+        cursor.execute(
+            """
+            SELECT structure_generation_key, universe_hash
+            FROM m1_quote_generation_inputs WHERE generation_key = %s
+            """,
+            (generation_key,),
+        )
+        lineage = cursor.fetchone()
+        if lineage is None or (
+            str(lineage["structure_generation_key"]) != structure_generation_key
+            or str(lineage["universe_hash"]) != batches[0].universe_hash
+        ):
+            raise JobIdentityConflict("Quote generation lineage conflicts")
         cursor.execute(
             "SELECT generation_key FROM m1_publication_pointers "
             "WHERE pointer_key = 'quote:current' FOR UPDATE"
@@ -3844,6 +4018,7 @@ class PostgresControlPlane:
             raise JobIdentityConflict(f"quote batch has malformed job key {job_key!r}") from error
         kwargs: dict[str, Any] = dict(
             structure_receipt_digest=str(row["structure_receipt_digest"]),
+            quote_generation_digest=job_key.split(":", maxsplit=2)[1],
             universe_hash=str(row["universe_hash"]),
             ordinal=ordinal,
         )
@@ -4187,12 +4362,12 @@ class PostgresControlPlane:
     ) -> None:
         """Wake a receipt-gated successor only after its producer is terminal."""
         if lease.job_type == "quote-batch":
-            structure_digest, _universe, _ordinal, _range_digest = (
+            quote_generation_digest, _structure, _universe, _ordinal, _range_digest = (
                 PostgresControlPlane._quote_batch_identity(lease.input_identity)
             )
             PostgresControlPlane._wake_quote_certifier_cursor(
                 cursor,
-                generation_key=f"quote:{structure_digest}",
+                generation_key=f"quote:{quote_generation_digest}",
                 now=now,
             )
             return
@@ -4316,7 +4491,7 @@ class PostgresControlPlane:
                 raise ValueError(f"{field} must be a sha256 digest")
         if isinstance(successful_response_count, bool) or successful_response_count < 0:
             raise ValueError("successful_response_count must be non-negative")
-        structure_digest, universe_hash, ordinal, expected_range_digest = (
+        _quote_generation, structure_digest, universe_hash, ordinal, expected_range_digest = (
             self._quote_batch_identity(lease.input_identity)
         )
         if token_range_digest != expected_range_digest:
@@ -4486,7 +4661,7 @@ class PostgresControlPlane:
             self._finish_quote_batch_terminal_cursor(
                 cursor,
                 lease=lease,
-                checkpoint_cursor=self._quote_batch_identity(lease.input_identity)[2],
+                checkpoint_cursor=self._quote_batch_identity(lease.input_identity)[3],
                 checkpoint_digest=receipt.quote_digest,
                 now=now,
                 allow_historical=True,
@@ -4504,10 +4679,10 @@ class PostgresControlPlane:
         allow_historical: bool = False,
     ) -> None:
         """Seal a Quote batch and its runtime success under one cursor."""
-        structure_digest, _universe_hash, _ordinal, _range_digest = (
+        quote_generation_digest, _structure, _universe_hash, _ordinal, _range_digest = (
             PostgresControlPlane._quote_batch_identity(lease.input_identity)
         )
-        generation_key = f"quote:{structure_digest}"
+        generation_key = f"quote:{quote_generation_digest}"
         cursor.execute(
             """
             SELECT state, lease_owner, lease_epoch, checkpoint_cursor, checkpoint_digest
@@ -5019,6 +5194,7 @@ class PostgresControlPlane:
                 or int(persisted["record_count"]) != record_count
             ):
                 raise CheckpointConflictError("Structure generation manifest conflicts")
+            quote_generation_key = f"quote:{bundle_digest}"
             quote_admit_job_key = f"{generation_key}:quote-admit"
             quote_admit_identity = f"{generation_key}:{bundle_key}:{bundle_digest}"
             self._enqueue_job_cursor(
@@ -5031,15 +5207,23 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 INSERT INTO m1_quote_admission_inputs (
-                    job_key, generation_key, bundle_key, bundle_digest, admitted_at
-                ) VALUES (%s, %s, %s, %s, %s)
+                    job_key, generation_key, bundle_key, bundle_digest,
+                    quote_generation_key, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (job_key) DO NOTHING
                 """,
-                (quote_admit_job_key, generation_key, bundle_key, bundle_digest, now),
+                (
+                    quote_admit_job_key,
+                    generation_key,
+                    bundle_key,
+                    bundle_digest,
+                    quote_generation_key,
+                    now,
+                ),
             )
             cursor.execute(
                 """
-                SELECT generation_key, bundle_key, bundle_digest
+                SELECT generation_key, bundle_key, bundle_digest, quote_generation_key
                 FROM m1_quote_admission_inputs WHERE job_key = %s
                 """,
                 (quote_admit_job_key,),
@@ -5049,6 +5233,7 @@ class PostgresControlPlane:
                 str(quote_admission["generation_key"]) != generation_key
                 or str(quote_admission["bundle_key"]) != bundle_key
                 or str(quote_admission["bundle_digest"]) != bundle_digest
+                or str(quote_admission["quote_generation_key"]) != quote_generation_key
             ):
                 raise CheckpointConflictError("Structure generation names conflicting Quote input")
             cursor.execute(
@@ -5079,14 +5264,28 @@ class PostgresControlPlane:
         ) = _parse_quote_certification_identity(lease.input_identity)
         if lease_generation_key != generation_key or not universe_hash:
             raise JobIdentityConflict("quote certifier identity does not match its generation")
-        structure_digest = generation_key.removeprefix("quote:")
-        if len(structure_digest) != 64:
-            raise JobIdentityConflict("quote generation has malformed Structure receipt digest")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            cursor.execute(
+                """
+                SELECT structure_generation_key, universe_hash
+                FROM m1_quote_generation_inputs
+                WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            lineage = cursor.fetchone()
+            if lineage is None:
+                raise JobIdentityConflict("quote generation has no authoritative Structure lineage")
+            structure_generation_key = str(lineage["structure_generation_key"])
+            if not structure_generation_key.startswith("structure:"):
+                raise JobIdentityConflict("quote generation has malformed Structure lineage")
+            structure_digest = structure_generation_key.removeprefix("structure:")
+            if len(structure_digest) != 64 or str(lineage["universe_hash"]) != universe_hash:
+                raise JobIdentityConflict("quote generation lineage does not match its certifier")
             cursor.execute(
                 """
                 SELECT job_key, input_identity, created_at
@@ -5117,11 +5316,20 @@ class PostgresControlPlane:
             for job in expected:
                 job_key = str(job["job_key"])
                 receipt = receipts[job_key]
-                _structure, _universe, _ordinal, range_digest = self._quote_batch_identity(
+                (
+                    batch_generation,
+                    batch_structure,
+                    batch_universe,
+                    _ordinal,
+                    range_digest,
+                ) = self._quote_batch_identity(
                     str(job["input_identity"])
                 )
                 if (
-                    receipt["structure_receipt_digest"] != structure_digest
+                    f"quote:{batch_generation}" != generation_key
+                    or batch_structure != structure_digest
+                    or batch_universe != universe_hash
+                    or receipt["structure_receipt_digest"] != structure_digest
                     or receipt["universe_hash"] != universe_hash
                     or receipt["token_range_digest"] != range_digest
                     or receipt["quoted_at"] < job["created_at"]
@@ -5198,10 +5406,7 @@ class PostgresControlPlane:
                 )
             elif str(current["generation_key"]) != generation_key:
                 current_generation_key = str(current["generation_key"])
-                if (
-                    not has_lineage_fence
-                    or current_generation_key != expected_generation_key
-                ):
+                if not has_lineage_fence or current_generation_key != expected_generation_key:
                     raise PublicationPointerConflictError(
                         "Quote publication predecessor is no longer current"
                     )
@@ -5394,11 +5599,15 @@ class PostgresControlPlane:
         }
 
     @staticmethod
-    def _quote_batch_identity(input_identity: str) -> tuple[str, str, str, str]:
+    def _quote_batch_identity(input_identity: str) -> tuple[str, str, str, str, str]:
         parts = input_identity.split(":")
-        if len(parts) != 5 or parts[0] != "quote" or not all(parts[1:]):
+        if parts[0] != "quote" or not all(parts[1:]):
             raise JobIdentityConflict("quote batch job has malformed input identity")
-        return parts[1], parts[2], parts[3], parts[4]
+        if len(parts) == 5:
+            return parts[1], parts[1], parts[2], parts[3], parts[4]
+        if len(parts) == 6:
+            return parts[1], parts[2], parts[3], parts[4], parts[5]
+        raise JobIdentityConflict("quote batch job has malformed input identity")
 
     def claim_job(
         self,
@@ -7215,9 +7424,7 @@ class PostgresControlPlane:
                 int(state["lease_epoch"]) != lease.lease_epoch
                 or str(state["worker_id"]) != lease.lease_owner
             ):
-                raise StaleLeaseError(
-                    f"runtime attempt is no longer current for {lease.job_key}"
-                )
+                raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
             attempt_id = str(state["attempt_id"])
             stage = str(state["stage"])
             progress_sequence = int(state["progress_sequence"])
@@ -7228,9 +7435,7 @@ class PostgresControlPlane:
                     sequence=progress_sequence,
                     current=int(state["progress_current"]),
                     total=(
-                        None
-                        if state["progress_total"] is None
-                        else int(state["progress_total"])
+                        None if state["progress_total"] is None else int(state["progress_total"])
                     ),
                     stage=stage,
                 )
@@ -7317,9 +7522,7 @@ class PostgresControlPlane:
                 ),
             )
             if cursor.rowcount != 1:
-                raise StaleLeaseError(
-                    f"runtime attempt is no longer current for {lease.job_key}"
-                )
+                raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
             return self._record_incident_event(
                 cursor,
                 incident_key=incident_key,
@@ -8457,9 +8660,7 @@ class PostgresControlPlane:
         eligibility_reason = (
             None
             if slo.get("eligibility_reason") is None
-            else _snapshot_text(
-                slo["eligibility_reason"], "qualification_eligibility_reason"
-            )
+            else _snapshot_text(slo["eligibility_reason"], "qualification_eligibility_reason")
         )
         started_at = _snapshot_aware(epoch["started_at"], "qualification_started_at")
         if started_at > observed_at:

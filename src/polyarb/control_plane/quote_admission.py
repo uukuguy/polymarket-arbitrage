@@ -267,6 +267,7 @@ def canonical_quote_universe_hash(legs: Sequence[QuoteBatchLeg]) -> str:
 def quote_batches_from_legs(
     *,
     structure_receipt_digest: str,
+    quote_generation_digest: str | None = None,
     universe_hash: str,
     legs: Sequence[QuoteBatchLeg],
     batch_size: int,
@@ -280,6 +281,7 @@ def quote_batches_from_legs(
     return tuple(
         QuoteBatchSpec.from_legs(
             structure_receipt_digest=structure_receipt_digest,
+            quote_generation_digest=quote_generation_digest,
             universe_hash=universe_hash,
             ordinal=ordinal,
             legs=normalized[start : start + batch_size],
@@ -389,7 +391,7 @@ class TransactionalQuoteAdmitter:
     async def _run_claimed(self, runtime: AsyncAttemptRuntime) -> QuoteBatchWorkerResult:
         """Run one claimed admission while the shared runtime owns its fence."""
         lease = runtime.current_lease
-        _generation, bundle_key, bundle_digest = await _to_thread(
+        _generation, bundle_key, bundle_digest, quote_generation_key = await _to_thread(
             self._control_plane.quote_admission_input, lease.job_key
         )
         payload = await _to_thread(self._read_bundle, bundle_key)
@@ -416,6 +418,7 @@ class TransactionalQuoteAdmitter:
         universe_hash = canonical_quote_universe_hash(legs)
         batches = quote_batches_from_legs(
             structure_receipt_digest=bundle_digest,
+            quote_generation_digest=quote_generation_key.removeprefix("quote:"),
             universe_hash=universe_hash,
             legs=legs,
             batch_size=self._batch_size,

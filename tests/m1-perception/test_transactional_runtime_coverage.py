@@ -13,7 +13,6 @@ from typing import Any, cast
 import psycopg
 import pytest
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
@@ -1644,35 +1643,15 @@ def _complete_structure_certify(control_plane: PostgresControlPlane, *, now: dat
 
 
 def _complete_quote_admit(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
-    structure_digest = "e" * 64
-    universe_hash = "f" * 64
-    generation_key = f"structure:{structure_digest}"
-    job_key = f"{generation_key}:quote-admit"
-    bundle_key = "bundles/runtime-coverage.ndjson"
-    control_plane.enqueue_job(
-        job_key=job_key,
-        job_type="quote-admit",
-        input_identity=f"{generation_key}:{bundle_key}:{structure_digest}",
-        now=now,
+    generation_key, structure_digest = _certify_structure_prerequisite(
+        control_plane,
+        suffix="quote-admit-parent",
+        now=now - timedelta(seconds=10),
     )
-    with control_plane._connection_factory() as connection:  # noqa: SLF001
-        connection.execute(
-            """
-            INSERT INTO m1_structure_generation_inputs
-                (generation_key, bundle_key, bundle_digest, identity, admitted_at)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (generation_key, bundle_key, structure_digest, Jsonb({}), now),
-        )
-        connection.execute(
-            """
-            INSERT INTO m1_quote_admission_inputs
-                (job_key, generation_key, bundle_key, bundle_digest, admitted_at)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (job_key, generation_key, bundle_key, structure_digest, now),
-        )
+    universe_hash = "f" * 64
+    job_key = f"{generation_key}:quote-admit"
     lease = _claim(control_plane, "quote-admit", now=now)
+    assert lease.job_key == job_key
     _record_all_progress(control_plane, lease=lease, now=now)
     legs = (_leg("quote-admit-token"),)
     batches = control_plane.quote_batches_from_legs(
@@ -1706,8 +1685,13 @@ def _complete_quote_admit(control_plane: PostgresControlPlane, *, now: datetime)
 
 
 def _complete_quote_batch(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    _generation, structure_digest = _certify_structure_prerequisite(
+        control_plane,
+        suffix="quote-batch-parent",
+        now=now - timedelta(seconds=10),
+    )
     batch = control_plane.enqueue_quote_generation(
-        structure_receipt_digest="1" * 64,
+        structure_receipt_digest=structure_digest,
         universe_hash="2" * 64,
         legs=(_leg("quote-batch-token"),),
         batch_size=1,
@@ -1731,8 +1715,13 @@ def _complete_quote_batch(control_plane: PostgresControlPlane, *, now: datetime)
 
 
 def _complete_quote_certify(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    _generation, structure_digest = _certify_structure_prerequisite(
+        control_plane,
+        suffix="quote-certify-parent",
+        now=now - timedelta(seconds=10),
+    )
     batches = control_plane.enqueue_quote_generation(
-        structure_receipt_digest="5" * 64,
+        structure_receipt_digest=structure_digest,
         universe_hash="6" * 64,
         legs=(_leg("quote-certify-token-a"), _leg("quote-certify-token-b")),
         batch_size=1,
