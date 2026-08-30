@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-30T23:40:46Z",
+  "release_id": "3a70cd9f5a52294fba5709f0d390421600baa5de",
+  "container_image_digest": "sha256:870f312ffe7786bc9a842812ec86275ec30334e6219cbb3f1b84fd6d61fc2748",
+  "docker_context": "orbstack",
+  "structure_generation_key": "structure:2263d1ca7b588b6dd7e90f27dd88e073c016b0c2fa17d12de45f9b3a00025c62",
+  "structure_published_at": "2026-08-30T23:28:55.593889Z",
+  "quote_generation_key": "quote:2263d1ca7b588b6dd7e90f27dd88e073c016b0c2fa17d12de45f9b3a00025c62",
+  "quote_parent_structure_generation_key": "structure:2263d1ca7b588b6dd7e90f27dd88e073c016b0c2fa17d12de45f9b3a00025c62",
+  "quote_published_at": "2026-08-30T23:39:57.689217Z",
+  "opportunity_generation_key": "quote:2263d1ca7b588b6dd7e90f27dd88e073c016b0c2fa17d12de45f9b3a00025c62",
+  "opportunity_parent_structure_generation_key": "structure:2263d1ca7b588b6dd7e90f27dd88e073c016b0c2fa17d12de45f9b3a00025c62",
+  "opportunity_certified_at": "2026-08-30T23:40:28.040597Z",
+  "qualification": {
+    "epoch_id": "epoch-f66adc27b2a731bc801c51f8",
+    "eligibility_state": "eligible",
+    "eligibility_reason": null,
+    "operator_mutation": false,
+    "epoch_reset": false
+  },
+  "health": {
+    "expired_leases": 0,
+    "open_circuit_count": 0,
+    "runtime_controller_status": "healthy"
+  }
+}

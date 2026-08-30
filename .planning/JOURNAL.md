@@ -12855,3 +12855,22 @@ production-enablement authorization gates before any production mutation.
 `structure:2263d1…` and Q3 `quote:2bc5ff…`; let rolling qualification resume from
 `freshness.structure` when the real successor publishes. Do not reset the epoch,
 widen freshness SLOs, or manually mutate job state.
+
+### SESSION 388 — 2026-08-31 (rolling lineage resumes on successor)
+
+- [PRODUCTION CHAIN] Successor `structure:2263d1…` published at 23:28:55 UTC;
+  its admitted `quote:2263d1…` published at 23:39:57, and Opportunity certified
+  the exact same Structure/Quote lineage at 23:40:28.
+- [ROLLING QUALIFICATION] The existing `epoch-f66adc…` moved from
+  `paused(freshness.structure)` to `eligible` without an epoch reset, operator SQL,
+  24-hour restart, or freshness-SLO relaxation.
+- [HEALTH] The control API reported zero expired leases, zero open circuits, and a
+  healthy runtime controller. The deployed release remains `3a70cd9f`; its image
+  was built under the scoped `orbstack` context only.
+- [MERGE BOUNDARY] This is the required real successor-chain proof for M1's
+  self-healing branch. Next work is bounded to H-063 local gates and merge review;
+  do not add new production mechanisms unless a review gate identifies a defect.
+
+[NEXT] Run `make climb-cycle hypothesis=H-063`, complete the merge-readiness
+review and full regression from the branch, then prepare the clean mainline
+integration with the evidence above.
