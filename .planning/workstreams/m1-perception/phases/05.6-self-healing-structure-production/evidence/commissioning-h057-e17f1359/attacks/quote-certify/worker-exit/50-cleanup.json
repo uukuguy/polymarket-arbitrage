@@ -1,0 +1,1 @@
+{"attack_id":"worker-exit","config_id":"sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90","experiment_id":"commission:quote-certify:worker-exit","node_id":"quote-certify","occurred_at":"2031-01-01T12:08:02.000003+00:00","receipt_id":"attempt:99763a3d-8771-4711-8950-437ae124b037","release_id":"e17f1359957bd8a585df62d68aa7b4bdbf2c7820","stage":"cleanup"}

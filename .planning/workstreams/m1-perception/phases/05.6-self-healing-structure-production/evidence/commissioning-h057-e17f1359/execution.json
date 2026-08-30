@@ -1,0 +1,18 @@
+{
+  "attack_proof_count": 66,
+  "config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+  "database_cleanup": {
+    "scoped_container_present_after_run": false,
+    "temporary_database_count": 0
+  },
+  "database_image": "postgres:16-alpine",
+  "docker_context": "orbstack",
+  "end_to_end_verified_at": "2031-01-03T12:00:30+00:00",
+  "evidence_sha256": "67f9cd4f84a27c5f2647a4033a94e62ee9007668d591bedd8439bfe79244969e",
+  "execution_scope": "disposable-exact-image",
+  "node_count": 8,
+  "normal_turn_count": 8,
+  "qualification_may_start": true,
+  "release_id": "e17f1359957bd8a585df62d68aa7b4bdbf2c7820",
+  "status": "ready"
+}
