@@ -12073,3 +12073,27 @@ image and rerun all shared attacks under the same release/config identity.
 and confirm H-044. Then build one immutable OrbStack image and execute stale-
 owner, progress-stall, retry-budget, heartbeat-outage and worker-exit together
 under the same release/config; do not start production canaries or qualification.
+
+### SESSION 357 — 2026-08-30 (H-044 worker-exit confirmed)
+
+- [EXACT HEAD GUARD] The committed Plan 231 source passed the build-only exact
+  revision guard.
+- [CLIMB H-044] Cycle 49 passed all nine deterministic production-enablement
+  gates at 100. Integration passed 129 cases, including all eight worker-exit
+  transactions and all five isolated shared-attack harness paths.
+- [BOUNDARY PROOF] The gate explicitly proves no reclaim before lease expiry,
+  exact critical reclaim after expiry, old-owner terminal rejection, epoch-2
+  business success and incident resolution.
+- [QUALIFICATION] Worker loss maps to a recoverable P1 block that preserves
+  existing healthy seconds; it does not enter the truth/identity invalidation
+  closed set.
+- [SHARED MATRIX READY] stale-owner, progress-stall, retry-budget,
+  heartbeat-outage and worker-exit adapters are now confirmed across all eight
+  nodes and can be rerun together on one immutable release/config.
+- [BOUNDARY] Confirmation used only local disposable PostgreSQL. No production
+  DB/provider, Fly action, SSH, deployment, Docker-context mutation or Colima.
+
+[NEXT] Commit the H-044 confirmation state. Build one build-only immutable image
+through command-scoped OrbStack, independently inspect its release identity,
+then run all five shared attacks against isolated PostgreSQL and preserve the 40
+release/config-bound proofs with zero-residue and secret scans.

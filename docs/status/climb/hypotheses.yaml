@@ -218,13 +218,30 @@ hypotheses:
     the business transaction across all eight production nodes.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Prove worker loss blocks but does not invalidate accrued qualification
-    evidence, cannot reclaim before lease expiry, and does not require process or Machine
-    restart authority for job-level recovery.
+    evidence, cannot reclaim before lease expiry, and does not require process or
+    Machine restart authority for job-level recovery.
   cost_h: 1.0
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T20:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 49
+    run: 20260830-025150-h-044
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
