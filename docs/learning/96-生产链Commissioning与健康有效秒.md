@@ -300,3 +300,21 @@ timeout 表示“同一输入稍后可能成功”，所以进入共享 backoff/
 `job.terminal-failed`、quarantined job/attempt、critical incident 和 Dashboard outbox。
 qualification 被阻断，操作员能看到精确且安全的 artifact key，但旧 certified Structure shadow
 pointer 不动，未损坏的生产读链仍有权威来源。
+
+### 为什么“还差 receipt”和“receipt 已齐但计数冲突”不能共用 waiting？
+
+前者是 fan-in barrier 的合法中间状态：上游仍可能通过已有 lease/retry policy 补齐，
+certifier 应保持 `waiting`。后者已经拥有全部 receipt，却无法与冻结的 source identity
+对上；这不是“再等一会”能改变的事实。
+
+现在 `StructureParityMismatchError` 在
+`src/polyarb/control_plane/postgres.py:84` 单独表达这个完整性冲突；真实 certifier 在
+`src/polyarb/control_plane/structure_worker.py:776` 把候选 generation 隔离，写入
+`integrity.conflict + qualification_impact=invalidated` 的 terminal fact。这会作废当前资格
+epoch，因为历史上的结构真值已经被证明不自洽；但上一个已认证 pointer 仍继续
+服务，不因候选版本损坏而整链停摆。
+
+commissioning 在 `src/polyarb/control_plane/production_commissioning_disposable.py:3247` 先发布一个良好
+shadow generation，再对一次性数据库中的候选 generation 注入冻结计数冲突。证据
+要求同时成立：候选 manifest 没有进入权威表、没有 downstream admission、没有 retry
+circuit、critical alert 可见，且 prior pointer 没有移动。

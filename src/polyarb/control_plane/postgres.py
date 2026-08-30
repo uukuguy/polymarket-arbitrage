@@ -81,6 +81,10 @@ class IncompleteStructureGenerationError(ControlPlaneError):
     """A Structure certifier cannot prove every admitted range is present."""
 
 
+class StructureParityMismatchError(IncompleteStructureGenerationError):
+    """A complete Structure generation conflicts with its frozen source counts."""
+
+
 class SoakEvidenceConflictError(ControlPlaneError):
     """A cloud soak run or observation conflicts with immutable evidence."""
 
@@ -4799,7 +4803,7 @@ class PostgresControlPlane:
                 if component in admitted_components
             }
             if actual_counts != parity_counts:
-                raise IncompleteStructureGenerationError(
+                raise StructureParityMismatchError(
                     "Structure generation component-count parity failed"
                 )
             manifest_digest = sha256(
@@ -6975,6 +6979,8 @@ class PostgresControlPlane:
         summary: str,
         detail: dict[str, object],
         channels: Sequence[str],
+        qualification_impact: str = "blocked",
+        reason_code: str = "failure.schema",
         now: datetime,
     ) -> str:
         """Atomically quarantine immutable bad input and surface operator action."""
@@ -6990,6 +6996,10 @@ class PostgresControlPlane:
             raise ValueError("channels must contain non-empty values")
         if len(set(channels)) != len(channels):
             raise ValueError("channels must be unique")
+        if qualification_impact not in {"blocked", "invalidated"}:
+            raise ValueError("qualification_impact must be blocked or invalidated")
+        if reason_code not in {"failure.schema", "integrity.conflict"}:
+            raise ValueError("reason_code is not an allowed quarantine reason")
         failure_fingerprint, failure_signature = _retry_failure_identity(
             component=component,
             error_class=error_class,
@@ -7062,8 +7072,8 @@ class PostgresControlPlane:
                     detail={
                         "component": component,
                         "failure_signature": failure_signature,
-                        "qualification_impact": "blocked",
-                        "reason_code": "failure.schema",
+                        "qualification_impact": qualification_impact,
+                        "reason_code": reason_code,
                         "result_code": "failed",
                     },
                     occurred_at=now,

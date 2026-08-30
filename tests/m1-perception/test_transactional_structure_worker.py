@@ -16,7 +16,11 @@ from polyarb.control_plane.models import (
     StructureRangeReceipt,
     StructureRangeSpec,
 )
-from polyarb.control_plane.postgres import IncompleteStructureGenerationError, StaleLeaseError
+from polyarb.control_plane.postgres import (
+    IncompleteStructureGenerationError,
+    StaleLeaseError,
+    StructureParityMismatchError,
+)
 from polyarb.control_plane.runtime_contract import RetryableHeartbeatError, ServiceStopRequested
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
@@ -1495,6 +1499,74 @@ def test_structure_certifier_waits_for_missing_range_receipts_without_incident()
     assert certifier._control_plane.finished == [
         {
             "state": JobState.WAITING,
+            "now": NOW,
+        }
+    ]
+
+
+def test_structure_certifier_quarantines_parity_mismatch_and_invalidates_qualification() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.quarantined: list[dict[str, object]] = []
+
+        def claim_job(self, **kwargs: object) -> JobLease:
+            return JobLease(
+                job_key="structure:" + "b" * 64 + ":certify",
+                job_type="structure-certify",
+                input_identity="structure:" + "b" * 64,
+                lease_owner="certifier-a",
+                lease_epoch=4,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, generation_key: str):
+            raise StructureParityMismatchError("component-count parity failed")
+
+        def finish_quarantined_with_incident(
+            self, lease: JobLease, **kwargs: object
+        ) -> None:
+            self.quarantined.append(kwargs)
+
+        def finish(self, lease: JobLease, **kwargs: object) -> None:
+            raise AssertionError("a proved parity mismatch must not return to waiting")
+
+        def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+            raise AssertionError("immutable parity mismatch must not enter the retry circuit")
+
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            return None
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            return lease
+
+    control_plane = ControlPlane()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=object(),
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+
+    assert certifier.run_once().outcome == "quarantined"
+    assert control_plane.quarantined == [
+        {
+            "error_class": "StructureParityMismatchError",
+            "incident_key": "incident:integrity-conflict:structure:" + "b" * 64 + ":certify",
+            "dedupe_key": "integrity-conflict:structure:" + "b" * 64 + ":certify",
+            "component": "structure-certify",
+            "summary": "structure-certify parity mismatch quarantined",
+            "detail": {
+                "job_key": "structure:" + "b" * 64 + ":certify",
+                "lease_epoch": 4,
+                "generation_key": "structure:" + "b" * 64,
+                "reason_code": "integrity.conflict",
+            },
+            "channels": ("dashboard",),
+            "qualification_impact": "invalidated",
+            "reason_code": "integrity.conflict",
             "now": NOW,
         }
     ]

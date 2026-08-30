@@ -26,6 +26,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
+    StructureParityMismatchCommissioningAdapter,
     WorkerExitCommissioningAdapter,
     complete_normal_turn,
     prepare_normal_turn,
@@ -1206,6 +1207,74 @@ def test_normalization_payload_corrupt_adapter_quarantines_and_preserves_pointer
         0,
         0,
     )
+
+
+def test_structure_parity_mismatch_adapter_invalidates_and_preserves_pointer(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:structure-certify:structure-parity-mismatch",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="structure-certify",
+        attack_id="structure-parity-mismatch",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=StructureParityMismatchCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=65),
+        ),
+        evidence_dir=tmp_path / "structure-parity-mismatch",
+    )
+
+    assert proof["qualification_impact"] == "invalidate"
+    assert str(proof["detector_fact_id"]).startswith("event:")
+    assert str(proof["recovery_action_id"]).startswith("operator-action:")
+    assert str(proof["recovery_fact_id"]).endswith(":operator-action-required")
+    assert str(proof["postcondition_fact_id"]).startswith(
+        "pointer:structure:current:shadow:structure:"
+    )
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        shape = connection.execute(
+            """
+            SELECT job.state, attempt.state,
+                   runtime.detail->>'reason_code',
+                   runtime.detail->>'qualification_impact',
+                   incident.state, incident.severity, event.kind, outbox.state,
+                   (SELECT count(*) FROM m1_generation_manifests
+                    WHERE generation_key = regexp_replace(job.job_key, ':certify$', '')),
+                   (SELECT count(*) FROM m1_job_circuits WHERE job_key = job.job_key)
+            FROM m1_jobs AS job
+            JOIN m1_job_attempts AS attempt ON attempt.job_key = job.job_key
+            JOIN m1_job_runtime_events AS runtime
+              ON runtime.job_key = job.job_key AND runtime.kind = 'job.terminal-failed'
+            JOIN m1_incidents AS incident
+              ON incident.dedupe_key = 'integrity-conflict:' || job.job_key
+            JOIN m1_incident_events AS event USING (incident_key)
+            JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+            WHERE job.job_type = 'structure-certify' AND job.state = 'quarantined'
+            """
+        ).fetchone()
+
+    assert shape == (
+        "quarantined",
+        "quarantined",
+        "integrity.conflict",
+        "invalidated",
+        "open",
+        "critical",
+        "escalated",
+        "pending",
+        0,
+        0,
+    )
+
+
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:
     now = NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1)
     if job_type == "structure-fetch":

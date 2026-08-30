@@ -34,15 +34,18 @@ from .runtime_models import RuntimeDeadlineProfile, RuntimeEventKind
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    StructureRangeArtifact,
     StructureShardArtifact,
     StructureShardReceipt,
     canonical_structure_bundle_bytes,
     canonical_structure_manifest_bytes,
+    canonical_structure_range_bytes,
     canonical_structure_shard_bytes,
     canonical_structure_shard_manifest_bytes,
 )
 from .structure_worker import (
     StructureNormalizationInputInvalid,
+    TransactionalStructureCertifier,
     TransactionalStructureWorker,
 )
 
@@ -3241,6 +3244,309 @@ class NormalizationPayloadCorruptCommissioningAdapter:
         )
 
 
+class StructureParityMismatchCommissioningAdapter:
+    """Invalidate one frozen-count conflict without replacing certified truth."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._clock_at = self._started_at
+        self._objects = _DisposableObjectStore()
+        self._certifier: TransactionalStructureCertifier | None = None
+        self._job_key: str | None = None
+        self._generation_key: str | None = None
+        self._prior_generation_key: str | None = None
+        self._terminal_event_id: str | None = None
+        self._incident_key: str | None = None
+        self._incident_event_id: str | None = None
+        self._outbox_id: str | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "structure-parity-mismatch"
+            or identity.node_id != "structure-certify"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prior_builder = NormalizationPayloadCorruptCommissioningAdapter(
+            control_plane=self._control_plane,
+            started_at=self._started_at,
+        )
+        self._prior_generation_key = prior_builder._certify_prior_generation(identity)  # noqa: SLF001
+        candidate_identity = StructureBundleIdentity(
+            publication_id=f"commissioning:parity:{identity.experiment_id}",
+            window_id=f"parity:{identity.experiment_id}",
+            snapshot_id=2,
+            comparison_receipt_digest=sha256(
+                f"{identity.experiment_id}:parity-comparison".encode()
+            ).hexdigest(),
+            normalization_contract_version="structure-v7",
+            component_counts={
+                "events": 1,
+                "event_tags": 0,
+                "memberships": 0,
+                "group_truth": 0,
+                "markets": 0,
+                "issues": 0,
+            },
+        )
+        components = {
+            "events": ({"id": "candidate-event"},),
+            "event_tags": (),
+            "memberships": (),
+            "group_truth": (),
+            "markets": (),
+            "issues": (),
+        }
+        bundle = StructureBundleArtifact.from_bytes(
+            canonical_structure_bundle_bytes(
+                identity=candidate_identity,
+                components=components,
+            )
+        )
+        self._objects.restore(key=bundle.key, payload=bundle.payload, digest=bundle.sha256)
+        specs = self._control_plane.enqueue_structure_generation(
+            identity=candidate_identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=self._started_at + timedelta(seconds=5),
+        )
+        if len(specs) != 1:
+            raise DisposableCommissioningError("parity-structure-plan-shape")
+        spec = specs[0]
+        artifact = StructureRangeArtifact.from_bytes(
+            canonical_structure_range_bytes(
+                bundle_digest=bundle.sha256,
+                component="events",
+                range_digest=spec.range_digest,
+                rows=components["events"],
+            )
+        )
+        self._objects.restore(
+            key=artifact.key,
+            payload=artifact.payload,
+            digest=artifact.sha256,
+        )
+        normalizer = _claim(
+            self._control_plane,
+            "structure-normalize",
+            self._started_at + timedelta(seconds=6),
+        )
+        _record_progress(
+            self._control_plane,
+            normalizer,
+            self._started_at + timedelta(seconds=6),
+        )
+        self._control_plane.complete_structure_range(
+            normalizer,
+            range_digest=spec.range_digest,
+            artifact_key=artifact.key,
+            artifact_digest=artifact.sha256,
+            record_count=1,
+            now=self._started_at + timedelta(seconds=7),
+        )
+        self._job_key = f"{spec.generation_key}:certify"
+        self._generation_key = spec.generation_key
+        self._clock_at = self._started_at + timedelta(seconds=9)
+        self._certifier = TransactionalStructureCertifier(
+            control_plane=self._control_plane,
+            object_client=self._objects,
+            bucket="commissioning-artifacts",
+            worker_id="commissioning:structure-certify",
+            now=lambda: self._clock_at,
+            lease_seconds=120,
+        )
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"pointer:structure:current:shadow:{self._prior_generation_key}",
+            occurred_at=self._started_at + timedelta(seconds=8),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        generation_key = self._need(self._generation_key, "parity-generation-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            changed = connection.execute(
+                """
+                UPDATE m1_structure_generation_inputs
+                SET identity = jsonb_set(identity, '{component_counts,events}', '2'::jsonb)
+                WHERE generation_key = %s
+                """,
+                (generation_key,),
+            ).rowcount
+        if changed != 1:
+            raise DisposableCommissioningError("parity-injection-missing")
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"postgres:m1_structure_generation_inputs:{generation_key}:events=2",
+            occurred_at=self._started_at + timedelta(seconds=9),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        certifier = self._need(self._certifier, "parity-certifier-missing")
+        self._clock_at = self._started_at + timedelta(seconds=10)
+        result = certifier.run_once()
+        if result.outcome != "quarantined":
+            raise DisposableCommissioningError("parity-mismatch-not-quarantined")
+        job_key = self._need(self._job_key, "parity-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT runtime.event_id, incident.incident_key,
+                       event.incident_event_id, outbox.outbox_id
+                FROM m1_job_runtime_events AS runtime
+                JOIN m1_incidents AS incident ON incident.dedupe_key = %s
+                JOIN m1_incident_events AS event USING (incident_key)
+                JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+                WHERE runtime.job_key = %s AND runtime.kind = 'job.terminal-failed'
+                """,
+                (f"integrity-conflict:{job_key}", job_key),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("parity-quarantine-chain-missing")
+        self._terminal_event_id = str(row[0])
+        self._incident_key = str(row[1])
+        self._incident_event_id = str(row[2])
+        self._outbox_id = str(row[3])
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{self._terminal_event_id}",
+            occurred_at=self._started_at + timedelta(seconds=10),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"operator-action:{self._incident_key}:{self._outbox_id}",
+            occurred_at=self._started_at + timedelta(seconds=11),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        generation_key = self._need(self._generation_key, "parity-generation-missing")
+        prior_generation = self._need(
+            self._prior_generation_key, "prior-structure-generation-missing"
+        )
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s),
+                  (SELECT count(*) FROM m1_quote_admission_inputs WHERE generation_key = %s),
+                  (SELECT generation_key FROM m1_publication_pointers
+                   WHERE pointer_key = 'structure:current:shadow')
+                """,
+                (generation_key, generation_key),
+            ).fetchone()
+        if shape != (0, 0, prior_generation):
+            raise DisposableCommissioningError("parity-quarantine-partial-effect")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"postgres:m1_generation_manifests:{generation_key}:absent",
+            occurred_at=self._started_at + timedelta(seconds=12),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"incident:{self._incident_event_id}:operator-action-required",
+            occurred_at=self._started_at + timedelta(seconds=13),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "parity-job-missing")
+        prior_generation = self._need(
+            self._prior_generation_key, "prior-structure-generation-missing"
+        )
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT job.state, attempt.state, runtime.kind,
+                       runtime.detail->>'reason_code',
+                       runtime.detail->>'qualification_impact',
+                       incident.state, incident.severity, event.kind,
+                       outbox.channel, outbox.state, pointer.generation_key,
+                       (SELECT count(*) FROM m1_job_circuits WHERE job_key = job.job_key)
+                FROM m1_jobs AS job
+                JOIN m1_job_attempts AS attempt
+                  ON attempt.job_key = job.job_key AND attempt.lease_epoch = job.lease_epoch
+                JOIN m1_job_runtime_events AS runtime
+                  ON runtime.job_key = job.job_key
+                 AND runtime.lease_epoch = job.lease_epoch
+                 AND runtime.kind = 'job.terminal-failed'
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key = 'integrity-conflict:' || job.job_key
+                JOIN m1_incident_events AS event USING (incident_key)
+                JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+                JOIN m1_publication_pointers AS pointer
+                  ON pointer.pointer_key = 'structure:current:shadow'
+                WHERE job.job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+        if shape != (
+            "quarantined",
+            "quarantined",
+            "job.terminal-failed",
+            "integrity.conflict",
+            "invalidated",
+            "open",
+            "critical",
+            "escalated",
+            "dashboard",
+            "pending",
+            prior_generation,
+            0,
+        ):
+            raise DisposableCommissioningError("parity-quarantine-proof-shape")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"pointer:structure:current:shadow:{prior_generation}",
+            occurred_at=self._started_at + timedelta(seconds=14),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -3801,6 +4107,7 @@ __all__ = [
     "QuoteBatchIncompleteCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",
     "SourceReceiptGapCommissioningAdapter",
+    "StructureParityMismatchCommissioningAdapter",
     "StaleOwnerCommissioningAdapter",
     "WorkerExitCommissioningAdapter",
     "complete_normal_turn",

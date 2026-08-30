@@ -8666,8 +8666,25 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
         connection.close()
 
 
+@pytest.mark.parametrize(
+    ("finish_options", "expected_impact", "expected_reason"),
+    [
+        ({}, "blocked", "failure.schema"),
+        (
+            {
+                "qualification_impact": "invalidated",
+                "reason_code": "integrity.conflict",
+            },
+            "invalidated",
+            "integrity.conflict",
+        ),
+    ],
+)
 def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
     control_plane: PostgresControlPlane,
+    finish_options: dict[str, object],
+    expected_impact: str,
+    expected_reason: str,
 ) -> None:
     now = _now()
     lease = _seed_claimed_job(
@@ -8700,10 +8717,11 @@ def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
             "job_key": lease.job_key,
             "lease_epoch": lease.lease_epoch,
             "input_artifact_key": "structure-shards/corrupt/rows.ndjson",
-            "reason_code": "failure.schema",
+            "reason_code": expected_reason,
         },
         channels=("dashboard",),
         now=now + timedelta(seconds=2),
+        **finish_options,
     )
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
@@ -8737,8 +8755,8 @@ def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
             "job.terminal-failed",
             "normalize-range",
             "validation.failed",
-            "blocked",
-            "failure.schema",
+            expected_impact,
+            expected_reason,
         )
         cursor.execute(
             """

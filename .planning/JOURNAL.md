@@ -12360,3 +12360,32 @@ full related regressions, then confirm H-048 through climb. Continue with
 reusing the terminal quarantine/critical incident primitive only if its exact
 certifier integrity semantics agree; do not collapse a true parity violation
 into transient retry.
+
+### SESSION 367 — 2026-08-30 (Structure parity conflict chain-truth)
+
+- [CLIMB H-049] Registered the in-flight Structure certifier parity hypothesis.
+- [ROOT CAUSE] `IncompleteStructureGenerationError` represented both missing
+  receipts and complete component-count conflict. The certifier caught both as
+  ordinary `waiting`, so an immutable integrity defect could remain silent and
+  never invalidate qualification.
+- [SEMANTIC SPLIT] `StructureParityMismatchError` now names only complete frozen
+  count conflict. Missing receipts still wait; parity conflict quarantines the
+  exact attempt and never enters retry/circuit policy.
+- [ATOMIC VISIBILITY] The existing lease-fenced quarantine transaction now
+  admits explicit schema/blocked and integrity-conflict/invalidated variants.
+  Runtime terminal fact, job/attempt state, critical incident and Dashboard
+  outbox commit together.
+- [DISPOSABLE ATTACK] A prior certified shadow generation remains authoritative
+  while a candidate with complete receipt but injected frozen-count conflict is
+  refused by the real certifier. No authoritative candidate manifest, Quote
+  admission or retry circuit is created.
+- [ENTRY/TEACHING] Added isolated harness, Make entry, climb gates, Plan 237
+  summary and the learning FAQ explaining waiting versus invalidation.
+- [BOUNDARY] Local disposable PostgreSQL and in-memory object boundary only;
+  no production provider/DB, Fly/SSH/deploy, Docker build/context mutation,
+  Colima, canary or qualification operation occurred.
+
+[NEXT] Commit Plan 05.6-237 without protected user files, run exact-HEAD and
+full related regression, then confirm H-049 through climb cycle 54. Continue
+with the next disposable fault, preferring publication pointer conflict before
+shared R2 timeout adapters.

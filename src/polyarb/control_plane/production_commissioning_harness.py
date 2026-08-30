@@ -20,6 +20,7 @@ from .production_commissioning_disposable import (
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
+    StructureParityMismatchCommissioningAdapter,
     WorkerExitCommissioningAdapter,
 )
 from .production_commissioning_runner import (
@@ -43,6 +44,7 @@ _SOURCE_RECEIPT_GAP_ATTACK_ID: Final[str] = "source-receipt-gap"
 _QUOTE_BATCH_INCOMPLETE_ATTACK_ID: Final[str] = "quote-batch-incomplete"
 _QUOTE_ADMISSION_MISSING_SHARD_ATTACK_ID: Final[str] = "quote-admission-missing-shard"
 _NORMALIZATION_PAYLOAD_CORRUPT_ATTACK_ID: Final[str] = "normalization-payload-corrupt"
+_STRUCTURE_PARITY_MISMATCH_ATTACK_ID: Final[str] = "structure-parity-mismatch"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -295,6 +297,24 @@ def run_normalization_payload_corrupt_commissioning(
     )
 
 
+def run_structure_parity_mismatch_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove frozen Structure parity conflicts visibly invalidate qualification."""
+
+    return _run_commissioning(
+        attack_id=_STRUCTURE_PARITY_MISMATCH_ATTACK_ID,
+        adapter_factory=StructureParityMismatchCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("structure-certify",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -308,6 +328,7 @@ def _parser() -> argparse.ArgumentParser:
         "quote-batch-incomplete",
         "quote-admission-missing-shard",
         "normalization-payload-corrupt",
+        "structure-parity-mismatch",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -329,6 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "quote-batch-incomplete": run_quote_batch_incomplete_commissioning,
         "quote-admission-missing-shard": run_quote_admission_missing_shard_commissioning,
         "normalization-payload-corrupt": run_normalization_payload_corrupt_commissioning,
+        "structure-parity-mismatch": run_structure_parity_mismatch_commissioning,
     }
     try:
         result = runners[args.command](
@@ -353,6 +375,7 @@ __all__ = [
     "run_quote_batch_incomplete_commissioning",
     "run_retry_budget_commissioning",
     "run_source_receipt_gap_commissioning",
+    "run_structure_parity_mismatch_commissioning",
     "run_stale_owner_commissioning",
     "run_worker_exit_commissioning",
 ]

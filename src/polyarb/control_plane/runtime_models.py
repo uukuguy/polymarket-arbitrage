@@ -128,6 +128,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
             "failure.integrity",
             "failure.schema",
             "invalid-input",
+            "integrity.conflict",
             "job.attempt-deadline",
             "job.heartbeat-missing",
             "job.heartbeat-missing-fence",

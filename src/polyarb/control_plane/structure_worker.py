@@ -22,7 +22,12 @@ from .blocking_bridge import run_blocking_call
 from .failure_identity import retry_failure_fingerprint
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
-from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
+from .postgres import (
+    IncompleteStructureGenerationError,
+    PostgresControlPlane,
+    StaleLeaseError,
+    StructureParityMismatchError,
+)
 from .runtime_contract import AttemptRuntime, RetryableHeartbeatError, ServiceStopRequested
 from .runtime_deadlines import runtime_deadline_profile, runtime_policy
 from .service_lifecycle import claim_worker_job
@@ -768,6 +773,30 @@ class TransactionalStructureCertifier:
                 terminal=True,
             )
             raise
+        except StructureParityMismatchError as error:
+            error_class = type(error).__name__
+            sync_call(
+                lambda: self._control_plane.finish_quarantined_with_incident(
+                    runtime.current_lease,
+                    error_class=error_class,
+                    incident_key=f"incident:integrity-conflict:{lease.job_key}",
+                    dedupe_key=f"integrity-conflict:{lease.job_key}",
+                    component="structure-certify",
+                    summary="structure-certify parity mismatch quarantined",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "generation_key": generation_key,
+                        "reason_code": "integrity.conflict",
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    qualification_impact="invalidated",
+                    reason_code="integrity.conflict",
+                    now=self._now(),
+                ),
+                terminal=True,
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
         except IncompleteStructureGenerationError:
             sync_call(
                 lambda: self._control_plane.finish(

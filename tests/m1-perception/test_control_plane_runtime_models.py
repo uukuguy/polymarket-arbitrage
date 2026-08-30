@@ -256,6 +256,22 @@ def test_runtime_event_detail_allowlist_accepts_declared_facts_for_each_kind(
     assert json.loads(json.dumps(event.detail, sort_keys=True)) == detail
 
 
+def test_runtime_terminal_fact_accepts_integrity_conflict_invalidation() -> None:
+    detail = {
+        "component": "structure-certify",
+        "failure_signature": "validation.failed",
+        "qualification_impact": "invalidated",
+        "reason_code": "integrity.conflict",
+        "result_code": "failed",
+    }
+
+    event = RuntimeEvent(
+        **_valid_runtime_event_kwargs(kind=RuntimeEventKind.TERMINAL_FAILED, detail=detail)
+    )
+
+    assert dict(event.detail) == detail
+
+
 def test_runtime_event_rejects_unknown_detail_keys_even_when_value_looks_safe() -> None:
     with pytest.raises(ValueError, match="detail keys are not allowed"):
         RuntimeEvent(**_valid_runtime_event_kwargs(detail={"safe": "token=abc"}))

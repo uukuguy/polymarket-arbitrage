@@ -19,6 +19,7 @@ from polyarb.control_plane.production_commissioning_harness import (
     run_retry_budget_commissioning,
     run_source_receipt_gap_commissioning,
     run_stale_owner_commissioning,
+    run_structure_parity_mismatch_commissioning,
     run_worker_exit_commissioning,
 )
 from polyarb.control_plane.runtime_fault_matrix import (
@@ -601,6 +602,51 @@ def test_normalization_payload_corrupt_harness_runs_target_and_cleans_database_a
     assert (
         root
         / "attacks/structure-normalize/normalization-payload-corrupt/proof.json"
+    ).is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+        roles = connection.execute(
+            """
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability'
+            )
+            ORDER BY rolname
+            """
+        ).fetchall()
+    assert databases == []
+    assert roles == []
+
+
+def test_structure_parity_mismatch_harness_runs_target_and_cleans_database_and_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_structure_parity_mismatch_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+    )
+
+    assert result == {
+        "attack_id": "structure-parity-mismatch",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 1,
+        "proof_count": 1,
+        "status": "pass",
+    }
+    assert (
+        root
+        / "attacks/structure-certify/structure-parity-mismatch/proof.json"
     ).is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
