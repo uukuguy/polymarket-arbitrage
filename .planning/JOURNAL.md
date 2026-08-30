@@ -12276,3 +12276,34 @@ not rebuild an image until the remaining disposable matrix is ready.
 [NEXT] Commit Plan 05.6-235 without protected user files, pass exact-HEAD and
 full related regressions, then confirm H-047 through climb. Continue with the
 remaining disposable matrix; do not rebuild an exact image yet.
+
+### SESSION 364 — 2026-08-30 (H-047 missing Quote admission shard confirmed)
+
+- [EXACT HEAD GUARD] After commit `ff78eb1e`, the build-only image contract
+  accepted the exact runtime source revision. No image was built or pushed.
+- [FULL REGRESSION] Quote admission, transactional coverage, commissioning
+  harness, Make contracts and all climb tests passed. One stale assertion was
+  updated to the intentional typed shard-unavailable contract; the recovery
+  behavior itself was unchanged.
+- [CLIMB H-047] Cycle 52 passed all nine deterministic production-enablement
+  gates at 100%. Integration passed 136 cases and reported
+  `disaster_pattern=false`.
+- [CHAIN-TRUTH] The confirmed path binds the incident to the safe exact
+  manifest key, proves zero partial Quote input/job/checkpoint/pointer effects,
+  restores that key, waits only for the persisted policy due-at and admits one
+  complete two-leg artifact-backed batch.
+- [AUTHORITY] PostgreSQL intentionally stores the authenticated object
+  key/digest/leg count rather than duplicating v3 legs or token IDs; object HEAD
+  metadata is part of the postcondition evidence.
+- [ONLINE TARGET] `target evaluation not configured` remains the expected
+  absence of an external leaderboard target and does not weaken the local
+  confirmed verdict.
+- [BOUNDARY] Local disposable PostgreSQL and in-memory object boundary only;
+  no provider, production DB, Fly, SSH, deployment, Docker build/context
+  mutation, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-047 confirmation state without protected user files. Audit and
+implement the next disposable production-chain fault, preferring
+`normalization-payload-corrupt` because it is the next upstream artifact-truth
+boundary. Continue to defer the combined exact-image run until the remaining
+disposable matrix is complete.
