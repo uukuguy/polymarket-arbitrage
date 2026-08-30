@@ -1868,6 +1868,99 @@ def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monke
     assert stop_after_first["count"] == 1
 
 
+def test_runtime_reconcile_until_retries_only_lane_busy_then_returns_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+
+    args = cli_control_plane._parser().parse_args(
+        [
+            "runtime-reconcile-until",
+            "--enable",
+            "--target-type",
+            "circuit",
+            "--target-id",
+            "structure:window:normalize:event_tags:192",
+            "--expected-action",
+            "probe-circuit",
+            "--max-wait-seconds",
+            "45",
+            "--retry-interval-seconds",
+            "1",
+        ]
+    )
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    results = iter(
+        (
+            {"status": "ok", "state": "deferred", "outcome": "worker-lane-busy"},
+            {"status": "ok", "state": "deferred", "outcome": "worker-lane-busy"},
+            {"status": "ok", "state": "recovery-executed", "outcome": "succeeded"},
+        )
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(cli_control_plane, "_runtime_reconcile_once", lambda *a, **k: next(results))
+    monkeypatch.setattr(cli_control_plane, "sleep", sleeps.append)
+    ticks = iter((0.0, 0.0, 1.0, 1.0, 2.0, 2.0))
+    monkeypatch.setattr(cli_control_plane, "monotonic", lambda: next(ticks))
+
+    payload = cli_control_plane._runtime_reconcile_until(
+        ControlPlane(), args, recovery_mode="execute"
+    )
+
+    assert payload["state"] == "recovery-executed"
+    assert payload["outcome"] == "succeeded"
+    assert payload["maintenance_attempts"] == 3
+    assert sleeps == [1.0, 1.0]
+
+
+def test_runtime_reconcile_until_rejects_non_lane_busy_non_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+
+    args = cli_control_plane._parser().parse_args(
+        [
+            "runtime-reconcile-until",
+            "--enable",
+            "--target-type",
+            "circuit",
+            "--target-id",
+            "target-a",
+            "--expected-action",
+            "probe-circuit",
+        ]
+    )
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_runtime_reconcile_once",
+        lambda *a, **k: {"status": "ok", "state": "no-action", "outcome": "no-action"},
+    )
+
+    with pytest.raises(RuntimeError, match="neither executed nor lane-busy"):
+        cli_control_plane._runtime_reconcile_until(
+            ControlPlane(), args, recovery_mode="execute"
+        )
+
+
 def test_runtime_reconcile_service_detaches_a_stalled_turn_at_database_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Lock, Thread
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Protocol, cast
 from urllib.request import Request, urlopen
 
@@ -439,6 +439,28 @@ def _parser() -> argparse.ArgumentParser:
     runtime_serve.add_argument("--limit", type=int, default=100)
     runtime_serve.add_argument("--interval-seconds", type=float, default=30.0)
     runtime_serve.add_argument("--json", action="store_true")
+    runtime_until = subcommands.add_parser(
+        "runtime-reconcile-until",
+        help="wait boundedly for one exact recovery lane and execute exactly once",
+    )
+    runtime_until.add_argument("--enable", action="store_true")
+    runtime_until.add_argument("--controller-id", default="m1-runtime-reconcile-maintenance")
+    runtime_until.add_argument("--owner-id", default="runtime-reconcile-maintenance")
+    runtime_until.add_argument("--worker-id", default="runtime-recovery-executor")
+    runtime_until.add_argument("--lease-seconds", type=int, default=90)
+    runtime_until.add_argument("--action-lease-seconds", type=int, default=30)
+    runtime_until.add_argument("--heartbeat-lease-seconds", type=int, default=30)
+    runtime_until.add_argument("--limit", type=int, default=100)
+    runtime_until.add_argument("--target-type", choices=("job", "circuit"), required=True)
+    runtime_until.add_argument("--target-id", required=True)
+    runtime_until.add_argument(
+        "--expected-action",
+        choices=tuple(action.value for action in RecoveryActionType),
+        required=True,
+    )
+    runtime_until.add_argument("--max-wait-seconds", type=float, default=45.0)
+    runtime_until.add_argument("--retry-interval-seconds", type=float, default=1.0)
+    runtime_until.add_argument("--json", action="store_true")
     qualification_status = subcommands.add_parser(
         "qualification-status",
         help="read current rolling qualification progress and last breaker",
@@ -1764,6 +1786,50 @@ def _raise_if_runtime_reconcile_stopped(
         raise RuntimeError("runtime reconcile stop requested")
 
 
+def _runtime_reconcile_until(
+    control_plane: _RuntimeReconcileControlPlane,
+    args: argparse.Namespace,
+    *,
+    recovery_mode: str,
+) -> dict[str, object]:
+    """Boundedly wait through probe-lane contention, never through other states."""
+    if recovery_mode != "execute":
+        raise ValueError("bounded exact recovery requires execute mode")
+    if args.max_wait_seconds <= 0 or args.retry_interval_seconds <= 0:
+        raise ValueError("maintenance wait and retry interval must be positive")
+    if args.retry_interval_seconds > args.max_wait_seconds:
+        raise ValueError("maintenance retry interval exceeds the wait budget")
+    if args.lease_seconds <= args.max_wait_seconds:
+        raise ValueError("controller lease must outlive the maintenance wait budget")
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id=args.controller_id,
+        owner_id=args.owner_id,
+        lease_seconds=args.lease_seconds,
+        now=datetime.now(UTC),
+    )
+    deadline = monotonic() + args.max_wait_seconds
+    attempts = 0
+    while True:
+        if attempts and monotonic() >= deadline:
+            raise TimeoutError("exact recovery lane remained busy through the wait budget")
+        attempts += 1
+        result = _runtime_reconcile_once(
+            control_plane,
+            args,
+            controller=controller,
+            recovery_mode=recovery_mode,
+        )
+        if result.get("state") == "recovery-executed" and result.get("outcome") == "succeeded":
+            return {**result, "maintenance_attempts": attempts}
+        if result.get("state") != "deferred" or result.get("outcome") != "worker-lane-busy":
+            raise RuntimeError("exact recovery was neither executed nor lane-busy")
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("exact recovery lane remained busy through the wait budget")
+        sleep(min(args.retry_interval_seconds, remaining))
+
+
 async def _run_runtime_reconcile_service(
     control_plane: _RuntimeReconcileControlPlane,
     args: argparse.Namespace,
@@ -1854,6 +1920,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "render-rollout",
         "runtime-reconcile-once",
         "runtime-reconcile-serve",
+        "runtime-reconcile-until",
         "qualification-serve",
     }
     if args.command in requires_enable and not args.enable:
@@ -2076,7 +2143,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         control_plane = _control_plane_from_env()
     except DatabaseRoleContractError as error:
-        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+        if args.command in {
+            "runtime-reconcile-once",
+            "runtime-reconcile-serve",
+            "runtime-reconcile-until",
+        }:
             print(f"runtime reconciliation unavailable: {error}", file=sys.stderr)
         else:
             print(f"control-plane command unavailable: {error}", file=sys.stderr)
@@ -2224,6 +2295,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     as_json=args.json,
                 )
                 return 130
+            _write(result, as_json=args.json)
+            return 0
+        if args.command == "runtime-reconcile-until":
+            verify_daemon_database_role(
+                control_plane._connection_factory,
+                "runtime-controller",
+                expected_database=_required_expected_database_from_env(),
+            )
+            result = _runtime_reconcile_until(
+                control_plane,
+                args,
+                recovery_mode=Settings().runtime_recovery_mode,
+            )
             _write(result, as_json=args.json)
             return 0
         if args.command == "preflight":
@@ -2502,13 +2586,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"runtime observe verification failed: {error}", file=sys.stderr)
         return 1
     except DatabaseRoleContractError as error:
-        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+        if args.command in {
+            "runtime-reconcile-once",
+            "runtime-reconcile-serve",
+            "runtime-reconcile-until",
+        }:
             print(f"runtime reconciliation unavailable: {error}", file=sys.stderr)
         else:
             print(f"control-plane command unavailable: {error}", file=sys.stderr)
         return 1
     except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
-        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+        if args.command in {
+            "runtime-reconcile-once",
+            "runtime-reconcile-serve",
+            "runtime-reconcile-until",
+        }:
             detail = _runtime_safe_text(error)
             print(f"runtime reconciliation unavailable: {detail}", file=sys.stderr)
         else:

@@ -358,3 +358,230 @@ def test_machine_update_allows_only_explicit_release_and_database_budget_overlay
             target_image="registry.fly.io/example:new",
             update_env_from_fly=("MODE",),
         )
+
+
+def test_runtime_maintenance_replaces_daemon_without_starting_a_second_python() -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        render_runtime_recovery_maintenance_payload,
+    )
+
+    current = _machine()
+    current_config = current["config"]
+    assert isinstance(current_config, dict)
+    current_config["env"] = {
+        "POLYARB_RUNTIME_RECOVERY_MODE": "observe-only",
+        "POLYARB_DB_POOL_MAX_SIZE": "1",
+    }
+    current_config["init"] = {
+        "cmd": [
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "runtime-reconcile-serve",
+            "--enable",
+            "--interval-seconds",
+            "30",
+            "--json",
+        ]
+    }
+
+    payload, proof = render_runtime_recovery_maintenance_payload(
+        current_machine=current,
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_type="circuit",
+        target_id="structure:window:normalize:event_tags:177",
+        expected_action="probe-circuit",
+        controller_id="m1-runtime-reconciler-maintenance-test",
+    )
+
+    assert payload["current_version"] == current["instance_id"]
+    config = payload["config"]
+    assert config["guest"]["memory_mb"] == 256
+    assert config["restart"] == {"policy": "no"}
+    assert config["env"]["POLYARB_RUNTIME_RECOVERY_MODE"] == "execute"
+    assert config["init"]["cmd"] == [
+        "python",
+        "-m",
+        "polyarb.cli_control_plane",
+        "runtime-reconcile-until",
+        "--enable",
+        "--controller-id",
+        "m1-runtime-reconciler-maintenance-test",
+        "--owner-id",
+        "m1-runtime-reconciler-maintenance-test",
+        "--target-type",
+        "circuit",
+        "--target-id",
+        "structure:window:normalize:event_tags:177",
+        "--expected-action",
+        "probe-circuit",
+        "--max-wait-seconds",
+        "45",
+        "--retry-interval-seconds",
+        "1",
+        "--json",
+    ]
+    assert proof["execution_model"] == "replace-resident-process"
+    assert proof["restore_required"] is True
+    assert "env" not in proof
+
+
+def test_runtime_maintenance_rejects_non_controller_or_non_observe_baseline() -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_runtime_recovery_maintenance_payload,
+    )
+
+    current = _machine()
+    with pytest.raises(FlyMachineUpdateContractError, match="runtime controller app"):
+        render_runtime_recovery_maintenance_payload(
+            current_machine=current,
+            expected_app="polyarb-control-worker-m1",
+            expected_machine_id="6e82036dce4958",
+            target_type="circuit",
+            target_id="structure:window:normalize:event_tags:177",
+            expected_action="probe-circuit",
+            controller_id="maintenance-a",
+        )
+
+    config = current["config"]
+    assert isinstance(config, dict)
+    config["env"] = {"POLYARB_RUNTIME_RECOVERY_MODE": "execute"}
+    with pytest.raises(FlyMachineUpdateContractError, match="observe-only"):
+        render_runtime_recovery_maintenance_payload(
+            current_machine=current,
+            expected_app="polyarb-runtime-controller-m1",
+            expected_machine_id="6e82036dce4958",
+            target_type="circuit",
+            target_id="structure:window:normalize:event_tags:177",
+            expected_action="probe-circuit",
+            controller_id="maintenance-a",
+        )
+
+
+def test_runtime_restore_requires_exact_maintenance_config_and_restores_baseline() -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_runtime_recovery_maintenance_payload,
+        render_runtime_recovery_restore_payload,
+    )
+
+    baseline = _machine()
+    baseline_config = baseline["config"]
+    assert isinstance(baseline_config, dict)
+    baseline_config["env"] = {
+        "POLYARB_RUNTIME_RECOVERY_MODE": "observe-only",
+        "POLYARB_DB_POOL_MAX_SIZE": "1",
+    }
+    baseline_config["init"] = {
+        "cmd": [
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "runtime-reconcile-serve",
+            "--enable",
+            "--interval-seconds",
+            "30",
+            "--json",
+        ]
+    }
+    maintenance_payload, _ = render_runtime_recovery_maintenance_payload(
+        current_machine=baseline,
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_type="circuit",
+        target_id="structure:window:normalize:event_tags:177",
+        expected_action="probe-circuit",
+        controller_id="maintenance-a",
+    )
+    maintenance = {
+        "id": baseline["id"],
+        "instance_id": "01M14S8MAINTENANCE000000000",
+        "region": baseline["region"],
+        "state": "stopped",
+        "config": deepcopy(maintenance_payload["config"]),
+    }
+
+    restore, proof = render_runtime_recovery_restore_payload(
+        baseline_machine=baseline,
+        maintenance_machine=maintenance,
+        maintenance_payload=maintenance_payload,
+        expected_machine_id="6e82036dce4958",
+    )
+
+    assert restore["current_version"] == maintenance["instance_id"]
+    assert restore["config"] == baseline["config"]
+    assert proof["status"] == "restore-rendered"
+    assert proof["baseline_version"] == baseline["instance_id"]
+    assert proof["maintenance_version"] == maintenance["instance_id"]
+
+    drifted = deepcopy(maintenance)
+    drifted["config"]["guest"]["memory_mb"] = 512
+    with pytest.raises(FlyMachineUpdateContractError, match="maintenance Machine config"):
+        render_runtime_recovery_restore_payload(
+            baseline_machine=baseline,
+            maintenance_machine=drifted,
+            maintenance_payload=maintenance_payload,
+            expected_machine_id="6e82036dce4958",
+        )
+
+
+def test_runtime_maintenance_outcome_requires_new_succeeded_exact_action() -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_runtime_recovery_maintenance_payload,
+        verify_runtime_recovery_maintenance_outcome,
+    )
+
+    baseline = _machine()
+    config = baseline["config"]
+    assert isinstance(config, dict)
+    config["env"] = {"POLYARB_RUNTIME_RECOVERY_MODE": "observe-only"}
+    config["init"] = {"cmd": list((
+        "python", "-m", "polyarb.cli_control_plane", "runtime-reconcile-serve",
+        "--enable", "--interval-seconds", "30", "--json",
+    ))}
+    payload, _ = render_runtime_recovery_maintenance_payload(
+        current_machine=baseline,
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_type="circuit",
+        target_id="structure:window:normalize:event_tags:177",
+        expected_action="probe-circuit",
+        controller_id="maintenance-unique-a",
+    )
+    old = {
+        "recovery_actions": {"items": [{
+            "action_id": "old-action", "target_id": "structure:window:normalize:event_tags:177",
+            "action_type": "probe-circuit", "state": "completed", "result_code": "succeeded",
+        }]}
+    }
+    new_action = {
+        "action_id": "new-action", "target_id": "structure:window:normalize:event_tags:177",
+        "action_type": "probe-circuit", "state": "completed", "result_code": "succeeded",
+    }
+
+    proof = verify_runtime_recovery_maintenance_outcome(
+        before_status=old,
+        after_status={
+            "recovery_actions": {
+                "items": [new_action, *old["recovery_actions"]["items"]]
+            }
+        },
+        maintenance_payload=payload,
+    )
+    assert proof == {
+        "status": "maintenance-outcome-verified",
+        "action_id": "new-action",
+        "action_type": "probe-circuit",
+        "target_id_sha256": proof["target_id_sha256"],
+        "result_code": "succeeded",
+    }
+
+    with pytest.raises(FlyMachineUpdateContractError, match="new succeeded exact action"):
+        verify_runtime_recovery_maintenance_outcome(
+            before_status=old,
+            after_status=old,
+            maintenance_payload=payload,
+        )

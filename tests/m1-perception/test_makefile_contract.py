@@ -161,6 +161,10 @@ def test_make_runtime_policy_replay_is_read_only() -> None:
             "runtime-reconcile-serve",
             "uv run python -m polyarb.cli_control_plane runtime-reconcile-serve --enable",
         ),
+        (
+            "runtime-reconcile-until",
+            "uv run python -m polyarb.cli_control_plane runtime-reconcile-until --enable",
+        ),
     ],
 )
 def test_make_runtime_controller_targets_are_wired(target: str, expected: str) -> None:
@@ -178,7 +182,11 @@ def test_make_runtime_controller_targets_are_wired(target: str, expected: str) -
 
 
 def test_make_runtime_mutation_target_has_enable_guard() -> None:
-    for target in ("runtime-reconcile-once", "runtime-reconcile-serve"):
+    for target in (
+        "runtime-reconcile-once",
+        "runtime-reconcile-until",
+        "runtime-reconcile-serve",
+    ):
         result = subprocess.run(
             ["make", target],
             capture_output=True,
@@ -277,6 +285,82 @@ def test_make_verify_machine_update_uses_local_redacted_verifier() -> None:
     assert '--expected-region "ams"' in result.stdout
     assert "flyctl" not in result.stdout.lower()
     assert "curl" not in result.stdout.lower()
+
+
+def test_make_runtime_maintenance_uses_process_replacement_renderer() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-render-runtime-maintenance",
+            "current_machine=/tmp/current.json",
+            "expected_app=polyarb-runtime-controller-m1",
+            "machine_id=6e82036dce4958",
+            "target_type=circuit",
+            "target_id=structure:window:normalize:event_tags:177",
+            "expected_action=probe-circuit",
+            "controller_id=maintenance-a",
+            "output=/tmp/maintenance.json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "render-runtime-maintenance" in result.stdout
+    assert '--target-id "structure:window:normalize:event_tags:177"' in result.stdout
+    assert "flyctl" not in result.stdout.lower()
+    assert "ssh" not in result.stdout.lower()
+
+
+def test_make_runtime_restore_uses_saved_baseline_renderer() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-render-runtime-restore",
+            "baseline_machine=/tmp/baseline.json",
+            "maintenance_machine=/tmp/maintenance-machine.json",
+            "maintenance_payload=/tmp/maintenance.json",
+            "machine_id=6e82036dce4958",
+            "output=/tmp/restore.json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "render-runtime-restore" in result.stdout
+    assert '--baseline-machine "/tmp/baseline.json"' in result.stdout
+    assert "flyctl" not in result.stdout.lower()
+    assert "ssh" not in result.stdout.lower()
+
+
+def test_make_runtime_maintenance_outcome_requires_before_and_after_artifacts() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-verify-runtime-maintenance-outcome",
+            "before_status=/tmp/before.json",
+            "after_status=/tmp/after.json",
+            "maintenance_payload=/tmp/maintenance.json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "verify-runtime-maintenance-outcome" in result.stdout
+    assert '--before-status "/tmp/before.json"' in result.stdout
+    assert '--after-status "/tmp/after.json"' in result.stdout
+    assert "flyctl" not in result.stdout.lower()
 
 
 def test_make_runtime_status_is_read_only_dry_run() -> None:
