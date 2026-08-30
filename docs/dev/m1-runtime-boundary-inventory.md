@@ -244,6 +244,9 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Integrated durable effects: fault matrix v3 contains 16 cases, including
   transport replacement, pre-I/O timeout, service interruption and recovery
   episode isolation.
+- Climb orchestration: every explicit pytest node selector across all gate
+  profiles must pass a repository-wide `--collect-only` contract before a
+  renamed test can become a late single-point gate failure.
 - Half-open interruption continuity:
   `test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay` proves
   immediate replacement claim, preserved open-circuit identity and unchanged

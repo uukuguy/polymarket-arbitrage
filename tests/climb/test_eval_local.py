@@ -221,7 +221,7 @@ def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() ->
             "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds",
             "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_stale_heartbeat_drains_blocking_read_before_return",
             "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_external_cancellation_drains_blocking_read_before_return",
-            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success",
+            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_scheduler_waits_for_bounded_recovery",
             "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_stale_heartbeat_cancels_owner_and_drains_reader",
             "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt",
             "tests/m1-perception/test_transactional_quote_worker.py::test_quote_certifier_scheduler_cancellation_drains_terminal_thread",
@@ -258,6 +258,44 @@ def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() ->
             )
         )
     }
+
+
+def test_every_explicit_climb_pytest_node_id_is_collectable() -> None:
+    profiles = (
+        eval_local.GATE_COMMANDS,
+        eval_local.LIVING_DOC_CONTRACT_GATE_COMMANDS,
+        eval_local.OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS,
+        eval_local.OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS,
+        eval_local.L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS,
+        eval_local.CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS,
+        eval_local.TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS,
+        eval_local.BUDGETED_TRANSACTIONAL_CLOUD_INPUT_GATE_COMMANDS,
+        eval_local.EVENT_DRIVEN_RUNTIME_SELF_HEALING_GATE_COMMANDS,
+        eval_local.FENCED_DEADLINE_RECONCILER_GATE_COMMANDS,
+        eval_local.ROLLING_QUALIFICATION_CERTIFICATES_GATE_COMMANDS,
+        eval_local.BOUNDED_OPERATOR_TRUTH_SURFACES_GATE_COMMANDS,
+        eval_local.DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS,
+    )
+    node_ids = sorted(
+        {
+            argument
+            for profile in profiles
+            for command in profile.values()
+            for argument in command
+            if "::" in argument
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", *node_ids],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout
 
 
 def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() -> None:
@@ -420,19 +458,19 @@ def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> 
             "run",
             "pytest",
             "tests/m1-perception/test_control_plane_qualification.py::test_contained_retry_keeps_epoch_accumulating",
-            "tests/m1-perception/test_control_plane_qualification.py::test_integrity_or_expired_lease_invalidates_exact_epoch",
+            "tests/m1-perception/test_control_plane_qualification.py::test_integrity_invalidates_but_expired_lease_pauses_same_epoch",
             "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_opens_new_epoch_automatically",
             "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[policy_version-policy-b]",
             "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[release_id-release-b]",
             "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[config_id-config-b]",
             "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[role_identity-value3]",
             "tests/m1-perception/test_control_plane_qualification.py::test_exact_24_hour_boundary_qualifies_only_with_coverage",
-            "tests/m1-perception/test_control_plane_qualification.py::test_gap_equal_to_limit_is_allowed_but_gap_over_limit_breaks",
-            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[evidence.gap]",
-            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[freshness.structure]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_gap_equal_to_limit_is_allowed_but_gap_over_limit_pauses",
+            "tests/m1-perception/test_control_plane_qualification.py::test_blocking_reason_matrix_pauses_same_epoch[evidence.gap]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_blocking_reason_matrix_pauses_same_epoch[freshness.structure]",
             "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[integrity.conflict]",
-            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[lease.expired]",
-            "tests/m1-perception/test_control_plane_qualification.py::test_unresolved_p1_and_three_freshness_classes_break",
+            "tests/m1-perception/test_control_plane_qualification.py::test_blocking_reason_matrix_pauses_same_epoch[lease.expired]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_unresolved_p1_and_three_freshness_classes_pause_without_reset",
             "tests/m1-perception/test_control_plane_qualification.py::test_contained_process_replacement_must_finish_within_slo",
             "tests/m1-perception/test_control_plane_qualification.py::test_duplicate_fact_is_idempotent_and_conflict_fails_closed",
             "tests/m1-perception/test_control_plane_qualification.py::test_terminal_epochs_replay_exact_fact_but_reject_new_mutation",
@@ -458,7 +496,7 @@ def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> 
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovery_restart_keeps_epoch_fact_history_local",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_same_batch_recovery_keeps_recovering_epoch_empty",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovering_observes_second_breaker_status_and_restart",
-            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_aging",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_freshness_reobserves_same_pointer_and_pauses_on_aging",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_is_canonical_idempotent_and_conflict_loud",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_api_rejects_forged_payload_and_bad_decision_types",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_db_rejects_direct_forgery_and_app_role_insert",
@@ -489,7 +527,7 @@ def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> 
             "pytest",
             "tests/m1-perception/test_control_plane_qualification_service.py::test_tick_cursor_is_total_ordered_and_crash_replay_is_exact",
             "tests/m1-perception/test_control_plane_qualification_service.py::test_virtual_26h_recovery_replay_seals_one_reproducible_certificate",
-            "tests/m1-perception/test_control_plane_qualification_service.py::test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_blocked_facts_and_confirmation_remain_in_the_same_epoch",
             "tests/m1-perception/test_control_plane_qualification_service.py::test_qualified_without_certificate_is_sealed_on_next_tick",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovery_restart_keeps_epoch_fact_history_local",
             "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovering_observes_second_breaker_status_and_restart",

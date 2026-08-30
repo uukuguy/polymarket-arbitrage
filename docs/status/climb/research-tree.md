@@ -4,8 +4,8 @@
 
 ## Session
 
-- Last cycle: 39
-- Next action: evaluate eight real-PostgreSQL normal turns for H-037
+- Last cycle: 40
+- Next action: rerun H-037 after repairing stale climb node IDs
 
 ## In flight
 
@@ -92,3 +92,4 @@
 - 20260829-120923-h-034: 100.0 (confirmed)
 - 20260829-121031-h-035: 100.0 (confirmed)
 - 20260829-124527-h-036: 100.0 (confirmed)
+- 20260830-001603-h-037: 80.0 (falsified)

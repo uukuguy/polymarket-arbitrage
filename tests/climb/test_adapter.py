@@ -83,11 +83,13 @@ def test_tracked_state_is_resumable_and_best_effort() -> None:
     in_flight = session["in_flight"]
     if in_flight is not None:
         assert by_id[in_flight["hypothesis_id"]]["status"] == "in-flight"
-    pending = [item for item in by_id.values() if item["status"] == "pending"]
-    if pending:
         assert session["next_action"]
-    else:
-        assert session["next_action"] == "rank next pending hypothesis"
+    pending = [item for item in by_id.values() if item["status"] == "pending"]
+    if in_flight is None:
+        if pending:
+            assert session["next_action"]
+        else:
+            assert session["next_action"] == "rank next pending hypothesis"
     assert "target_value:" in target
 
 

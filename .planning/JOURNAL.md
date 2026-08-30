@@ -11693,3 +11693,26 @@ adapter tests and a fresh full M1 gate pass.
 Then refactor the normal-turn fixture into a prepare/complete boundary and prove
 stale-owner rejection plus current-owner recovery for all eight nodes before
 adding heartbeat, progress, worker-exit and retry-budget attacks.
+
+### SESSION 342 — 2026-08-30 (climb selector drift fail-fast gate)
+
+- [FAILURE EVIDENCE] H-037 cycle 40 scored 80 because its restart gate failed
+  collection on a renamed test while planning, unit, integration and CLI all
+  passed. The falsified run remains append-only evidence of an orchestration
+  defect, not a product regression.
+- [ROOT CAUSE] Exact pytest node IDs were duplicated in `eval_local.py` and an
+  expected-dictionary test, but neither copy was checked against pytest's live
+  collection graph. A 05.6-209 rename therefore left a dormant selector.
+- [SYSTEMIC AUDIT] A new repository-wide collect-only contract found nine stale
+  selectors across runtime restart and qualification v1→v2 gates. All were
+  mapped to their current semantic equivalents; none was silently removed.
+- [RECOVERY] The collection contract and 46 climb adapter/cycle regressions pass.
+  H-037 is returned to in-flight and must be confirmed by a fresh exact-HEAD run.
+- [STATE ORDERING] The resumed in-flight state exposed a contradictory adapter
+  assertion that demanded `rank next pending hypothesis` whenever no pending
+  item existed. Validation now gives in-flight work precedence and requires its
+  concrete next action; ranking applies only when neither state exists.
+
+[NEXT] Commit Plan 05.6-221, rerun H-037 on the repaired exact HEAD, preserve
+both cycle 40 and its confirming successor, then begin the eight-node stale-owner
+attack adapter.

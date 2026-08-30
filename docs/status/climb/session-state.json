@@ -2,7 +2,7 @@
   "in_flight": {
     "hypothesis_id": "H-037"
   },
-  "last_cycle": 39,
-  "next_action": "evaluate eight real-PostgreSQL normal turns for H-037",
+  "last_cycle": 40,
+  "next_action": "rerun H-037 after repairing stale climb node IDs",
   "session": "2026-07-31-m1-self-healing-structure"
 }
