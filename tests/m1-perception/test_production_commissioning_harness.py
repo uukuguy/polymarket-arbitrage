@@ -13,6 +13,8 @@ from polyarb.control_plane.production_commissioning_harness import (
     CommissioningHarnessError,
     run_clob_429_commissioning,
     run_clob_missing_leg_commissioning,
+    run_gamma_malformed_commissioning,
+    run_gamma_timeout_commissioning,
     run_heartbeat_outage_commissioning,
     run_normalization_payload_corrupt_commissioning,
     run_progress_stall_commissioning,
@@ -910,6 +912,40 @@ def test_clob_429_harness_records_typed_failure_then_recovers(
         "status": "pass",
     }
     assert (root / "attacks/quote-batch/clob-429/proof.json").is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+    assert databases == []
+
+
+@pytest.mark.parametrize(
+    ("attack_id", "runner"),
+    (
+        ("gamma-timeout", run_gamma_timeout_commissioning),
+        ("gamma-malformed-page", run_gamma_malformed_commissioning),
+    ),
+)
+def test_gamma_provider_harness_records_typed_failure_then_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+    attack_id: str,
+    runner,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / attack_id
+
+    result = runner(root=root, release_id=RELEASE, config_id=CONFIG)
+
+    assert result == {
+        "attack_id": attack_id,
+        "execution_scope": "disposable-exact-image",
+        "node_count": 1,
+        "proof_count": 1,
+        "status": "pass",
+    }
+    assert (root / f"attacks/structure-fetch/{attack_id}/proof.json").is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"

@@ -142,7 +142,7 @@ ATTACK_CONTRACTS: Mapping[str, AttackContract] = MappingProxyType(
                 detector="structure-fetch retryable terminal fact and incident",
                 recovery_action="replace the transport generation and retry durably",
                 postcondition="a newer source page receipt is committed",
-                execution_scope="production-canary",
+                execution_scope="disposable-exact-image",
             ),
             _attack(
                 "gamma-malformed-page",
@@ -151,7 +151,7 @@ ATTACK_CONTRACTS: Mapping[str, AttackContract] = MappingProxyType(
                 detector="page validation rejects the response before upload",
                 recovery_action="remove the scoped response and retry the page",
                 postcondition="the validated page receipt advances exactly once",
-                execution_scope="production-canary",
+                execution_scope="disposable-exact-image",
             ),
             _attack(
                 "source-receipt-gap",

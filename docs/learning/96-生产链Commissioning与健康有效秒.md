@@ -420,3 +420,20 @@ runtime 无法判断应该等待 provider 还是调查请求缺陷。反过来�
 commissioning 在真实 worker 边界注入一次该 typed error：失败 epoch 无 R2 对象、无 Quote
 receipt；清理后由 policy-due replacement 重读同一 immutable batch，完成 1/1 覆盖并只写一个
 receipt。这比把旧 SQLite `candidate` 429 证据别名成新 `quote-batch` 证据更严格。
+
+### Gamma timeout 和 malformed page 为什么可以共用恢复链，但不能共用错误类？
+
+两者的恢复动作相同：废弃当前长连接 transport generation，让同一 durable source-page job
+按中央 policy 重试。但诊断含义不同：timeout 表示 provider 在 I/O 边界没有按时响应；
+`GammaMalformedResponseError` 表示 HTTP 200 已返回，却无法解码为合法 JSON。如果只写统一
+`GammaProviderError`，操作员无法区分网络容量问题与 CDN/cache 内容损坏。
+
+malformed 错误只保留 status code、归一化 content type 和 body byte count，不保留 body。
+`TransactionalStructureSourceWorker` 对两种类型都记录精确 `error_class`，尝试
+`reset_transport()`，然后进入同一 durable retry/circuit/incident 链。这是“处理预案共用”，
+不是“故障原因合并”。
+
+exact-image commissioning 分别执行两次独立数据库攻击。每次第一 epoch 都要同时证明：
+transport reset 正好一次、R2 对象为零、source-page receipt 为零；清理后的 policy-due epoch
+对同一 job 成功一次，且最终只有一个 page receipt。这两项完成后，commissioning 的
+18 类 attack 都拥有新 PostgreSQL DAG 的可执行 exact-image 证据。

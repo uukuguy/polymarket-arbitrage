@@ -12731,3 +12731,23 @@ climb H-055. Then implement Gamma timeout and malformed-page at the PostgreSQL
 [NEXT] Commit H-055 confirmation state without protected user files. Implement
 Gamma timeout and malformed-page on the real PostgreSQL `structure-fetch`
 worker boundary, with exact-image commissioning and no legacy evidence alias.
+
+### SESSION 382 — 2026-08-30 (Gamma provider attacks closed locally)
+
+- [SCOPE TRUTH] The remaining Gamma contracts now target the real PostgreSQL
+  `structure-fetch` worker; no SQLite `discovery` receipt is imported or aliased.
+- [TYPED CAUSES] Timeout remains `TimeoutError`; malformed HTTP 200 remains
+  body-free `GammaMalformedResponseError`. Shared recovery does not erase the
+  diagnostic distinction.
+- [COMMISSIONING] Each independent migrated database proved one transport reset,
+  zero partial R2/page receipt, central due-at retry of the same source-page job,
+  one recovered artifact/receipt, closed circuit and resolved incident.
+- [MATRIX] All 18 production commissioning attacks now have executable
+  disposable exact-image evidence on the new PostgreSQL DAG.
+- [ORBSTACK] Global Docker context remained `orbstack`; no Colima mutation.
+- [BOUNDARY] No production provider/DB, Fly/SSH/deploy, Machine, live canary or
+  qualification mutation occurred.
+
+[NEXT] Commit Plan 05.6-245 without protected user files, pass exact-HEAD and
+climb H-056, then assemble and verify the complete 18-attack commissioning
+envelope before deciding whether any further production mutation is necessary.

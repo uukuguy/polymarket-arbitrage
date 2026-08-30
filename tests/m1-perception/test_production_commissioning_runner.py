@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -195,7 +195,16 @@ def test_disposable_runner_preserves_attack_and_cleanup_failures(tmp_path: Path)
     ]
 
 
-def test_disposable_runner_rejects_production_canary_contract(tmp_path: Path) -> None:
+def test_disposable_runner_rejects_production_canary_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    synthetic_contracts = dict(ATTACK_CONTRACTS)
+    synthetic_contracts["gamma-timeout"] = replace(
+        ATTACK_CONTRACTS["gamma-timeout"],
+        execution_scope="production-canary",
+    )
+    monkeypatch.setattr(runner_module, "ATTACK_CONTRACTS", synthetic_contracts)
     with pytest.raises(CommissioningAttackError, match="scope-production-canary"):
         run_disposable_attack(
             identity=_identity(node_id="structure-fetch", attack_id="gamma-timeout"),

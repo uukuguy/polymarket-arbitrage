@@ -63,6 +63,7 @@
 - **H-053** [confirmed]: A canonical oldest-batch Quote freshness gate can block Opportunity publication before R2 or business writes, then let fresh Structure and Quote lineage publish exactly once and resolve one stable cross-generation freshness incident.
 - **H-054** [confirmed]: The transactional Quote worker must reject a CLOB response that omits any requested token before R2 or receipt publication, then recover the same immutable batch through the shared durable retry policy after complete coverage is restored.
 - **H-055** [confirmed]: A CLOB HTTP 429 can become a body-free typed provider boundary, leave one Quote batch durably retryable with no R2 or receipt side effect, then recover the same immutable input at the shared policy due-at.
+- **H-056** [testing]: Gamma timeout and body-free malformed-response failures can be commissioned on the real PostgreSQL Structure source worker, reset the transport generation, leave no R2/page receipt, and recover the exact source page at the shared retry due-at.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

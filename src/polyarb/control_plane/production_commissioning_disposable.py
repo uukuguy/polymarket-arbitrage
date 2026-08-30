@@ -14,6 +14,7 @@ from botocore.exceptions import ReadTimeoutError
 from psycopg.types.json import Jsonb
 
 from polyarb.clients.clob_client import ClobRateLimitError
+from polyarb.clients.gamma_client import EventPage, GammaMalformedResponseError
 
 from .models import JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
 from .opportunity_worker import TransactionalOpportunityCertifier
@@ -53,6 +54,7 @@ from .structure_artifact import (
     canonical_structure_shard_bytes,
     canonical_structure_shard_manifest_bytes,
 )
+from .structure_source import TransactionalStructureSourceWorker
 from .structure_worker import (
     StructureNormalizationInputInvalid,
     TransactionalStructureCertifier,
@@ -4279,6 +4281,296 @@ class StaleQuotePointerCommissioningAdapter:
         )
 
 
+class _CommissioningGammaReader:
+    """One exact Gamma page boundary with reversible typed failure modes."""
+
+    def __init__(self) -> None:
+        self.mode: str | None = None
+        self.calls = 0
+        self.reset_calls = 0
+
+    async def fetch_active_event_page(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> EventPage:
+        self.calls += 1
+        if cursor is not None or limit != 100:
+            raise DisposableCommissioningError("gamma-provider-request-shape")
+        if self.mode == "timeout":
+            raise TimeoutError("gamma-provider-timeout")
+        if self.mode == "malformed":
+            raise GammaMalformedResponseError(
+                status_code=200,
+                content_type="text/html; charset=utf-8",
+                body_bytes=17,
+            )
+        return EventPage(
+            events=(
+                {
+                    "id": "commissioning-event",
+                    "markets": [
+                        {
+                            "id": "commissioning-market",
+                            "active": True,
+                            "closed": False,
+                        }
+                    ],
+                },
+            ),
+            requested_cursor=cursor,
+            next_cursor=None,
+            completed=True,
+            started_at_ms=10,
+            finished_at_ms=20,
+        )
+
+    async def fetch_active_market_page(self, cursor: str | None, limit: int) -> object:
+        raise DisposableCommissioningError("unexpected-gamma-market-page")
+
+    async def fetch_markets_by_ids(
+        self,
+        market_ids: tuple[str, ...],
+    ) -> tuple[dict[str, object], ...]:
+        raise DisposableCommissioningError("unexpected-gamma-exact-market-page")
+
+    async def reset_transport(self) -> None:
+        self.reset_calls += 1
+
+    async def aclose(self) -> None:
+        return None
+
+
+class GammaProviderCommissioningAdapter:
+    """Exercise typed Gamma failures through the real Structure source worker."""
+
+    _ERRORS: dict[str, tuple[str, type[Exception]]] = {
+        "gamma-timeout": ("timeout", TimeoutError),
+        "gamma-malformed-page": ("malformed", GammaMalformedResponseError),
+    }
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._now = self._started_at
+        self._objects = _DisposableObjectStore()
+        self._gamma = _CommissioningGammaReader()
+        self._job_key: str | None = None
+        self._retry_due_at: datetime | None = None
+        self._failure_event_id: str | None = None
+        self._success_event_id: str | None = None
+        self._artifact_key: str | None = None
+
+    @classmethod
+    def _require_identity(cls, identity: AttackIdentity) -> None:
+        if identity.attack_id not in cls._ERRORS or identity.node_id != "structure-fetch":
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _worker(self, suffix: str) -> TransactionalStructureSourceWorker:
+        return TransactionalStructureSourceWorker(
+            control_plane=self._control_plane,
+            gamma=self._gamma,  # type: ignore[arg-type]
+            object_client=self._objects,
+            bucket="commissioning-structure",
+            worker_id=f"commissioning:gamma-provider:{suffix}",
+            now=lambda: self._now,
+        )
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        window_key = f"commissioning:{identity.experiment_id}:source"
+        spec = self._control_plane.admit_structure_source_window(
+            window_key=window_key,
+            now=self._started_at,
+        )[0]
+        self._job_key = spec.job_key
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"job:{spec.job_key}:input:{window_key}",
+            occurred_at=self._started_at,
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        mode, error_type = self._ERRORS[identity.attack_id]
+        self._gamma.mode = mode
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"provider:gamma:{mode}:{error_type.__name__}",
+            occurred_at=self._started_at + timedelta(seconds=1),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "gamma-provider-job-missing")
+        _mode, error_type = self._ERRORS[identity.attack_id]
+        self._now = self._started_at + timedelta(seconds=2)
+        result = asyncio.run(self._worker("fault").run_once())
+        if result.job_key != job_key or result.outcome != "retryable":
+            raise DisposableCommissioningError("gamma-provider-not-retryable")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            attempt = connection.execute(
+                """
+                SELECT state, error_class FROM m1_job_attempts
+                WHERE job_key=%s ORDER BY lease_epoch DESC LIMIT 1
+                """,
+                (job_key,),
+            ).fetchone()
+            event = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key=%s AND kind='job.retryable-failed'
+                ORDER BY occurred_at DESC LIMIT 1
+                """,
+                (job_key,),
+            ).fetchone()
+            job = connection.execute(
+                "SELECT next_attempt_at FROM m1_jobs WHERE job_key=%s",
+                (job_key,),
+            ).fetchone()
+            receipt = connection.execute(
+                "SELECT count(*) FROM m1_structure_source_page_receipts WHERE job_key=%s",
+                (job_key,),
+            ).fetchone()
+        if (
+            attempt != ("retryable", error_type.__name__)
+            or event is None
+            or job is None
+            or job[0] is None
+            or receipt != (0,)
+            or self._objects._objects  # noqa: SLF001 - zero partial R2 proof
+            or self._gamma.reset_calls != 1
+        ):
+            raise DisposableCommissioningError("gamma-provider-detection-shape")
+        self._failure_event_id = str(event[0])
+        self._retry_due_at = job[0].astimezone(UTC)
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{self._failure_event_id}",
+            occurred_at=self._now,
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        due = self._need(self._retry_due_at, "gamma-provider-retry-due-missing")
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"durable-retry:{self._need(self._job_key, 'gamma-provider-job-missing')}",
+            occurred_at=due,
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        if self._objects._objects:  # noqa: SLF001 - zero partial R2 proof
+            raise DisposableCommissioningError("gamma-provider-partial-artifact")
+        self._gamma.mode = None
+        due = self._need(self._retry_due_at, "gamma-provider-retry-due-missing")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id="provider:gamma:transport-generation-restored",
+            occurred_at=due + timedelta(microseconds=1),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "gamma-provider-job-missing")
+        self._now = self._need(
+            self._retry_due_at, "gamma-provider-retry-due-missing"
+        ) + timedelta(seconds=1)
+        result = asyncio.run(self._worker("recovery").run_once())
+        if result.job_key != job_key or result.outcome != "succeeded":
+            raise DisposableCommissioningError("gamma-provider-recovery-outcome")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            event = connection.execute(
+                """
+                SELECT event_id FROM m1_job_runtime_events
+                WHERE job_key=%s AND kind='job.succeeded'
+                """,
+                (job_key,),
+            ).fetchone()
+            receipt = connection.execute(
+                """
+                SELECT artifact_key, record_count
+                FROM m1_structure_source_page_receipts WHERE job_key=%s
+                """,
+                (job_key,),
+            ).fetchone()
+        if event is None or receipt is None or receipt[1] != 1:
+            raise DisposableCommissioningError("gamma-provider-recovery-receipt")
+        self._success_event_id = str(event[0])
+        self._artifact_key = str(receipt[0])
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._success_event_id}",
+            occurred_at=self._now,
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "gamma-provider-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            state = connection.execute(
+                """
+                SELECT job.state, circuit.state, circuit.consecutive_failures,
+                       incident.state,
+                       (SELECT count(*) FROM m1_structure_source_page_receipts
+                        WHERE job_key=job.job_key)
+                FROM m1_jobs AS job
+                JOIN m1_job_circuits AS circuit USING (job_key)
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key='job-retry:' || job.job_key
+                WHERE job.job_key=%s
+                """,
+                (job_key,),
+            ).fetchone()
+        if state != ("succeeded", "closed", 0, "resolved", 1):
+            raise DisposableCommissioningError("gamma-provider-postcondition")
+        if self._gamma.calls != 2 or self._gamma.reset_calls != 1:
+            raise DisposableCommissioningError("gamma-provider-call-count")
+        key = self._need(self._artifact_key, "gamma-provider-artifact-key-missing")
+        if not self._objects.contains(key):
+            raise DisposableCommissioningError("gamma-provider-artifact-missing")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"postgres:m1_structure_source_page_receipts:{job_key}:records=1",
+            occurred_at=self._now + timedelta(seconds=1),
+        )
+
+
 class _CommissioningBooksReader:
     """One-shot CLOB boundary whose omission is explicit and reversible."""
 
@@ -5518,6 +5810,7 @@ def _postcondition_fact(connection: Any, lease: JobLease) -> str:
 
 __all__ = [
     "DisposableCommissioningError",
+    "GammaProviderCommissioningAdapter",
     "Clob429CommissioningAdapter",
     "ClobMissingLegCommissioningAdapter",
     "HeartbeatOutageCommissioningAdapter",

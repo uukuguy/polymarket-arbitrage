@@ -14,6 +14,7 @@ from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
     Clob429CommissioningAdapter,
     ClobMissingLegCommissioningAdapter,
+    GammaProviderCommissioningAdapter,
     HeartbeatOutageCommissioningAdapter,
     NormalizationPayloadCorruptCommissioningAdapter,
     ProgressStallCommissioningAdapter,
@@ -57,6 +58,8 @@ _R2_WRITE_TIMEOUT_ATTACK_ID: Final[str] = "r2-write-timeout"
 _STALE_QUOTE_POINTER_ATTACK_ID: Final[str] = "stale-quote-pointer"
 _CLOB_MISSING_LEG_ATTACK_ID: Final[str] = "clob-missing-leg"
 _CLOB_429_ATTACK_ID: Final[str] = "clob-429"
+_GAMMA_TIMEOUT_ATTACK_ID: Final[str] = "gamma-timeout"
+_GAMMA_MALFORMED_ATTACK_ID: Final[str] = "gamma-malformed-page"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -450,6 +453,42 @@ def run_clob_429_commissioning(
     )
 
 
+def run_gamma_timeout_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove one Gamma timeout resets transport and durably recovers."""
+
+    return _run_commissioning(
+        attack_id=_GAMMA_TIMEOUT_ATTACK_ID,
+        adapter_factory=GammaProviderCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("structure-fetch",),
+    )
+
+
+def run_gamma_malformed_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove one body-free malformed Gamma page durably recovers."""
+
+    return _run_commissioning(
+        attack_id=_GAMMA_MALFORMED_ATTACK_ID,
+        adapter_factory=GammaProviderCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("structure-fetch",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -470,6 +509,8 @@ def _parser() -> argparse.ArgumentParser:
         "stale-quote-pointer",
         "clob-missing-leg",
         "clob-429",
+        "gamma-timeout",
+        "gamma-malformed-page",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -498,6 +539,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "stale-quote-pointer": run_stale_quote_pointer_commissioning,
         "clob-missing-leg": run_clob_missing_leg_commissioning,
         "clob-429": run_clob_429_commissioning,
+        "gamma-timeout": run_gamma_timeout_commissioning,
+        "gamma-malformed-page": run_gamma_malformed_commissioning,
     }
     try:
         result = runners[args.command](
@@ -518,6 +561,8 @@ __all__ = [
     "run_heartbeat_outage_commissioning",
     "run_clob_missing_leg_commissioning",
     "run_clob_429_commissioning",
+    "run_gamma_malformed_commissioning",
+    "run_gamma_timeout_commissioning",
     "run_normalization_payload_corrupt_commissioning",
     "run_publication_pointer_conflict_commissioning",
     "run_r2_read_timeout_commissioning",
