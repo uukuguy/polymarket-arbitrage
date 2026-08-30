@@ -275,19 +275,35 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-046
   description: A failed Quote batch can leave its certification barrier incomplete
-    while opening one durable producer incident and publishing no pointer, after
-    which the policy-due fenced retry commits the missing receipt, resolves that
-    incident, and releases exactly one complete certification turn.
+    while opening one durable producer incident and publishing no pointer, after which
+    the policy-due fenced retry commits the missing receipt, resolves that incident,
+    and releases exactly one complete certification turn.
   parent_paradigm: deterministic-runtime-production-enablement
-  expected_lift: Prove quote-batch incompleteness blocks only the affected
-    generation, remains visible through the existing retry incident chain, and
-    recovers without a private barrier timeout, direct database mutation, or
-    partial Quote publication.
+  expected_lift: Prove quote-batch incompleteness blocks only the affected generation,
+    remains visible through the existing retry incident chain, and recovers without
+    a private barrier timeout, direct database mutation, or partial Quote publication.
   cost_h: 0.75
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T11:28:39+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 51
+    run: 20260830-033754-h-046
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
