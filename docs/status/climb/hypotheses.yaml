@@ -1,18 +1,35 @@
 hypotheses:
 - id: H-056
-  description: Gamma timeout and body-free malformed-response failures can be
-    commissioned on the real PostgreSQL Structure source worker, reset the
-    transport generation, leave no R2/page receipt, and recover the exact source
-    page at the shared retry due-at.
+  description: Gamma timeout and body-free malformed-response failures can be commissioned
+    on the real PostgreSQL Structure source worker, reset the transport generation,
+    leave no R2/page receipt, and recover the exact source page at the shared retry
+    due-at.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Close the final two provider attack gaps with config-bound new-DAG
     evidence, no legacy discovery alias, no provider body leakage, and one unique
     recovered source-page receipt per attack.
   cost_h: 1.0
   ranking: 1.0
-  status: testing
+  status: confirmed
   created_at: '2026-08-30T22:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 61
+    run: 20260830-114142-h-056
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-055
   description: A CLOB HTTP 429 can become a body-free typed provider boundary, leave
     one Quote batch durably retryable with no R2 or receipt side effect, then recover
