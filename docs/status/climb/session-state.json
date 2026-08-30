@@ -1,8 +1,6 @@
 {
-  "in_flight": {
-    "hypothesis_id": "H-040"
-  },
-  "last_cycle": 44,
-  "next_action": "rerun H-040 after unifying the control-plane schema revision authority",
+  "in_flight": null,
+  "last_cycle": 45,
+  "next_action": "rank next pending hypothesis",
   "session": "2026-07-31-m1-self-healing-structure"
 }

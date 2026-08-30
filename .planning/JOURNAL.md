@@ -11805,3 +11805,22 @@ budget attacks before any scoped production canary or qualification epoch.
 HEAD and preserve both climb cycles. After confirmation, execute all eight
 stale-owner proofs inside the immutable OrbStack-built image and continue the
 remaining shared disposable attack adapters.
+
+### SESSION 347 — 2026-08-30 (H-040 isolated harness confirmed)
+
+- [CLIMB H-040] Repaired exact-HEAD cycle 45 passed all nine deterministic
+  production-enablement gates at 100. Cycle 44 remains the 88.89 schema-drift
+  falsification and was not overwritten.
+- [DATABASE PROOF] The confirming integration node passed the single Alembic-head
+  contract, historical 026 adversarial matrix, scoped-role suites, runtime fault
+  matrix and commissioning normal/interrupted cleanup cases on real PostgreSQL.
+- [OUTPUT PROOF] Observe-only, zero-recovery-action, qualification identity,
+  restart-conflict and exact Make argv nodes all passed independently.
+- [BOUNDARY] H-040 proves executable local/exact-image capability; no production
+  write, provider call, Fly Machine action, SSH or Docker global-context mutation
+  occurred during confirmation.
+
+[NEXT] Commit the H-040 confirmation state. Run the full eight-node stale-owner
+commissioning target inside the next immutable runtime image built through
+OrbStack only, retain release/config-bound artifacts, then add heartbeat,
+progress-stall, worker-exit and retry-budget adapters to the same harness.
