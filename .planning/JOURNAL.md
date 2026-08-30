@@ -12494,3 +12494,25 @@ exact runtime image only after both timeout families are locally closed.
 full related regression, then confirm H-051 through climb cycle 56. Continue
 with the seven-node R2 write timeout contract before one combined exact-image
 rebuild.
+
+### SESSION 372 — 2026-08-30 (H-051 R2 read recovery confirmed)
+
+- [EXACT HEAD] Commit `66b6aa9b` passed the exact-revision build-only contract;
+  runtime image inputs matched HEAD, with no image build or push.
+- [CLIMB H-051] Cycle 56 passed all nine production-enablement gates at 100%;
+  integration passed 160 cases and `disaster_pattern=false`.
+- [STAGE-EXACT PROOF] Every one of the six R2-reading nodes recorded the exact
+  read stage on its provider-shaped timeout, with no contradictory commit-stage
+  failure evidence and no business receipt from the failed attempt.
+- [RECOVERY] Each policy-due epoch retained its frozen job input identity,
+  verified the same immutable SHA-256, committed one business success fact and
+  resolved its warning incident/circuit.
+- [ONLINE TARGET] `target evaluation not configured` denotes only the absent
+  external leaderboard target and does not weaken the confirmed local verdict.
+- [BOUNDARY] No production mutation/provider call, Fly/SSH/deploy, Docker build
+  or context change, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-051 confirmation state without protected user files. Implement
+the seven-node stage-exact R2 write-timeout disposable contract as H-052, then
+run one combined exact-image rebuild only after both read and write families
+are confirmed.
