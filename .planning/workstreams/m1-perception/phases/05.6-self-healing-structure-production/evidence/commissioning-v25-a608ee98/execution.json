@@ -1,0 +1,25 @@
+{
+  "attack_id": "stale-owner-terminal-write",
+  "config_id": "sha256:f79dc5e1268d5b75f245e6c7d59f5483609ab6e32aff99fe25cb1cc12df70a90",
+  "database_cleanup": {
+    "migration_role_count": 0,
+    "temporary_database_count": 0
+  },
+  "evidence_file_count": 72,
+  "executed_at": "2026-08-30T01:46:28Z",
+  "execution_scope": "disposable-exact-image",
+  "image": {
+    "architecture": "amd64",
+    "digest": "sha256:50f1d47284ddd19e297d59e4d91b51c6402e657e415e47702d78a4233c4294f2",
+    "id": "sha256:c5e7f8bca8159e8078e0e4bd329d3ce177ddf3d344ee56e1c7e9f207aa40d020",
+    "os": "linux",
+    "repository": "registry.fly.io/polyarb-control-worker-m1",
+    "size_bytes": 751976460,
+    "tag": "m1-runtime-v25-a608ee98",
+    "user": "polyarb"
+  },
+  "node_count": 8,
+  "proof_count": 8,
+  "release_id": "a608ee98c803c26465f4bb66b3eab822a9075357",
+  "status": "pass"
+}

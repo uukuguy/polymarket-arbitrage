@@ -11824,3 +11824,33 @@ remaining shared disposable attack adapters.
 commissioning target inside the next immutable runtime image built through
 OrbStack only, retain release/config-bound artifacts, then add heartbeat,
 progress-stall, worker-exit and retry-budget adapters to the same harness.
+
+### SESSION 348 — 2026-08-30 (exact-v25 eight-node stale-owner evidence)
+
+- [FULL M1 GATE] Exact HEAD `a608ee98` passed 4,167 M1 tests, one skip and one
+  expected xfail in 1,627.14 seconds. The CPU-active 120k Structure performance
+  gate completed naturally; no outer timeout was added.
+- [ORBSTACK BUILD] Command-scoped OrbStack built and pushed non-deploying image
+  `m1-runtime-v25-a608ee98`; registry digest is `sha256:50f1d47284ddd19e297d59e4d91b51c6402e657e415e47702d78a4233c4294f2`.
+- [INDEPENDENT IMAGE CHECK] Pulled through a temporary isolated registry config
+  into OrbStack and verified linux/amd64, non-root `polyarb`, local image ID
+  `c5e7f8bc...` and exact full revision label.
+- [EIGHT-NODE EXECUTION] The exact image ran stale-owner commissioning for all
+  eight production nodes against one isolated migrated database per proof. It
+  emitted 72 stage/proof files and returned 8/8 pass.
+- [IDENTITY AND CLEANUP] Every proof binds release `a608ee98...`, config
+  `sha256:f79dc5...` and `cleanup_verified=true`. Independent PostgreSQL queries
+  found zero temporary databases and zero migration roles; artifact secret scan
+  was empty.
+- [DOCKER OWNERSHIP] Global context remained `orbstack`. No Colima, production
+  DSN, Fly deployment, Machine action, SSH or provider call was used.
+- [DISPOSABLE CLEANUP] The local test PostgreSQL container was stopped and
+  removed after residue verification. Its ephemeral data is not recoverable;
+  all required evidence had already been persisted. Temporary registry auth was
+  moved to Trash and never touched global Docker credentials.
+
+[NEXT] Commit Plan 05.6-226 and the exact-v25 evidence without protected user
+files. Register the next climb hypothesis for shared heartbeat/progress/worker-
+exit/retry-budget disposable attack adapters, implement the first closed
+recovery chain, and do not begin production canaries or qualification until the
+commissioning matrix is complete.
