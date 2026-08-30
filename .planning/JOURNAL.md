@@ -12541,3 +12541,25 @@ are confirmed.
 full related regression, then confirm H-052 through climb cycle 57. Only after
 that, perform one exact-image build-only verification for the combined read and
 write timeout families; do not deploy.
+
+### SESSION 374 — 2026-08-30 (H-052 R2 write recovery confirmed)
+
+- [EXACT HEAD] Commit `c1c8c219` passed the exact-revision build-only contract;
+  runtime image inputs matched HEAD, with no image build or push at that gate.
+- [CLIMB H-052] Cycle 57 passed all nine production-enablement gates at 100%;
+  integration passed 168 cases and `disaster_pattern=false`.
+- [AMBIGUOUS WRITE] All seven R2-writing nodes proved that a committed object
+  followed by PUT response timeout produces no false DB receipt; the
+  policy-due successor HEAD-verifies exact key/SHA-256 before one business
+  commit and performs no second PUT.
+- [READ REGRESSION] All six stage-exact R2 read nodes remained green in the same
+  evaluator, completing the 13-node local R2 timeout family.
+- [ONLINE TARGET] `target evaluation not configured` denotes only the absent
+  external leaderboard target and does not weaken the confirmed local verdict.
+- [BOUNDARY] No production mutation/provider call, Fly/SSH/deploy, Docker build
+  or context change, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit H-052 confirmation state without protected user files. Verify the
+active Docker context is OrbStack, then run one command-scoped exact runtime
+image build-only gate for the combined H-051/H-052 release. Never change the
+global context, push, or deploy.

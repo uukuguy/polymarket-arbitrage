@@ -2,16 +2,34 @@ hypotheses:
 - id: H-052
   description: A PUT response timeout after R2 has durably stored an immutable object
     can leave the exact attempt retryable with no database receipt, then let a policy-due
-    replacement HEAD-verify the same key and digest and commit exactly one business fact
-    without uploading twice.
+    replacement HEAD-verify the same key and digest and commit exactly one business
+    fact without uploading twice.
   parent_paradigm: deterministic-runtime-production-enablement
-  expected_lift: Close the committed-but-unacknowledged R2 write boundary for all seven
-    writing nodes without whole-run timeouts, duplicate objects, or false terminal receipts.
+  expected_lift: Close the committed-but-unacknowledged R2 write boundary for all
+    seven writing nodes without whole-run timeouts, duplicate objects, or false terminal
+    receipts.
   cost_h: 1.0
   ranking: 1.0
-  status: testing
+  status: confirmed
   created_at: '2026-08-30T19:15:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 57
+    run: 20260830-103215-h-052
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-051
   description: A typed fail-once R2 GET at each reading production node can terminate
     one exact attempt without a business receipt, then let the central retry policy
