@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 62
+- Last cycle: 63
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -65,6 +65,7 @@
 - **H-055** [confirmed]: A CLOB HTTP 429 can become a body-free typed provider boundary, leave one Quote batch durably retryable with no R2 or receipt side effect, then recover the same immutable input at the shared policy due-at.
 - **H-056** [confirmed]: Gamma timeout and body-free malformed-response failures can be commissioned on the real PostgreSQL Structure source worker, reset the transport generation, leave no R2/page receipt, and recover the exact source page at the shared retry due-at.
 - **H-057** [confirmed]: A resumable exact-image commissioning harness can persist and independently reverify eight real normal turns, all 66 node-level attack proofs, and one database-backed Structure-to-Quote-to-Opportunity lineage before assembling a release/config-bound envelope.
+- **H-058** [confirmed]: A single fenced Opportunity publisher can replace serial certified Quote-batch loading with bounded ordered waves, preserving frozen input order, lease heartbeat, interruption drain, and one terminal pointer publication.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -135,3 +136,4 @@
 - 20260830-112939-h-055: 100.0 (confirmed)
 - 20260830-114142-h-056: 100.0 (confirmed)
 - 20260830-121647-h-057: 100.0 (confirmed)
+- 20260830-202039-h-058: 100.0 (confirmed)
