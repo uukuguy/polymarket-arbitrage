@@ -2682,3 +2682,23 @@ success is not user receipt/read evidence.
 - Runtime folding and restart replay use the same transition. This correction
   does not solve a source window whose natural publication interval exceeds the
   product SLO; cadence and product identity require a separate design audit.
+
+### §2.84 Structure lineage and Quote cadence are separate clocks (2026-08-31)
+
+- One certified Structure may parent multiple immutable Quote generations.
+  Equality between their digests was a bootstrap coincidence, not a lineage
+  contract; recovery queries must never infer Quote identity from the parent
+  Structure receipt digest.
+- A terminal producer may skip direct certifier wakeup when the successor row is
+  locked. The durable sweep is therefore part of the normal correctness chain,
+  not optional cleanup. It must aggregate receipts in the exact
+  `<quote-generation>:batch:*` namespace used by producer writes.
+- Production proved the distinction: 140/140 Q1 receipts remained waiting until
+  the corrected sweep resumed it without operator SQL. Q1 Opportunity was then
+  correctly isolated because its oldest price had genuinely exceeded 900
+  seconds while blocked; cadence immediately admitted Q2 against the same
+  Structure instead of resetting the qualification window or widening the SLA.
+- The operating rule is product-local continuation: preserve valid Structure,
+  skip an expired executable-price product, and create the next Quote run. A
+  contained stale Opportunity pauses effective qualification time but does not
+  invalidate unrelated historical evidence.

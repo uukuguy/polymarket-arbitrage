@@ -1,0 +1,51 @@
+{
+  "schema": "polyarb.m1.recurring-quote-recovery.v1",
+  "observed_at": "2026-08-30T23:05:30+00:00",
+  "release_id": "3a70cd9f5a52294fba5709f0d390421600baa5de",
+  "image": "registry.fly.io/polyarb-control-worker-m1@sha256:870f312ffe7786bc9a842812ec86275ec30334e6219cbb3f1b84fd6d61fc2748",
+  "rollout": {
+    "machine_count": 8,
+    "verified_machine_count": 8,
+    "all_started": true,
+    "all_exact_image": true,
+    "docker_context": "orbstack"
+  },
+  "lost_wakeup": {
+    "quote_generation_key": "quote:02cd969caeeb8427fa443f8b0e8ed248dc0fb4259cc30263b95cc9b464476571",
+    "structure_generation_key": "structure:fb245fe6883f5e3d12bc4380ed8ed6ceb8cd6de3776b672a338c804f19c30157",
+    "input_count": 140,
+    "receipt_count": 140,
+    "succeeded_batch_count": 140,
+    "before_state": "waiting",
+    "after_state": "succeeded",
+    "quote_published_at": "2026-08-30T22:52:43.884246+00:00",
+    "operator_sql_mutation": false,
+    "opportunity_outcome": "quarantined-stale",
+    "opportunity_error_class": "StaleQuoteGenerationError"
+  },
+  "successor": {
+    "quote_generation_key": "quote:e390275fe4608008dcf32a52781823c26f79e5c80986d6c6f76bff6c23a9581c",
+    "structure_generation_key": "structure:fb245fe6883f5e3d12bc4380ed8ed6ceb8cd6de3776b672a338c804f19c30157",
+    "cadence_seconds": 300,
+    "cadence_bucket": 5960434,
+    "input_count": 140,
+    "receipt_count": 140,
+    "succeeded_batch_count": 140,
+    "oldest_quoted_at": "2026-08-30T22:59:58.788538+00:00",
+    "newest_quoted_at": "2026-08-30T23:03:56.560847+00:00",
+    "quote_published_at": "2026-08-30T23:04:00.730309+00:00",
+    "opportunity_certified_at": "2026-08-30T23:04:30.498823+00:00",
+    "quote_to_opportunity_seconds": 29.768514,
+    "quote_state": "succeeded",
+    "opportunity_state": "succeeded"
+  },
+  "health": {
+    "api_status": "available",
+    "open_circuit_count": 0,
+    "expired_lease_count": 0,
+    "runtime_controller_status": "healthy",
+    "qualification_state": "accumulating",
+    "qualification_eligibility_state": "paused",
+    "qualification_eligibility_reason": "freshness.structure"
+  }
+}

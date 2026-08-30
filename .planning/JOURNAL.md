@@ -12825,3 +12825,33 @@ bundle bound to the new commit, then run climb H-057 and record confirmation.
 [NEXT] Commit H-057 exact evidence and climb confirmation without protected user
 files. Then audit the now-ready commissioning verdict against the remaining M1
 production-enablement authorization gates before any production mutation.
+
+### SESSION 387 — 2026-08-31 (recurring Quote production self-healed)
+
+- [ROOT CAUSE] Q1 had 140/140 receipts and succeeded producers but remained
+  waiting because lost-wakeup repair still derived Quote identity from the
+  parent Structure digest. Q0 digest equality had hidden the defect.
+- [TDD] A real PostgreSQL busy-successor regression failed before the change and
+  passed after recovery keyed fan-in by `<quote-generation>:batch:*`; the full
+  PostgreSQL control-plane suite, Ruff and source Pyright passed.
+- [ROLLOUT] OrbStack built exact release `3a70cd9f` at digest `870f312f…c2748`.
+  All eight existing Machines preserved IDs/config, reached started, and passed
+  fresh optimistic-version verification. Global Docker context stayed
+  `orbstack`; no Colima was used or configured.
+- [SELF-HEAL] New coordinator code moved Q1 waiting→succeeded with no operator
+  SQL. Its Opportunity was correctly isolated because the old batches had
+  exceeded 900 seconds while blocked; cadence admitted Q2 instead of widening
+  the SLA or resetting qualification history.
+- [BUSINESS TRUTH] Q2 reused Structure `fb245f…`, completed 140/140 batches,
+  published Quote at 23:04:00 UTC and Opportunity 29.768514 seconds later. Open
+  circuits and expired leases remained zero; API and runtime controller stayed
+  healthy. Q3 admission and the next Structure normalization continue online.
+- [CLIMB H-062] Cycle 68 passed all nine local gates at 100%,
+  `disaster_pattern=false`, verdict confirmed.
+- [LEARNING] Added chapter 105 and architecture §2.84 on independent Structure
+  and Quote clocks, durable lost-wakeup fan-in, and product-local stale recovery.
+
+[NEXT] From `make status`, observe the active Structure generation
+`structure:2263d1…` and Q3 `quote:2bc5ff…`; let rolling qualification resume from
+`freshness.structure` when the real successor publishes. Do not reset the epoch,
+widen freshness SLOs, or manually mutate job state.
