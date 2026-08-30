@@ -1478,7 +1478,9 @@ def test_stale_quote_pointer_adapter_blocks_business_fact_then_resolves_on_fresh
 
     assert proof["qualification_impact"] == "block"
     assert str(proof["detector_fact_id"]).startswith("event:")
-    assert str(proof["recovery_action_id"]).startswith("pointer:quote:current:")
+    assert str(proof["recovery_action_id"]).startswith(
+        "postgres:m1_quote_generation_inputs:quote:"
+    )
     assert str(proof["recovery_fact_id"]).startswith("event:")
     assert str(proof["postcondition_fact_id"]).startswith("pointer:opportunity:current:")
     assert proof["cleanup_verified"] is True
