@@ -288,7 +288,7 @@ def test_machine_update_verifier_requires_exact_remote_config_except_resolved_im
         )
 
 
-def test_machine_update_allows_only_explicit_qualification_release_identity_overlay(
+def test_machine_update_allows_only_explicit_qualification_identity_overlay(
     tmp_path: Path,
 ) -> None:
     from polyarb.control_plane.fly_machine_update import (
@@ -302,6 +302,7 @@ def test_machine_update_allows_only_explicit_qualification_release_identity_over
     current_env = current_config["env"]
     assert isinstance(current_env, dict)
     current_env["POLYARB_QUALIFICATION_RELEASE_ID"] = "old-release"
+    current_env["POLYARB_QUALIFICATION_CONFIG_ID"] = "sha256:old-config"
     config_path = tmp_path / "qualification.toml"
     config_path.write_text(
         "\n".join(
@@ -311,6 +312,7 @@ def test_machine_update_allows_only_explicit_qualification_release_identity_over
                 "kill_timeout = 40",
                 "[env]",
                 'POLYARB_QUALIFICATION_RELEASE_ID = "new-release"',
+                'POLYARB_QUALIFICATION_CONFIG_ID = "sha256:new-config"',
                 'MODE = "must-not-overlay"',
                 "",
             )
@@ -323,16 +325,24 @@ def test_machine_update_allows_only_explicit_qualification_release_identity_over
         expected_app="polyarb-qualification-worker-m1",
         expected_machine_id="6e82036dce4958",
         target_image="registry.fly.io/example:new",
-        update_env_from_fly=("POLYARB_QUALIFICATION_RELEASE_ID",),
+        update_env_from_fly=(
+            "POLYARB_QUALIFICATION_RELEASE_ID",
+            "POLYARB_QUALIFICATION_CONFIG_ID",
+        ),
     )
 
     assert payload["config"]["env"] == {
         "MODE": "observe-only",
         "ALLOWED": "",
+        "POLYARB_QUALIFICATION_CONFIG_ID": "sha256:new-config",
         "POLYARB_QUALIFICATION_RELEASE_ID": "new-release",
     }
-    assert proof["updated_env_keys"] == ["POLYARB_QUALIFICATION_RELEASE_ID"]
+    assert proof["updated_env_keys"] == [
+        "POLYARB_QUALIFICATION_CONFIG_ID",
+        "POLYARB_QUALIFICATION_RELEASE_ID",
+    ]
     assert "new-release" not in json.dumps(proof)
+    assert "new-config" not in json.dumps(proof)
 
     with pytest.raises(FlyMachineUpdateContractError):
         render_machine_update_payload(

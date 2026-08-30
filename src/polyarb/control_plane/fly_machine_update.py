@@ -25,7 +25,12 @@ class FlyMachineUpdateContractError(ValueError):
 
 _FORMAL_KILL_SIGNAL = "SIGTERM"
 _FORMAL_KILL_TIMEOUT_SECONDS = 40
-_ALLOWED_ENV_UPDATES = frozenset({"POLYARB_QUALIFICATION_RELEASE_ID"})
+_ALLOWED_ENV_UPDATES = frozenset(
+    {
+        "POLYARB_QUALIFICATION_CONFIG_ID",
+        "POLYARB_QUALIFICATION_RELEASE_ID",
+    }
+)
 
 
 def render_machine_update_payload(

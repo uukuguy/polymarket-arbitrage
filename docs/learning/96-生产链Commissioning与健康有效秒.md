@@ -464,3 +464,15 @@ exact-image commissioning 分别执行两次独立数据库攻击。每次第一
 transport reset 正好一次、R2 对象为零、source-page receipt 为零；清理后的 policy-due epoch
 对同一 job 成功一次，且最终只有一个 page receipt。这两项完成后，commissioning 的
 18 类 attack 都拥有新 PostgreSQL DAG 的可执行 exact-image 证据。
+
+### 为什么 qualification rollout 必须同时更新 release ID 和 config ID？
+
+qualification 的身份不是单个 commit，而是 `(release_id, config_id, role_identity)`。本轮从
+v1 切到 healthy-effective v2 时，即使 interval、batch size 和 allowlist 都没变，canonical
+payload 里的 `policy_version` 已变化，因此 config digest 必然从旧值变为新值。只更新 release
+ID 会让新镜像在启动时通过代码身份检查、却在配置身份检查上 fail closed。
+
+`fly_machine_update.py` 的 overlay 白名单因此必须把 release/config 视为一个原子身份对；它只
+允许这两个键，不开放任意 env patch。测试还要求 proof 只记录键名，不能把新值或现有 Machine
+环境打印出来。这个 operator-side 修复不改变已经 commissioning 的 runtime bytes，所以生产
+镜像仍严格绑定 `e17f1359`，而 rollout 工具可以在后续证据提交上独立演进。
