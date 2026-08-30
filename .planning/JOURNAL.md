@@ -12024,3 +12024,23 @@ confirm it before building one combined exact image for all shared attacks.
 image guard and confirm H-043 through climb. Then implement worker-exit reclaim;
 after all shared adapters are confirmed, build one combined exact image and run
 them on one release/config before any production canary or qualification.
+
+### SESSION 355 — 2026-08-30 (H-043 heartbeat-outage confirmed)
+
+- [EXACT HEAD GUARD] After commit `5a864487`, the runtime image build contract
+  accepted the exact clean source revision.
+- [CLIMB H-043] Cycle 48 passed all nine deterministic production-enablement
+  gates at 100. Integration passed 120 cases, including eight live-attempt
+  heartbeat recoveries and all four isolated commissioning harness paths.
+- [CHAIN-TRUTH] The confirming gate proves persisted heartbeat classification,
+  one exact non-breaking heartbeat action, same-attempt lease extension, no
+  epoch bump, real terminal success, resolved incident and business fact.
+- [SAFETY OUTPUTS] Scoped roles, observe-only zero-action behavior, restart
+  conflict handling, qualification identity and exact Make argv contracts all
+  passed independently.
+- [BOUNDARY] Local disposable PostgreSQL only; no provider, production DB, Fly
+  Machine, SSH, deployment, Docker-context mutation or Colima operation.
+
+[NEXT] Commit the H-043 confirmation state. Implement and confirm the final
+shared eight-node `worker-exit` reclaim adapter, then build one combined exact
+image and rerun all shared attacks under the same release/config identity.
