@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import uvicorn
 from starlette.applications import Starlette
@@ -16,7 +16,12 @@ from starlette.routing import Route
 from polyarb.http.control_plane import control_plane_status
 
 from .blocking_bridge import run_blocking_call_with_timeout
-from .db_deadlines import CONTROL_PLANE_DB_POLICY, CONTROL_PLANE_HEALTH_DB_POLICY
+from .db_deadlines import (
+    CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE,
+    CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE,
+    CONTROL_PLANE_DB_POLICY,
+    CONTROL_PLANE_HEALTH_DB_POLICY,
+)
 from .db_role_contract import scoped_connection_factory
 from .postgres import PostgresControlPlane
 
@@ -104,10 +109,20 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
 def _build_control_plane(dsn: str) -> PostgresControlPlane:
     """Build the API with the same bounded session contract as every daemon."""
     return PostgresControlPlane(
-        scoped_connection_factory(dsn),
-        readiness_connection_factory=scoped_connection_factory(
-            dsn,
-            deadline_policy=CONTROL_PLANE_HEALTH_DB_POLICY,
+        cast(
+            Any,
+            scoped_connection_factory(
+                dsn,
+                pool_max_size=CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE,
+            ),
+        ),
+        readiness_connection_factory=cast(
+            Any,
+            scoped_connection_factory(
+                dsn,
+                deadline_policy=CONTROL_PLANE_HEALTH_DB_POLICY,
+                pool_max_size=CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE,
+            ),
         ),
     )
 
@@ -125,13 +140,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if port <= 0:
         parser.error("--port must be positive")
     control_plane = _build_control_plane(dsn)
-    uvicorn.run(
-        create_control_plane_app(control_plane=control_plane),
-        host=args.host,
-        port=port,
-        log_config=None,
-        access_log=False,
-    )
+    try:
+        uvicorn.run(
+            create_control_plane_app(control_plane=control_plane),
+            host=args.host,
+            port=port,
+            log_config=None,
+            access_log=False,
+        )
+    finally:
+        control_plane.close()
     return 0
 
 

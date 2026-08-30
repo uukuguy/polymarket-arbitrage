@@ -431,6 +431,7 @@ def test_runtime_event_code_details_reject_unregistered_taxonomy_values(
         (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "heartbeat"),
         (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "progress"),
         (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "attempt"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "database.unavailable"),
         (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "progress.stalled"),
         (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "upstream.timeout"),
         (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "validation.failed"),

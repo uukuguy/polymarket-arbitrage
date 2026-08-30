@@ -739,12 +739,132 @@ def test_scoped_connection_factory_rejects_dsn_namespace_override_before_connect
     assert calls == []
 
 
+def test_scoped_connection_factory_uses_one_bounded_lazy_pool_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    pools: list[object] = []
+    sentinel = object()
+
+    class FakePool:
+        def __init__(self, conninfo: str, **kwargs: object) -> None:
+            self.conninfo = conninfo
+            self.kwargs = kwargs
+            self.connection_calls = 0
+            pools.append(self)
+
+        def connection(self) -> object:
+            self.connection_calls += 1
+            return sentinel
+
+        def close(self) -> None:
+            pass
+
+        def get_stats(self) -> dict[str, int]:
+            return {"requests_num": self.connection_calls}
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool, raising=False)
+
+    factory = db_role_contract.scoped_connection_factory(
+        "postgresql://runtime:secret@example.test/role_test"
+    )
+
+    assert factory() is sentinel
+    assert factory() is sentinel
+    assert len(pools) == 1
+    pool = pools[0]
+    assert isinstance(pool, FakePool)
+    assert pool.connection_calls == 2
+    assert pool.conninfo == "postgresql://runtime:secret@example.test/role_test"
+    assert pool.kwargs["min_size"] == 0
+    assert pool.kwargs["max_size"] == 32
+    assert pool.kwargs["open"] is True
+    assert pool.kwargs["timeout"] == 5
+    assert pool.kwargs["max_waiting"] == 32
+    assert pool.kwargs["reconnect_timeout"] == 5
+    assert pool.kwargs["kwargs"] == {
+        "connect_timeout": 5,
+        "options": (
+            "-csearch_path=pg_catalog,public "
+            "-cstatement_timeout=5000ms -clock_timeout=1000ms"
+        ),
+    }
+    assert pool.kwargs["configure"] is not None
+    assert factory.pool_stats() == {"requests_num": 2}
+
+
+def test_scoped_connection_factory_honors_explicit_owner_pool_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    pool_kwargs: list[dict[str, object]] = []
+
+    class FakePool:
+        def __init__(self, _conninfo: str, **kwargs: object) -> None:
+            pool_kwargs.append(kwargs)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool)
+
+    factory = db_role_contract.scoped_connection_factory(
+        "postgresql://runtime:secret@example.test/role_test",
+        pool_max_size=7,
+    )
+    factory.close()
+
+    assert pool_kwargs[0]["max_size"] == 7
+    assert pool_kwargs[0]["max_waiting"] == 7
+
+
+@pytest.mark.parametrize("pool_max_size", [0, 33])
+def test_scoped_connection_factory_rejects_invalid_owner_pool_budget(
+    pool_max_size: int,
+) -> None:
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+
+    with pytest.raises(ValueError, match="pool_max_size"):
+        scoped_connection_factory(
+            "postgresql://runtime:secret@example.test/role_test",
+            pool_max_size=pool_max_size,
+        )
+
+
+def test_scoped_connection_pool_fails_within_policy_and_records_connection_pressure() -> None:
+    from psycopg_pool import PoolTimeout
+
+    from polyarb.control_plane.db_deadlines import DatabaseDeadlinePolicy
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+
+    policy = DatabaseDeadlinePolicy(
+        connect_timeout_seconds=1,
+        statement_timeout_ms=1_000,
+        lock_timeout_ms=250,
+    )
+    factory = scoped_connection_factory(
+        "postgresql://runtime:secret@127.0.0.1:1/unreachable",
+        deadline_policy=policy,
+    )
+    try:
+        with pytest.raises(PoolTimeout):
+            with factory():
+                pass
+        stats = factory.pool_stats()
+        assert stats["requests_errors"] == 1
+        assert stats["connections_errors"] >= 1
+    finally:
+        factory.close()
+
+
 def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from polyarb.control_plane import db_role_contract
 
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[tuple[str, dict[str, object]]] = []
 
     bootstrap_calls: list[tuple[str, object]] = []
 
@@ -768,11 +888,17 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
 
     sentinel = FakeBootstrapConnection()
 
-    def connect(*args: object, **kwargs: object) -> object:
-        calls.append((args, kwargs))
-        return sentinel
+    class FakePool:
+        def __init__(self, conninfo: str, **kwargs: object) -> None:
+            calls.append((conninfo, kwargs))
+            self.configure = kwargs["configure"]
 
-    monkeypatch.setattr(db_role_contract.psycopg, "connect", connect)
+        def connection(self) -> object:
+            assert callable(self.configure)
+            self.configure(sentinel)
+            return sentinel
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool)
     factory = db_role_contract.scoped_connection_factory(
         "postgresql://runtime:secret@example.test/role_test"
     )
@@ -780,13 +906,22 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
     assert factory() is sentinel
     assert calls == [
         (
-            ("postgresql://runtime:secret@example.test/role_test",),
+            "postgresql://runtime:secret@example.test/role_test",
             {
-                "connect_timeout": 5,
-                "options": (
-                    "-csearch_path=pg_catalog,public "
-                    "-cstatement_timeout=5000ms -clock_timeout=1000ms"
-                ),
+                "kwargs": {
+                    "connect_timeout": 5,
+                    "options": (
+                        "-csearch_path=pg_catalog,public "
+                        "-cstatement_timeout=5000ms -clock_timeout=1000ms"
+                    ),
+                },
+                "min_size": 0,
+                "max_size": 32,
+                "open": True,
+                "configure": calls[0][1]["configure"],
+                "timeout": 5,
+                "max_waiting": 32,
+                "reconnect_timeout": 5,
             },
         )
     ]
@@ -830,7 +965,21 @@ def test_scoped_connection_factory_fails_closed_when_pooler_bootstrap_exceeds_po
             released.set()
 
     connection = BlockingConnection()
-    monkeypatch.setattr(db_role_contract.psycopg, "connect", lambda *_args, **_kwargs: connection)
+
+    class FakePool:
+        def __init__(self, _conninfo: str, **kwargs: object) -> None:
+            self.configure = kwargs["configure"]
+
+        def connection(self) -> object:
+            assert callable(self.configure)
+            try:
+                self.configure(connection)
+            except Exception:
+                connection.close()
+                raise
+            return connection
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool)
     monkeypatch.setattr(db_role_contract, "_BOOTSTRAP_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(
@@ -869,11 +1018,21 @@ def test_scoped_connection_factory_closes_pooler_session_when_readback_is_unsafe
             self.closed = True
 
     connection = UnsafeConnection()
-    monkeypatch.setattr(
-        db_role_contract.psycopg,
-        "connect",
-        lambda *_args, **_kwargs: connection,
-    )
+
+    class FakePool:
+        def __init__(self, _conninfo: str, **kwargs: object) -> None:
+            self.configure = kwargs["configure"]
+
+        def connection(self) -> object:
+            assert callable(self.configure)
+            try:
+                self.configure(connection)
+            except Exception:
+                connection.close()
+                raise
+            return connection
+
+    monkeypatch.setattr(db_role_contract, "ConnectionPool", FakePool)
 
     with pytest.raises(
         db_role_contract.DatabaseRoleContractError,

@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Settings permits at most 32 concurrent Quote/Structure lanes in one process.
+# A lazy pool may grow to that same authority but never creates idle sessions
+# merely because the process started.
+CONTROL_PLANE_DB_POOL_MAX_SIZE = 32
+
+# The HTTP API isolates its one-statement readiness probe so a stalled health
+# read cannot consume an operational lane. The remaining process budget stays
+# available to operator projections; the two owners still sum to the global cap.
+CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE = 1
+CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE = (
+    CONTROL_PLANE_DB_POOL_MAX_SIZE - CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DatabaseDeadlinePolicy:
@@ -86,6 +99,9 @@ MIGRATION_DB_POLICY = DatabaseDeadlinePolicy(
 
 
 __all__ = [
+    "CONTROL_PLANE_API_OPERATIONAL_POOL_MAX_SIZE",
+    "CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE",
+    "CONTROL_PLANE_DB_POOL_MAX_SIZE",
     "CONTROL_PLANE_DB_POLICY",
     "CONTROL_PLANE_HEALTH_DB_POLICY",
     "DatabaseDeadlinePolicy",

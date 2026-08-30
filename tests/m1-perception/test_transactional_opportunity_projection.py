@@ -222,7 +222,7 @@ def test_opportunity_stale_quote_is_blocked_before_r2_or_publish() -> None:
 
     class ControlPlane:
         def __init__(self) -> None:
-            self.retry = None
+            self.quarantine = None
 
         def claim_job(self, **_kwargs):
             return JobLease(
@@ -240,8 +240,8 @@ def test_opportunity_stale_quote_is_blocked_before_r2_or_publish() -> None:
             receipt = QuoteBatchReceipt("quote:old:batch:0", "a" * 64, "quotes/key", "b" * 64, 1)
             return "quote:old", "structure:old", (((object(),), receipt, quoted_at),)
 
-        def finish_retryable_with_incident(self, _lease, **kwargs):
-            self.retry = kwargs
+        def finish_quarantined_with_incident(self, _lease, **kwargs):
+            self.quarantine = kwargs
 
         def publish_opportunity_projection(self, **_kwargs):
             raise AssertionError("stale Quote must not publish an Opportunity projection")
@@ -258,13 +258,15 @@ def test_opportunity_stale_quote_is_blocked_before_r2_or_publish() -> None:
         now=lambda: now,
     ).run_once()
 
-    assert result.outcome == "retryable"
-    assert control_plane.retry is not None
-    assert control_plane.retry["error_class"] == "StaleQuoteGenerationError"
-    assert control_plane.retry["incident_key"] == "incident:freshness:quote"
-    assert control_plane.retry["dedupe_key"] == "freshness:quote"
-    assert control_plane.retry["detail"]["reason_code"] == "freshness.quote"
-    assert control_plane.retry["detail"]["qualification_impact"] == "breaking"
+    assert result.outcome == "stale"
+    assert control_plane.quarantine is not None
+    assert control_plane.quarantine["error_class"] == "StaleQuoteGenerationError"
+    assert control_plane.quarantine["incident_key"] == "incident:freshness:quote"
+    assert control_plane.quarantine["dedupe_key"] == "freshness:quote"
+    assert control_plane.quarantine["reason_code"] == "freshness.quote"
+    assert control_plane.quarantine["qualification_impact"] == "blocked"
+    assert control_plane.quarantine["detail"]["qualification_impact"] == "blocked"
+    assert control_plane.quarantine["qualification_breaking"] is True
 
 
 def test_opportunity_quote_freshness_uses_oldest_batch_and_canonical_sla() -> None:

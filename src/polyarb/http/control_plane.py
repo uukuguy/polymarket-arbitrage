@@ -14,6 +14,17 @@ from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
 _SAMPLE_LIMIT = 20
 
 
+def _database_pool_snapshot(control_plane: Any) -> dict[str, object] | None:
+    reader = getattr(control_plane, "database_pool_snapshot", None)
+    if not callable(reader):
+        return None
+    try:
+        snapshot = reader()
+    except Exception:
+        return None
+    return snapshot if isinstance(snapshot, dict) and snapshot else None
+
+
 async def control_plane_status(request: Request) -> JSONResponse:
     """Return durable operator evidence or a typed unavailable response.
 
@@ -34,8 +45,14 @@ async def control_plane_status(request: Request) -> JSONResponse:
             thread_name="control-plane-api:status-read",
         )
     except (TimeoutError, OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
+        payload: dict[str, object] = {
+            "status": "unavailable",
+            "reason": "control-plane-read-unavailable",
+        }
+        if (pool_snapshot := _database_pool_snapshot(control_plane)) is not None:
+            payload["database_pool"] = pool_snapshot
         return JSONResponse(
-            {"status": "unavailable", "reason": "control-plane-read-unavailable"},
+            payload,
             status_code=503,
         )
     return JSONResponse({"status": "available", **snapshot})

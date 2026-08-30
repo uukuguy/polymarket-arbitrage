@@ -165,6 +165,67 @@ def test_control_plane_route_redacts_malformed_read_model_failures(http_test_cli
     }
 
 
+def test_control_plane_unavailable_response_exposes_secret_free_pool_pressure(
+    http_test_client,
+) -> None:
+    class PoolAwareUnavailableControlPlane:
+        def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
+            assert sample_limit == 20
+            raise RuntimeError("database unavailable")
+
+        def database_pool_snapshot(self) -> dict[str, object]:
+            return {
+                "operational": {
+                    "pool_size": 12,
+                    "pool_available": 0,
+                    "requests_waiting": 7,
+                    "requests_errors": 3,
+                    "connections_errors": 2,
+                }
+            }
+
+    http_test_client.app.state.control_plane = PoolAwareUnavailableControlPlane()
+
+    response = http_test_client.get("/perception/control-plane")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "control-plane-read-unavailable",
+        "database_pool": {
+            "operational": {
+                "pool_size": 12,
+                "pool_available": 0,
+                "requests_waiting": 7,
+                "requests_errors": 3,
+                "connections_errors": 2,
+            }
+        },
+    }
+
+
+def test_control_plane_available_response_does_not_expand_public_pool_contract(
+    http_test_client,
+) -> None:
+    class PoolAwareAvailableControlPlane:
+        def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
+            assert sample_limit == 20
+            return {"observed_at": "2026-08-31T00:00:00+00:00"}
+
+        def database_pool_snapshot(self) -> dict[str, object]:
+            return {"operational": {"pool_size": 1}}
+
+    http_test_client.app.state.control_plane = PoolAwareAvailableControlPlane()
+
+    response = http_test_client.get("/perception/control-plane")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "available",
+        "observed_at": "2026-08-31T00:00:00+00:00",
+    }
+
+
 def test_control_plane_route_timeout_does_not_join_a_stalled_database_thread(
     http_test_client,
     monkeypatch: pytest.MonkeyPatch,

@@ -30,6 +30,27 @@ class _BootstrapConnection:
         self._captured["closed"] = True
 
 
+def _fake_connection_pool(captured: dict[str, object]) -> type:
+    class FakeConnectionPool:
+        def __init__(self, dsn: str, **kwargs: object) -> None:
+            captured.update(dsn=dsn, kwargs=kwargs["kwargs"])
+            self._configure = kwargs["configure"]
+
+        def connection(self) -> _BootstrapConnection:
+            connection = _BootstrapConnection(captured)
+            assert callable(self._configure)
+            self._configure(connection)
+            return connection
+
+        def close(self) -> None:
+            captured["pool_closed"] = True
+
+        def get_stats(self) -> dict[str, int]:
+            return {}
+
+    return FakeConnectionPool
+
+
 @pytest.fixture(autouse=True)
 def _allow_daemon_database_role(monkeypatch: pytest.MonkeyPatch) -> None:
     from polyarb import cli_control_plane
@@ -54,11 +75,8 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
         "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
     )
     monkeypatch.setattr(
-        cli_control_plane.psycopg,
-        "connect",
-        lambda dsn, **kwargs: (
-            captured.update(dsn=dsn, kwargs=kwargs) or _BootstrapConnection(captured)
-        ),
+        "polyarb.control_plane.db_role_contract.ConnectionPool",
+        _fake_connection_pool(captured),
     )
 
     control_plane = cli_control_plane._control_plane_from_env()
@@ -2695,6 +2713,7 @@ def test_runtime_policy_replay_is_read_only_and_reports_first_breaking_sample(
     class ReadOnlyControlPlane:
         def __init__(self) -> None:
             self.reads = 0
+            self.close_calls = 0
 
         def read_soak_observations(self, run_id: str):
             assert run_id == "run-a"
@@ -2704,6 +2723,9 @@ def test_runtime_policy_replay_is_read_only_and_reports_first_breaking_sample(
                 record("2026-08-23T16:22:21Z", expired=1),
                 record("2026-08-23T16:27:21Z"),
             )
+
+        def close(self) -> None:
+            self.close_calls += 1
 
         def __getattr__(self, name: str):
             raise AssertionError(f"runtime replay must not call {name}")
@@ -2718,6 +2740,7 @@ def test_runtime_policy_replay_is_read_only_and_reports_first_breaking_sample(
         == 0
     )
     assert control_plane.reads == 1
+    assert control_plane.close_calls == 1
     assert json.loads(capsys.readouterr().out) == {
         "first_breaking_at": "2026-08-23T16:22:21+00:00",
         "max_gap_seconds": 9681.0,
@@ -2756,11 +2779,8 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
         "postgresql://qualification:secret@example.test/control",
     )
     monkeypatch.setattr(
-        cli_control_plane.psycopg,
-        "connect",
-        lambda dsn, **kwargs: (
-            captured.update(dsn=dsn, kwargs=kwargs) or _BootstrapConnection(captured)
-        ),
+        "polyarb.control_plane.db_role_contract.ConnectionPool",
+        _fake_connection_pool(captured),
     )
 
     class Store:
@@ -2796,6 +2816,7 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
         ),
     }
     assert "set_config('search_path'" in cast(tuple[str, object], captured["bootstrap"])[0]
+    assert captured["pool_closed"] is True
     assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
 
 
@@ -2904,7 +2925,14 @@ def test_qualification_serve_verifies_database_role_before_service_construction(
     from polyarb import cli_control_plane
 
     events: list[str] = []
-    connection_factory = object()
+    class ConnectionFactory:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    connection_factory = ConnectionFactory()
 
     def verify(factory, profile, *, expected_database):
         assert factory is connection_factory
@@ -2918,7 +2946,8 @@ def test_qualification_serve_verifies_database_role_before_service_construction(
             events.append("tick")
             raise RuntimeError("stop-after-tick")
 
-    def service_from_env(**_kwargs):
+    def service_from_env(**kwargs):
+        assert kwargs["connection_factory"] is connection_factory
         events.append("service")
         return Service()
 
@@ -2939,6 +2968,7 @@ def test_qualification_serve_verifies_database_role_before_service_construction(
         == 1
     )
     assert events == ["verify", "service", "tick"]
+    assert connection_factory.close_calls == 1
     assert "postgresql://" not in capsys.readouterr().err
 
 

@@ -108,6 +108,8 @@
 | 94 | [增长证据不能放进每轮状态行](94-增长证据不能放进每轮状态行.md) | 状态与证据分离 / append-only fact / fixed-size epoch / 500-row restart replay / bounded certificate projection |
 | 95 | [超时、任务序列与可恢复性审计](95-超时任务序列与可恢复性审计.md) | 四类时间权威 / 两阶段取消 / durable barrier / lease fencing / active-task progress / liveness-readiness 分离 |
 | 96 | [生产链 Commissioning 与健康有效秒](96-生产链Commissioning与健康有效秒.md) | 八节点准入 / 定向故障攻击 / 恢复后业务后置条件 / 普通故障暂停计时 / 严重缺陷才作废 epoch |
+| 97 | [PostgreSQL 连接池与压力可观测](97-PostgreSQL连接池与压力可观测.md) | 建连风暴为何不是“调大 timeout” / lazy bounded pool / 事务归还与进程关闭 / 503 池压力计数 / 数据库故障分类 |
+| 98 | [可恢复故障与终态隔离](98-可恢复故障与终态隔离.md) | retryability 判断 / stale Quote 终态隔离 / incident 与 job 状态分离 / successor generation 恢复链 |
 
 ## Phase 02.1 教学增量（2026-05）
 

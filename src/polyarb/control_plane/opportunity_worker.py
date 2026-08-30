@@ -186,7 +186,18 @@ class TransactionalOpportunityCertifier:
             else:
                 _runtime_sync_call(runtime, finish, terminal=True)
             return OpportunityCertifierResult(job_key=lease.job_key, outcome="superseded")
-        except (IncompleteQuoteGenerationError, StaleQuoteGenerationError) as error:
+        except StaleQuoteGenerationError as error:
+            failure = error
+            if runtime is None:
+                self._finish_stale_quote(lease, failure)
+            else:
+                _runtime_sync_call(
+                    runtime,
+                    lambda: self._finish_stale_quote(runtime.current_lease, failure),
+                    terminal=True,
+                )
+            return OpportunityCertifierResult(job_key=lease.job_key, outcome="stale")
+        except IncompleteQuoteGenerationError as error:
             failure = error
             if runtime is None:
                 self._finish_retryable(lease, failure)
@@ -404,24 +415,11 @@ class TransactionalOpportunityCertifier:
         )
 
     def _finish_retryable(self, lease: JobLease, error: Exception) -> None:
-        stale_quote = isinstance(error, StaleQuoteGenerationError)
-        freshness_detail = (
-            {
-                "reason_code": "freshness.quote",
-                "qualification_impact": "breaking",
-            }
-            if stale_quote
-            else {}
-        )
         self._control_plane.finish_retryable_with_incident(
             lease,
             error_class=type(error).__name__,
-            incident_key=(
-                "incident:freshness:quote"
-                if stale_quote
-                else f"incident:job-retry:{lease.job_key}"
-            ),
-            dedupe_key=("freshness:quote" if stale_quote else f"job-retry:{lease.job_key}"),
+            incident_key=f"incident:job-retry:{lease.job_key}",
+            dedupe_key=f"job-retry:{lease.job_key}",
             component="opportunity-certify",
             summary="opportunity-certify retryable failure",
             detail={
@@ -431,9 +429,36 @@ class TransactionalOpportunityCertifier:
                 "failure_fingerprint": retry_failure_fingerprint(
                     error, component="opportunity-certify"
                 ),
-                **freshness_detail,
             },
             channels=incident_alert_channels(Settings()),
+            now=self._now(),
+        )
+
+    def _finish_stale_quote(self, lease: JobLease, error: StaleQuoteGenerationError) -> None:
+        """Terminally isolate an immutable stale generation and await its successor."""
+        self._control_plane.finish_quarantined_with_incident(
+            lease,
+            error_class=type(error).__name__,
+            incident_key="incident:freshness:quote",
+            dedupe_key="freshness:quote",
+            component="opportunity-certify",
+            summary="opportunity-certify stale Quote generation isolated",
+            detail={
+                "job_key": lease.job_key,
+                "lease_epoch": lease.lease_epoch,
+                "error_class": type(error).__name__,
+                "failure_fingerprint": retry_failure_fingerprint(
+                    error, component="opportunity-certify"
+                ),
+                "reason_code": "freshness.quote",
+                "qualification_impact": "blocked",
+            },
+            channels=incident_alert_channels(Settings()),
+            qualification_impact="blocked",
+            reason_code="freshness.quote",
+            severity="warning",
+            incident_kind="attempt-failed",
+            qualification_breaking=True,
             now=self._now(),
         )
 

@@ -49,6 +49,7 @@ dependencies = [
   # Previously dev-only; promoted so the deployed daemon can expose RSS without dev extras.
   "psutil>=5.9,<7",
   "cryptography>=48.0.0",
+  "psycopg-pool>=3.3,<4",
 ]
 
 [project.optional-dependencies]

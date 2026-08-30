@@ -158,6 +158,13 @@ def _frozen_quote_certification_identity(
 def _retry_failure_signature(error_class: str) -> str:
     """Map a bounded exception identity to the durable failure taxonomy."""
     normalized = error_class.casefold()
+    if normalized in {
+        "operationalerror",
+        "poolclosed",
+        "pooltimeout",
+        "toomanyrequests",
+    }:
+        return "database.unavailable"
     if "timeout" in normalized or "deadline" in normalized:
         return "upstream.timeout"
     if "progress" in normalized or "stalled" in normalized:
@@ -1243,6 +1250,47 @@ class PostgresControlPlane:
     ) -> None:
         self._connection_factory = connection_factory
         self._readiness_connection_factory = readiness_connection_factory or connection_factory
+
+    @staticmethod
+    def _pool_snapshot(factory: ConnectionFactory) -> dict[str, int] | None:
+        stats_reader = getattr(factory, "pool_stats", None)
+        if not callable(stats_reader):
+            return None
+        stats = stats_reader()
+        if not isinstance(stats, Mapping):
+            return None
+        keys = (
+            "pool_size",
+            "pool_available",
+            "requests_waiting",
+            "requests_errors",
+            "connections_errors",
+        )
+        return {key: int(stats.get(key, 0)) for key in keys}
+
+    def database_pool_snapshot(self) -> dict[str, object]:
+        """Expose only bounded counters; never DSNs or connection parameters."""
+        snapshot: dict[str, object] = {}
+        operational = self._pool_snapshot(self._connection_factory)
+        if operational is not None:
+            snapshot["operational"] = operational
+        if self._readiness_connection_factory is not self._connection_factory:
+            readiness = self._pool_snapshot(self._readiness_connection_factory)
+            if readiness is not None:
+                snapshot["readiness"] = readiness
+        return snapshot
+
+    def close(self) -> None:
+        """Close each owned connection pool exactly once."""
+        factories = (self._connection_factory, self._readiness_connection_factory)
+        closed: set[int] = set()
+        for factory in factories:
+            if id(factory) in closed:
+                continue
+            closed.add(id(factory))
+            closer = getattr(factory, "close", None)
+            if callable(closer):
+                closer()
 
     def readiness(self) -> bool:
         """Prove the durable authority is readable without building a dashboard snapshot."""
@@ -7132,6 +7180,7 @@ class PostgresControlPlane:
         )
         if semantic not in {
             ("blocked", "failure.schema", "critical", "escalated", True),
+            ("blocked", "freshness.quote", "warning", "attempt-failed", True),
             ("invalidated", "integrity.conflict", "critical", "escalated", True),
             ("delayed", "publication.superseded", "warning", "detected", False),
         }:
@@ -7218,6 +7267,15 @@ class PostgresControlPlane:
                     occurred_at=now,
                     idempotency_key=f"runtime:{attempt_id}:terminal-failed",
                 ),
+            )
+            cursor.execute(
+                """
+                UPDATE public.m1_job_circuits
+                SET consecutive_failures = 0, state = 'closed', opened_at = NULL,
+                    next_probe_at = NULL, updated_at = %s, failure_fingerprint = NULL
+                WHERE job_key = %s
+                """,
+                (now, lease.job_key),
             )
             cursor.execute(
                 """

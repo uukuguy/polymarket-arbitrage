@@ -93,6 +93,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
     "deadline_kind": frozenset({"attempt", "heartbeat", "lease", "progress"}),
     "failure_signature": frozenset(
         {
+            "database.unavailable",
             "progress.stalled",
             "service.interrupted",
             "upstream.malformed",

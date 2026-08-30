@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from threading import Event, Timer
 from typing import Any
@@ -11,10 +12,15 @@ from urllib.parse import parse_qsl, urlsplit
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
+from psycopg_pool import ConnectionPool
 
-from .db_deadlines import CONTROL_PLANE_DB_POLICY, DatabaseDeadlinePolicy
+from .db_deadlines import (
+    CONTROL_PLANE_DB_POLICY,
+    CONTROL_PLANE_DB_POOL_MAX_SIZE,
+    DatabaseDeadlinePolicy,
+)
 
-ConnectionFactory = Callable[[], psycopg.Connection[Any]]
+ConnectionFactory = Callable[[], AbstractContextManager[psycopg.Connection[Any]]]
 TABLE_PRIVILEGES = (
     "SELECT",
     "INSERT",
@@ -137,30 +143,63 @@ class DatabaseRoleContractError(RuntimeError):
         super().__init__(f"{reason_code}: {object_identifier}")
 
 
+class ScopedConnectionFactory:
+    """Own a process-local pool and preserve the existing callable contract."""
+
+    def __init__(self, pool: ConnectionPool[Any]) -> None:
+        self._pool = pool
+
+    def __call__(self) -> AbstractContextManager[psycopg.Connection[Any]]:
+        return self._pool.connection()
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def pool_stats(self) -> dict[str, int]:
+        return self._pool.get_stats()
+
+    def __del__(self) -> None:
+        # Short-lived CLI/test owners must not strand idle PostgreSQL sessions.
+        # Production services close at process teardown; this is the last-resort
+        # ownership boundary if their normal shutdown path is interrupted.
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def scoped_connection_factory(
     dsn: str,
     *,
     deadline_policy: DatabaseDeadlinePolicy = CONTROL_PLANE_DB_POLICY,
-) -> ConnectionFactory:
-    """Return a connection factory with a non-overridable application namespace."""
+    pool_max_size: int = CONTROL_PLANE_DB_POOL_MAX_SIZE,
+) -> ScopedConnectionFactory:
+    """Return one lazy bounded pool with a non-overridable application namespace."""
 
     _reject_dsn_namespace_override(dsn)
-    connection_options = "-csearch_path=pg_catalog,public " + deadline_policy.connection_options
-
-    def connect() -> psycopg.Connection[Any]:
-        connection = psycopg.connect(
-            dsn,
-            connect_timeout=deadline_policy.connect_timeout_seconds,
-            options=connection_options,
+    if not 1 <= pool_max_size <= CONTROL_PLANE_DB_POOL_MAX_SIZE:
+        raise ValueError(
+            f"pool_max_size must be between 1 and {CONTROL_PLANE_DB_POOL_MAX_SIZE}"
         )
-        try:
-            _bootstrap_scoped_session(connection, deadline_policy=deadline_policy)
-        except Exception:
-            connection.close()
-            raise
-        return connection
-
-    return connect
+    connection_options = "-csearch_path=pg_catalog,public " + deadline_policy.connection_options
+    pool: ConnectionPool[Any] = ConnectionPool(
+        dsn,
+        kwargs={
+            "connect_timeout": deadline_policy.connect_timeout_seconds,
+            "options": connection_options,
+        },
+        min_size=0,
+        max_size=pool_max_size,
+        open=True,
+        configure=lambda connection: _bootstrap_scoped_session(
+            connection,
+            deadline_policy=deadline_policy,
+        ),
+        timeout=deadline_policy.connect_timeout_seconds,
+        max_waiting=pool_max_size,
+        reconnect_timeout=deadline_policy.connect_timeout_seconds,
+    )
+    return ScopedConnectionFactory(pool)
 
 
 def _bootstrap_scoped_session(

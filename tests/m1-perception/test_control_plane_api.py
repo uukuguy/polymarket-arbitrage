@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from time import monotonic
+from typing import cast
 
 import pytest
 from starlette.testclient import TestClient
@@ -180,61 +181,80 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     from polyarb.control_plane import api
     from polyarb.control_plane.db_deadlines import CONTROL_PLANE_HEALTH_DB_POLICY
 
-    calls: list[tuple[str, dict[str, object]]] = []
+    pool_calls: list[tuple[str, dict[str, object]]] = []
+    bootstrap_calls: list[tuple[str, object]] = []
 
     class Connection:
-        autocommit = False
+        def __init__(self, settings: tuple[str, str, str, list[str]]) -> None:
+            self.autocommit = False
+            self._settings = settings
 
         def execute(self, query, params):
-            calls.append((query, {"params": params}))
+            bootstrap_calls.append((query, params))
             return self
 
         def fetchone(self):
-            if calls[0][1]["connect_timeout"] == 1:
-                return ("pg_catalog,public", "1s", "250ms", ["pg_catalog", "public"])
-            return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+            return self._settings
 
         def cancel_safe(self, *, timeout):
-            calls.append(("cancel", {"timeout": timeout}))
+            bootstrap_calls.append(("cancel", timeout))
 
         def close(self):
-            calls.append(("close", {}))
+            bootstrap_calls.append(("close", ()))
 
-    sentinel = Connection()
+    class FakePool:
+        def __init__(self, dsn: str, **kwargs: object) -> None:
+            pool_calls.append((dsn, kwargs))
+            self._kwargs = kwargs
 
-    def connect(dsn: str, **kwargs: object) -> object:
-        calls.append((dsn, kwargs))
-        return sentinel
+        def connection(self) -> Connection:
+            connection_kwargs = cast(dict[str, object], self._kwargs["kwargs"])
+            health = connection_kwargs["connect_timeout"] == 1
+            settings = (
+                "pg_catalog,public",
+                "1s" if health else "5s",
+                "250ms" if health else "1s",
+                ["pg_catalog", "public"],
+            )
+            connection = Connection(settings)
+            configure = self._kwargs["configure"]
+            assert callable(configure)
+            configure(connection)
+            return connection
 
-    monkeypatch.setattr("polyarb.control_plane.db_role_contract.psycopg.connect", connect)
+        def close(self) -> None:
+            pass
+
+        def get_stats(self) -> dict[str, int]:
+            return {}
+
+    monkeypatch.setattr("polyarb.control_plane.db_role_contract.ConnectionPool", FakePool)
     control_plane = api._build_control_plane("postgresql://control-plane")
 
-    assert control_plane._connection_factory() is sentinel
-    assert calls[0] == (
-        "postgresql://control-plane",
-        {
-            "connect_timeout": 5,
-            "options": (
-                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
-            ),
-        },
+    assert control_plane._connection_factory() is not None
+    assert pool_calls[0][0] == "postgresql://control-plane"
+    assert pool_calls[0][1]["kwargs"] == {
+        "connect_timeout": 5,
+        "options": (
+            "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+        ),
+    }
+    assert pool_calls[1][1]["kwargs"] == {
+        "connect_timeout": CONTROL_PLANE_HEALTH_DB_POLICY.connect_timeout_seconds,
+        "options": (
+            "-csearch_path=pg_catalog,public -cstatement_timeout=1000ms -clock_timeout=250ms"
+        ),
+    }
+    assert sum(cast(int, call[1]["max_size"]) for call in pool_calls) == 32
+    assert pool_calls[1][1]["max_size"] == 1
+    assert bootstrap_calls[-1] == (
+        bootstrap_calls[-1][0],
+        ("pg_catalog,public", "5000ms", "1000ms"),
     )
-    assert len(calls) == 2
-    assert "set_config('search_path'" in calls[1][0]
-    assert calls[1][1] == {"params": ("pg_catalog,public", "5000ms", "1000ms")}
+    assert "set_config('search_path'" in bootstrap_calls[-1][0]
 
-    calls.clear()
-    assert control_plane._readiness_connection_factory() is sentinel
-    assert calls[0] == (
-        "postgresql://control-plane",
-        {
-            "connect_timeout": 1,
-            "options": (
-                "-csearch_path=pg_catalog,public "
-                "-cstatement_timeout=1000ms -clock_timeout=250ms"
-            ),
-        },
-    )
-    assert len(calls) == 2
-    assert calls[1][1] == {"params": ("pg_catalog,public", "1000ms", "250ms")}
+    bootstrap_calls.clear()
+    assert control_plane._readiness_connection_factory() is not None
+    assert len(bootstrap_calls) == 1
+    assert bootstrap_calls[0][1] == ("pg_catalog,public", "1000ms", "250ms")
     assert CONTROL_PLANE_HEALTH_DB_POLICY.request_timeout_seconds == 3.5

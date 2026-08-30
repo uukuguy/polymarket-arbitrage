@@ -4087,7 +4087,7 @@ class StaleQuotePointerCommissioningAdapter:
         self._require_identity(identity)
         self._clock_at = self._started_at
         result = self._worker.run_once()
-        if result.outcome != "retryable":
+        if result.outcome != "stale":
             raise DisposableCommissioningError("stale-quote-not-rejected")
         job_key = self._need(self._stale_job_key, "stale-job-missing")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -4096,13 +4096,13 @@ class StaleQuotePointerCommissioningAdapter:
                 SELECT attempt.attempt_id
                 FROM m1_job_attempts AS attempt
                 JOIN m1_jobs AS job USING (job_key)
-                WHERE attempt.job_key = %s AND attempt.state = 'retryable'
-                  AND job.state = 'retryable'
+                WHERE attempt.job_key = %s AND attempt.state = 'quarantined'
+                  AND job.state = 'quarantined'
                 """,
                 (job_key,),
             ).fetchone()
         if row is None:
-            raise DisposableCommissioningError("stale-quote-retry-fact-missing")
+            raise DisposableCommissioningError("stale-quote-terminal-fact-missing")
         return AttackStageReceipt(
             stage="injected",
             receipt_id=f"attempt:{row[0]}",
@@ -4128,7 +4128,7 @@ class StaleQuotePointerCommissioningAdapter:
                 JOIN m1_incidents AS incident ON incident.dedupe_key = 'freshness:quote'
                 JOIN m1_incident_events AS event USING (incident_key)
                 JOIN m1_alert_outbox AS outbox USING (incident_event_id)
-                WHERE runtime.job_key = %s AND runtime.kind = 'job.retryable-failed'
+                WHERE runtime.job_key = %s AND runtime.kind = 'job.terminal-failed'
                   AND event.kind = 'attempt-failed'
                 """,
                 (job_key,),
@@ -4141,7 +4141,7 @@ class StaleQuotePointerCommissioningAdapter:
             row[6],
             row[7],
             row[8],
-        ) != ("freshness.quote", "blocked", "open", "warning", "breaking", "pending", 0):
+        ) != ("freshness.quote", "blocked", "open", "warning", "blocked", "pending", 0):
             raise DisposableCommissioningError("stale-quote-detector-chain-missing")
         self._detector_event_id = str(row[0])
         return AttackStageReceipt(
@@ -4197,7 +4197,7 @@ class StaleQuotePointerCommissioningAdapter:
                 """,
                 (stale_job,),
             ).fetchone()
-        if shape != ("retryable", 0, 0):
+        if shape != ("quarantined", 0, 0):
             raise DisposableCommissioningError("stale-quote-partial-business-fact")
         return AttackStageReceipt(
             stage="cleanup",

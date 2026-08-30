@@ -116,6 +116,61 @@ from polyarb.control_plane.structure_source import (
 )
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 
+
+def test_database_connection_failures_have_actionable_retry_signature() -> None:
+    from polyarb.control_plane.postgres import _retry_failure_signature
+
+    assert _retry_failure_signature("OperationalError") == "database.unavailable"
+    assert _retry_failure_signature("PoolTimeout") == "database.unavailable"
+    assert _retry_failure_signature("TooManyRequests") == "database.unavailable"
+    assert _retry_failure_signature("PoolClosed") == "database.unavailable"
+
+
+def test_database_pool_snapshot_is_secret_free_and_close_is_idempotent_per_owner() -> None:
+    class Factory:
+        def __init__(self, stats: dict[str, int]) -> None:
+            self.stats = stats
+            self.close_calls = 0
+
+        def pool_stats(self) -> dict[str, int]:
+            return self.stats
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    operational = Factory(
+        {
+            "pool_size": 12,
+            "pool_available": 4,
+            "requests_waiting": 2,
+            "requests_errors": 1,
+            "connections_errors": 3,
+            "dsn": 999,
+        }
+    )
+    readiness = Factory({"pool_size": 1, "pool_available": 1})
+    control_plane = PostgresControlPlane(operational, readiness_connection_factory=readiness)  # type: ignore[arg-type]
+
+    assert control_plane.database_pool_snapshot() == {
+        "operational": {
+            "pool_size": 12,
+            "pool_available": 4,
+            "requests_waiting": 2,
+            "requests_errors": 1,
+            "connections_errors": 3,
+        },
+        "readiness": {
+            "pool_size": 1,
+            "pool_available": 1,
+            "requests_waiting": 0,
+            "requests_errors": 0,
+            "connections_errors": 0,
+        },
+    }
+    control_plane.close()
+    assert operational.close_calls == 1
+    assert readiness.close_calls == 1
+
 # Diagnostic watchdog only: concurrent PostgreSQL contracts do not assert wall
 # time. Reuse the named full transaction/shutdown envelope so host load cannot
 # turn a magic test-only wait into a false product failure, while a missing peer
@@ -203,6 +258,67 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
     yield PostgresControlPlane(connect)
+
+
+def test_scoped_connection_pool_reuses_one_real_postgres_session(
+    postgres_dsn: str,
+) -> None:
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+
+    factory = scoped_connection_factory(postgres_dsn)
+    try:
+        backend_pids: set[int] = set()
+        for _ in range(64):
+            with factory() as connection:
+                row = connection.execute("SELECT pg_backend_pid()").fetchone()
+                assert row is not None
+                backend_pids.add(int(row[0]))
+        assert len(backend_pids) == 1
+        stats = factory.pool_stats()
+        assert stats["connections_num"] == 1
+        assert stats["requests_num"] == 64
+    finally:
+        factory.close()
+
+
+def test_scoped_connection_pool_bounds_and_reuses_twelve_concurrent_lanes(
+    postgres_dsn: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+
+    lane_count = 12
+    factory = scoped_connection_factory(postgres_dsn)
+
+    def run_wave() -> set[int]:
+        all_checked_out = Barrier(lane_count)
+
+        def checkout() -> int:
+            with factory() as connection:
+                row = connection.execute("SELECT pg_backend_pid()").fetchone()
+                assert row is not None
+                backend_pid = int(row[0])
+                all_checked_out.wait(timeout=CONTROL_PLANE_DB_POLICY.stop_grace_seconds)
+                return backend_pid
+
+        with ThreadPoolExecutor(max_workers=lane_count) as executor:
+            return set(executor.map(lambda _lane: checkout(), range(lane_count)))
+
+    try:
+        first_wave = run_wave()
+        first_connections = factory.pool_stats()["connections_num"]
+        second_wave = run_wave()
+
+        assert len(first_wave) == lane_count
+        assert len(second_wave) == lane_count
+        assert second_wave == first_wave
+        assert first_connections == lane_count
+        assert factory.pool_stats()["connections_num"] == lane_count
+    finally:
+        factory.close()
 
 
 def test_runtime_event_writer_concurrent_first_detected_records_one_event_and_two_outbox(
@@ -8851,6 +8967,19 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
             "warning",
             "detected",
         ),
+        (
+            {
+                "qualification_impact": "blocked",
+                "reason_code": "freshness.quote",
+                "severity": "warning",
+                "incident_kind": "attempt-failed",
+                "qualification_breaking": True,
+            },
+            "blocked",
+            "freshness.quote",
+            "warning",
+            "attempt-failed",
+        ),
     ],
 )
 def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
@@ -8954,6 +9083,62 @@ def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
         )
         cursor.execute("SELECT count(*) FROM m1_job_circuits")
         assert cursor.fetchone() == (0,)
+
+
+def test_quarantine_closes_prior_retry_circuit_for_terminal_failure(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    first_lease = _seed_claimed_job(
+        control_plane,
+        job_key="quote:stale:opportunity-certify",
+        job_type="opportunity-certify",
+        input_identity="quote:stale",
+        now=now,
+    )
+    next_attempt_at = control_plane.finish_retryable_with_incident(
+        first_lease,
+        error_class="StaleQuoteGenerationError",
+        incident_key="incident:freshness:quote",
+        dedupe_key="freshness:quote",
+        component="opportunity-certify",
+        summary="stale Quote",
+        detail={"reason_code": "freshness.quote", "qualification_impact": "breaking"},
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    second_lease = control_plane.claim_job(
+        worker_id="opportunity-worker",
+        job_types=("opportunity-certify",),
+        lease_seconds=120,
+        now=next_attempt_at,
+    )
+    assert second_lease is not None
+
+    control_plane.finish_quarantined_with_incident(
+        second_lease,
+        error_class="StaleQuoteGenerationError",
+        incident_key="incident:freshness:quote",
+        dedupe_key="freshness:quote",
+        component="opportunity-certify",
+        summary="stale Quote terminally quarantined",
+        detail={"reason_code": "freshness.quote", "qualification_impact": "breaking"},
+        channels=("dashboard",),
+        qualification_impact="blocked",
+        reason_code="freshness.quote",
+        severity="warning",
+        incident_kind="attempt-failed",
+        qualification_breaking=True,
+        now=next_attempt_at + timedelta(seconds=1),
+    )
+
+    with control_plane._connection_factory() as connection:
+        row = connection.execute(
+            "SELECT state, consecutive_failures, next_probe_at "
+            "FROM m1_job_circuits WHERE job_key = %s",
+            (second_lease.job_key,),
+        ).fetchone()
+    assert row == ("closed", 0, None)
 
 
 def test_retryable_finish_lock_timeout_rolls_back_job_circuit_incident_and_alert(

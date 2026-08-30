@@ -126,6 +126,8 @@ from polyarb.control_plane.watchdog import (
 from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client, control_plane_r2_config
 
+ConnectionFactory = Callable[[], psycopg.Connection[Any]]
+
 _SAFE_ERROR_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,128}$")
 _SAFE_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
@@ -139,7 +141,7 @@ _WATCHDOG_OBSERVATION_TIMEOUT_SECONDS = 2 * _FLY_HTTP_TIMEOUT_SECONDS + 1.0
 class _RuntimeReconcileControlPlane(Protocol):
     """Minimal atomic surface consumed by the bounded runtime controller."""
 
-    _connection_factory: Callable[[], psycopg.Connection[Any]]
+    _connection_factory: ConnectionFactory
 
     def _execute_recovery_action_cursor(
         self,
@@ -464,14 +466,14 @@ def _control_plane_from_env() -> PostgresControlPlane | None:
     dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "").strip()
     if not dsn:
         return None
-    return PostgresControlPlane(scoped_connection_factory(dsn))
+    return PostgresControlPlane(cast(ConnectionFactory, scoped_connection_factory(dsn)))
 
 
-def _qualification_connection_factory_from_env() -> Callable[[], psycopg.Connection[Any]] | None:
+def _qualification_connection_factory_from_env() -> ConnectionFactory | None:
     dsn = os.environ.get("POLYARB_QUALIFICATION_DB_DSN", "").strip()
     if not dsn:
         return None
-    return scoped_connection_factory(dsn)
+    return cast(ConnectionFactory, scoped_connection_factory(dsn))
 
 
 def _required_expected_database_from_env() -> str:
@@ -483,13 +485,11 @@ def _required_expected_database_from_env() -> str:
 
 def _qualification_service_from_env(
     *,
+    connection_factory: ConnectionFactory,
     batch_size: int,
     interval_seconds: float,
     writer_id: str,
 ) -> QualificationService:
-    connection_factory = _qualification_connection_factory_from_env()
-    if connection_factory is None:
-        raise ValueError("POLYARB_QUALIFICATION_DB_DSN is required")
     identity = qualification_identity_from_env(
         interval_seconds=interval_seconds,
         batch_size=batch_size,
@@ -506,6 +506,16 @@ def _qualification_service_from_env(
         writer_id=writer_id,
         batch_size=batch_size,
     )
+
+
+def _close_connection_owner(owner: object) -> None:
+    """Close a pool owner while retaining raw test/caller factory compatibility."""
+    try:
+        closer = getattr(owner, "close", None)
+    except Exception:
+        return
+    if callable(closer):
+        closer()
 
 
 def _write(payload: Mapping[str, object], *, as_json: bool) -> None:
@@ -1922,29 +1932,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
             return 2
         try:
-            replay = replay_soak_observations(
-                control_plane.read_soak_observations(args.run_id),
-                max_gap_seconds=args.max_gap_seconds,
+            try:
+                replay = replay_soak_observations(
+                    control_plane.read_soak_observations(args.run_id),
+                    max_gap_seconds=args.max_gap_seconds,
+                )
+            except (OSError, RuntimeError, ValueError, SoakEvidenceError, psycopg.Error) as error:
+                detail = (
+                    str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
+                )
+                print(f"runtime policy replay unavailable: {detail}", file=sys.stderr)
+                return 1
+            _write(
+                {
+                    "status": replay.status,
+                    "first_breaking_at": (
+                        None
+                        if replay.first_breaking_at is None
+                        else replay.first_breaking_at.astimezone(UTC).isoformat()
+                    ),
+                    "reason_codes": list(replay.reason_codes),
+                    "sample_count": replay.sample_count,
+                    "max_gap_seconds": replay.max_gap_seconds,
+                },
+                as_json=args.json,
             )
-        except (OSError, RuntimeError, ValueError, SoakEvidenceError, psycopg.Error) as error:
-            detail = str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
-            print(f"runtime policy replay unavailable: {detail}", file=sys.stderr)
-            return 1
-        _write(
-            {
-                "status": replay.status,
-                "first_breaking_at": (
-                    None
-                    if replay.first_breaking_at is None
-                    else replay.first_breaking_at.astimezone(UTC).isoformat()
-                ),
-                "reason_codes": list(replay.reason_codes),
-                "sample_count": replay.sample_count,
-                "max_gap_seconds": replay.max_gap_seconds,
-            },
-            as_json=args.json,
-        )
-        return 0
+            return 0
+        finally:
+            _close_connection_owner(control_plane)
     if args.command == "runtime-fault-matrix":
         try:
             _write(run_fault_matrix(), as_json=args.json)
@@ -2025,6 +2040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             failure_reason = "qualification-service.startup-failed"
             service = _qualification_service_from_env(
+                connection_factory=connection_factory,
                 batch_size=args.batch_size,
                 interval_seconds=args.interval_seconds,
                 writer_id=args.writer_id,
@@ -2055,6 +2071,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        finally:
+            _close_connection_owner(connection_factory)
     try:
         control_plane = _control_plane_from_env()
     except DatabaseRoleContractError as error:
@@ -2496,6 +2514,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(f"control-plane command unavailable: {type(error).__name__}", file=sys.stderr)
         return 1
+    finally:
+        _close_connection_owner(control_plane)
 
 
 if __name__ == "__main__":
