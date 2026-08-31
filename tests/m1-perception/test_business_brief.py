@@ -113,6 +113,88 @@ def test_renderer_emits_five_business_sections() -> None:
     assert "异常与恢复" in text
 
 
+def test_renderer_uses_labelled_scalar_lines_instead_of_mapping_reprs() -> None:
+    status = _status_fixture()
+    status["structure"] = {
+        "latest_manifest": {
+            "generation_key": "structure-1",
+            "record_count": 12,
+            "published_at": "2026-08-31T08:00:00+00:00",
+        }
+    }
+    status["quote"] = {
+        "current_pointer": {
+            "generation_key": "quote-1",
+            "parent_structure_generation_key": "structure-1",
+            "record_count": 12,
+            "published_at": "2026-08-31T08:01:00+00:00",
+        }
+    }
+    status["open_incidents"] = [
+        {"component": "quote", "severity": "critical", "summary": "projection unavailable"}
+    ]
+    status["runtime_incidents"] = {
+        "items": [
+            {"component": "runtime", "severity": "warning", "summary": "retrying"},
+            {"component": "structure", "severity": "critical", "summary": "stalled"},
+            {"component": "quote", "severity": "warning", "summary": "late"},
+            {"component": "extra", "severity": "warning", "summary": "hidden"},
+        ],
+        "total": 4,
+    }
+    status["recovery_actions"] = {"items": [], "total": 2}
+    status["runtime_watchdog"] = {
+        "current": {"kind": "current-kind"},
+        "recent_events": [{"kind": "recent-kind"}],
+    }
+    opportunities = _opportunities_fixture()
+    opportunity_items = opportunities["items"]
+    assert isinstance(opportunity_items, list)
+    opportunity_items[0] = {
+        "group_id": "group-1",
+        "event_id": "event-1",
+        "gross_edge_bps": 123.4,
+        "max_bundle_size": 5.0,
+    }
+
+    text = render_business_brief(build_business_brief(status, opportunities))
+
+    assert "Structure 最新 generation：structure-1" in text
+    assert "Structure record_count：12" in text
+    assert "Structure published_at：2026-08-31T08:00:00+00:00" in text
+    assert "Quote current generation：quote-1" in text
+    assert "Quote parent：structure-1" in text
+    assert "Quote record_count：12" in text
+    assert "Quote published_at：2026-08-31T08:01:00+00:00" in text
+    assert "资格原因：freshness.quote" in text
+    assert "认证机会数：6" in text
+    assert "机会 1：group=group-1；event=event-1；gross_edge_bps=123.4；max_bundle_size=5.0" in text
+    assert "Open incidents：1" in text
+    assert "Runtime incidents：4" in text
+    assert "Recovery actions：2" in text
+    assert "Runtime incident：runtime / warning — retrying" in text
+    assert "Runtime incident：structure / critical — stalled" in text
+    assert "Runtime incident：quote / warning — late" in text
+    assert "hidden" not in text
+    assert "Watchdog current kind：current-kind" in text
+    assert "Watchdog recent kind：recent-kind" in text
+    assert "{'" not in text
+
+
+def test_renderer_displays_missing_or_none_selected_values_as_not_provided() -> None:
+    status = _status_fixture()
+    status["qualification"] = {"eligibility_state": "paused", "eligibility_reason": None}
+    brief = build_business_brief(status, _opportunities_fixture())
+
+    text = render_business_brief(brief)
+
+    assert "Structure 最新 generation：未提供" in text
+    assert "Quote current generation：未提供" in text
+    assert "资格原因：未提供" in text
+    assert "Watchdog current kind：未提供" in text
+    assert "Watchdog recent kind：未提供" in text
+
+
 @pytest.mark.parametrize(
     ("status", "opportunities"),
     [
