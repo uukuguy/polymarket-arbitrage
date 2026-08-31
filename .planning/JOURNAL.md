@@ -12961,3 +12961,27 @@ do not deploy, migrate, reset qualification, or trade from this observation path
 [NEXT] Treat the status-reader `QueryCanceled` as a fresh, read-only observation
 to diagnose only with a bounded objective if it recurs; do not mutate deployment,
 database, qualification, recovery, or trading state from this entrypoint.
+
+### SESSION 394 — 2026-08-31 (business brief delivery)
+
+- [DELIVERY] `make control-plane-business-brief` is the daily default after strict
+  readiness; `format=json` serializes the same canonical summary for automation,
+  while `control-plane-status` and `control-plane-opportunities` remain the
+  unchanged raw audit readers. The brief caps displayed candidates at five and
+  does not authorize execution, fill, return, or P&L inference.
+- [TEST] The added guide contract failed before documentation because the guide
+  lacked `make control-plane-business-brief`; it passed after the reading-layer
+  guidance was added. Focused business-brief/manual tests, `docs-m1-check`,
+  planning-status, and diff hygiene are recorded with this delivery commit.
+- [LIVE READ-ONLY] The live brief exited 0. It reported qualification
+  `paused(freshness.structure)`, `需要升级=True`, zero current certified
+  opportunities, open warning incidents, runtime incident total 1, and recovery
+  actions/watchdog evidence. This is a paused/upgrade observation, not a
+  zero-opportunity business conclusion and not authorization to mutate M1 or
+  trade.
+
+[NEXT] Start the next daily observation with `make smoke-control-plane-prod`,
+then `make control-plane-business-brief`; use the raw status/opportunity readers
+only for audit drill-down. Route only a fresh supported finding to a bounded M1
+objective, thread, or backlog; do not deploy, migrate, reset qualification, or
+trade from this observation path.

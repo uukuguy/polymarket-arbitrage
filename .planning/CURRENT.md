@@ -16,8 +16,9 @@ lineage 让既有 qualification epoch 恢复 `eligible`，没有人工 SQL、epo
 freshness-SLO 放宽。Plan 268 关闭了 merge-review 提出的 scoped connection typing
 与 daemon pool 测试边界问题，全部工作已整合到 `main`。
 
-当前没有进行中的 M1 实现、部署、迁移或合并任务。日常 M1 业务证据固定为三个只读
-入口：strict readiness、durable business status 和认证机会投影。下一步只能根据**新的、
+当前没有进行中的 M1 实现、部署、迁移或合并任务。日常 M1 业务证据固定为 strict
+readiness 与默认的一屏 business brief；后者可以按需下钻到 durable business status 和
+认证机会投影。下一步只能根据**新的、
 只读的生产证据**定义一个有界目标；不得因为本文曾包含的旧授权包而重走 revision-026
 路径。
 
@@ -50,12 +51,13 @@ freshness-SLO 放宽。Plan 268 关闭了 merge-review 提出的 scoped connecti
 
 ## 当前下一步
 
-1. 依次运行 `make smoke-control-plane-prod`、`make control-plane-status limit=20` 和
-   `make control-plane-opportunities limit=50`。第三个入口只读访问
-   `https://polyarb-control-api.fly.dev/perception/opportunities`；三者分别回答 API
-   权威可达性、durable 业务真相和当前认证机会，不能互相替代。
-2. 仅当机会投影成功返回 `status=available` 且
-   `current_opportunity_count=0` 时，才可记录“暂无认证机会”；命令非零、HTTP/解析失败或
-   `status` 不可用时，记录“业务数据不可用”，不得归零。
+1. 依次运行 `make smoke-control-plane-prod` 和 `make control-plane-business-brief`；每日
+   默认 brief 的 text 可用 `format=json` 作为自动日报输入。只有需要核验原始事实时，才
+   下钻到 `make control-plane-status limit=20` 和
+   `make control-plane-opportunities limit=50`（后者只读访问
+   `https://polyarb-control-api.fly.dev/perception/opportunities`）。
+2. brief 最多显示 5 个候选；它们不代表成交、收益或 P&L。仅当机会投影成功返回
+   `status=available` 且 `current_opportunity_count=0` 时，才可记录“暂无认证机会”；brief
+   或审计命令非零、HTTP/解析失败或 `status` 不可用时，记录“业务数据不可用”，不得归零。
 3. 将新发现路由为：有明确验证产出的 M1 phase、跨 workstream 的 thread 更新，或暂不做的 backlog。
 4. 在没有新的证据与授权前，不进行 deploy、migration、secret、recovery 或 qualification mutation；已退役 L1/L2 smoke 命令会明确失败并给出替代入口。

@@ -809,6 +809,20 @@ def test_daily_business_intelligence_guide_keeps_business_truth_boundaries() -> 
     assert "106-M1日常业务情报操作指南" in index
 
 
+def test_daily_business_intelligence_guide_explains_business_brief_reading_layers() -> None:
+    guide = (ROOT / "docs/learning/106-M1日常业务情报操作指南.md").read_text()
+
+    for phrase in (
+        "make control-plane-business-brief",
+        "format=json",
+        "最多 5",
+        "control-plane-status",
+        "control-plane-opportunities",
+        "不代表成交、收益或 P&L",
+    ):
+        assert phrase in guide
+
+
 def test_docs_m1_check_make_target() -> None:
     result = subprocess.run(["make", "docs-m1-check"], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -36,6 +36,12 @@ progress:
   is `08:30` daily plus `09:00–23:00` every `15` minutes, with runtime/recovery
   evidence read from `.runtime_incidents`, `.recovery_actions`, and
   `.runtime_watchdog`.
+- **Business-brief delivery:** the daily default is now `make
+  control-plane-business-brief`; its text and `format=json` are one canonical,
+  read-only summary. It exposes at most five research candidates and never
+  implies a fill, return, P&L, order, or trading authority. Nonzero means
+  `业务数据不可用`; operators audit with `control-plane-status` and
+  `control-plane-opportunities` rather than treating it as zero opportunities.
 
 ## Production Invariants
 
@@ -69,10 +75,11 @@ progress:
 ## Next Action
 
 1. Obtain fresh, read-only business evidence in order: `make
-   smoke-control-plane-prod`, `make control-plane-status limit=20`, then `make
-   control-plane-opportunities limit=50`. The final command reads the current
-   certified projection at
-   `https://polyarb-control-api.fly.dev/perception/opportunities`; it adds no
+   smoke-control-plane-prod`, then `make control-plane-business-brief`. Use
+   `format=json` only for automation of the same summary; audit a result through
+   `make control-plane-status limit=20` and `make control-plane-opportunities
+   limit=50`. The final command reads the current certified projection at
+   `https://polyarb-control-api.fly.dev/perception/opportunities`; none adds
    deployment, job, qualification, or trading authority.
 2. Treat `status=available` with `current_opportunity_count=0` as a verified
    zero only. A nonzero command exit, HTTP/JSON failure, or unavailable status
