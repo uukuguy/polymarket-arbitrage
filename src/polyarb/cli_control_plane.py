@@ -633,6 +633,20 @@ def _read_business_brief_opportunities(*, limit: int) -> Mapping[str, object]:
     return payload
 
 
+def _read_business_overview() -> Mapping[str, object]:
+    """Read the one published business authority; no local DB composition."""
+    request = Request(
+        "https://polyarb-control-api.fly.dev/perception/business-overview", method="GET"
+    )
+    with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed public authority
+        if not isinstance(getattr(response, "status", None), int) or not 200 <= response.status < 300:
+            raise BusinessBriefUnavailable("business-overview-http-unavailable")
+        payload = json.loads(response.read())
+    if not isinstance(payload, Mapping) or payload.get("status") != "available":
+        raise BusinessBriefUnavailable("business-overview-unavailable")
+    return payload
+
+
 def _read_fly_machine_states(machine_ids: Sequence[str], *, app: str) -> dict[str, str]:
     """Read exact Fly machine state using its local CLI, with no machine mutation."""
     try:
@@ -1974,12 +1988,10 @@ async def _run_runtime_reconcile_service(
     return {"status": "stopped", "turns": turns}
 
 
-def _dispatch_business_brief(
-    control_plane: PostgresControlPlane, args: argparse.Namespace
-) -> int:
-    """Build and render the bounded business brief from its two authorities."""
+def _dispatch_business_brief(args: argparse.Namespace) -> int:
+    """Render the sole published business authority."""
     try:
-        brief = control_plane.business_overview()
+        brief = _read_business_overview()
     except (OSError, RuntimeError, ValueError, psycopg.Error, BusinessBriefUnavailable):
         print("业务数据不可用", file=sys.stderr)
         return 2
@@ -2013,6 +2025,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
         return 2
+    if args.command == "business-brief":
+        return _dispatch_business_brief(args)
     if args.command == "render-rollout":
         try:
             artifacts = render_rollout_artifacts(
@@ -2230,9 +2244,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         control_plane = _control_plane_from_env()
     except DatabaseRoleContractError as error:
-        if args.command == "business-brief":
-            print("业务数据不可用", file=sys.stderr)
-            return 2
         if args.command in {
             "runtime-reconcile-once",
             "runtime-reconcile-serve",
@@ -2243,14 +2254,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"control-plane command unavailable: {error}", file=sys.stderr)
         return 1
     if control_plane is None:
-        if args.command == "business-brief":
-            print("业务数据不可用", file=sys.stderr)
-            return 2
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
         return 2
     try:
-        if args.command == "business-brief":
-            return _dispatch_business_brief(control_plane, args)
         if args.command in {"cloud-soak-start", "cloud-soak-sample"}:
             try:
                 observation = _record_cloud_soak_observation(

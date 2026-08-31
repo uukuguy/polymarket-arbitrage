@@ -237,20 +237,19 @@ def test_business_brief_json_reads_one_atomic_business_overview(
     overview = {"schema_version": "m1.business-overview.v1", "status": "available"}
     calls: dict[str, object] = {}
 
-    class _ControlPlane:
-        def business_overview(self) -> dict[str, object]:
-            calls["business_overview"] = True
-            return overview
+    def fake_urlopen(request: Request, *, timeout: float) -> _OpportunityResponse:
+        calls["request"] = request
+        calls["timeout"] = timeout
+        return _OpportunityResponse(overview)
 
-        def close(self) -> None:
-            calls["closed"] = True
-
-    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: _ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "urlopen", fake_urlopen)
 
     assert cli_control_plane.main(["business-brief", "--format", "json"]) == 0
 
-    assert calls["business_overview"] is True
-    assert calls["closed"] is True
+    request = calls["request"]
+    assert isinstance(request, Request)
+    assert request.full_url == "https://polyarb-control-api.fly.dev/perception/business-overview"
+    assert calls["timeout"] == 10
     assert json.loads(capsys.readouterr().out) == overview
 
 

@@ -781,8 +781,6 @@ control-plane-business-brief: export CONTROL_PLANE_BUSINESS_BRIEF_FORMAT := $(va
 control-plane-business-brief:
 	@format="$${CONTROL_PLANE_BUSINESS_BRIEF_FORMAT:-text}"; \
 	case "$$format" in text|json) ;; *) echo "usage: make control-plane-business-brief [format=text|json]" >&2; exit 2;; esac; \
-	set -a; [ -f .env ] && . ./.env; set +a; \
-	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane business-brief --format "$$format"
 
 ## control-plane-opportunities: Read current certified M1 business opportunities from production; optional limit=1..500 and after_group_id=.
