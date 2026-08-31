@@ -12919,3 +12919,24 @@ and retain the branch evidence/commits intact.
   control API strict readiness; `make control-plane-status` remains the
   separate durable business-truth reader. Retired targets fail loud instead of
   silently changing health semantics.
+
+### SESSION 392 — 2026-08-31 (daily business-intelligence delivery recorded)
+
+- [ENTRYPOINTS] The recoverable M1 read-only evidence path is `make
+  smoke-control-plane-prod`, `make control-plane-status limit=20`, and `make
+  control-plane-opportunities limit=50`. The certified opportunity projection
+  is `https://polyarb-control-api.fly.dev/perception/opportunities`; it is an
+  observation surface, not an execution or trading interface.
+- [OBSERVED] This session's `make smoke-control-plane-prod` returned HTTP 200
+  with `control_plane=available`. `make control-plane-opportunities limit=5`
+  returned `status=available`, `current_opportunity_count=0`, an empty item
+  list, and exit 0.
+- [DECISION SEMANTICS] `available + 0` is an observed, authenticated “暂无认证
+  机会” result. A nonzero exit, HTTP/JSON failure, or unavailable status is
+  “业务数据不可用”, not zero opportunities and not a reason to infer readiness,
+  execution, yield, or P&L.
+
+[NEXT] On the next daily observation, run the three read-only entrypoints in
+order and append the factual result to `docs/ops/m1-daily-business-intelligence-log.md`.
+Route only a fresh supported finding to a bounded M1 objective, thread, or backlog;
+do not deploy, migrate, reset qualification, or trade from this observation path.

@@ -62,8 +62,15 @@ progress:
 
 ## Next Action
 
-1. Obtain fresh, read-only production evidence with `make status` after its
-   dynamic source is refreshed.
-2. Classify any finding as either a bounded M1 objective, a cross-workstream
+1. Obtain fresh, read-only business evidence in order: `make
+   smoke-control-plane-prod`, `make control-plane-status limit=20`, then `make
+   control-plane-opportunities limit=50`. The final command reads the current
+   certified projection at
+   `https://polyarb-control-api.fly.dev/perception/opportunities`; it adds no
+   deployment, job, qualification, or trading authority.
+2. Treat `status=available` with `current_opportunity_count=0` as a verified
+   zero only. A nonzero command exit, HTTP/JSON failure, or unavailable status
+   is business data unavailable, never a zero-opportunity conclusion.
+3. Classify any finding as either a bounded M1 objective, a cross-workstream
    thread update, or a backlog item; do not infer an implementation task from
    historical `[NEXT]` entries.
