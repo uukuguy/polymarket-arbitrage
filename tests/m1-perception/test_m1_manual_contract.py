@@ -776,6 +776,25 @@ def test_manual_explains_opportunity_feed_diagnosis_and_non_readiness() -> None:
     assert "仍不代表机会 feed 已准备就绪" in text
 
 
+def test_daily_business_intelligence_guide_keeps_business_truth_boundaries() -> None:
+    guide = (ROOT / "docs/learning/106-M1日常业务情报操作指南.md").read_text()
+    log = (ROOT / "docs/ops/m1-daily-business-intelligence-log.md").read_text()
+    index = (ROOT / "docs/learning/00-INDEX.md").read_text()
+
+    for command in (
+        "`make smoke-control-plane-prod`",
+        "`make control-plane-status limit=20`",
+        "`make control-plane-opportunities limit=50`",
+    ):
+        assert command in guide
+    for conclusion in ("认证机会", "暂无认证机会", "资格暂停", "业务数据不可用"):
+        assert conclusion in guide
+    assert "不代表成交、收益或 P&L" in guide
+    assert "追加" in log
+    assert "北京时间" in log
+    assert "106-M1日常业务情报操作指南" in index
+
+
 def test_docs_m1_check_make_target() -> None:
     result = subprocess.run(["make", "docs-m1-check"], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
