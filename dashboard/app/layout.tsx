@@ -30,6 +30,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           }}
         >
           <strong>polyarb L1</strong>
+          <a href="/business" style={{ color: "#9ec5fe" }}>
+            /business
+          </a>
           <a href="/status" style={{ color: "#9ec5fe" }}>
             /status
           </a>
