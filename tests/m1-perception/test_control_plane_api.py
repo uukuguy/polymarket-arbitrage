@@ -163,6 +163,36 @@ def test_business_overview_route_fails_closed_when_authority_fails() -> None:
     }
 
 
+def test_business_research_page_routes_transport_generation_bound_rows() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class ResearchFocusedControlPlane:
+        def business_structure_page(
+            self, *, generation_key: str | None, limit: int, after: str
+        ) -> dict[str, object]:
+            assert generation_key == "structure:current"
+            assert limit == 2
+            assert after == "market:001"
+            return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "available", "items": [{"entity_id": "market:002"}], "limit": 2, "next_after": None}
+
+        def business_quote_page(
+            self, *, generation_key: str | None, limit: int, after: str
+        ) -> dict[str, object]:
+            assert generation_key is None
+            assert limit == 1
+            assert after == ""
+            return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "items": [{"market_id": "market:001"}], "limit": 1, "next_after": "market:001"}
+
+    with TestClient(create_control_plane_app(control_plane=ResearchFocusedControlPlane())) as client:
+        structure = client.get("/perception/business/structure?generation_key=structure%3Acurrent&limit=2&after=market%3A001")
+        quote = client.get("/perception/business/quotes?limit=1")
+
+    assert structure.status_code == 200
+    assert structure.json()["items"] == [{"entity_id": "market:002"}]
+    assert quote.status_code == 200
+    assert quote.json()["next_after"] == "market:001"
+
+
 def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 
