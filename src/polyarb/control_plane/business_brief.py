@@ -30,22 +30,29 @@ def build_business_brief(
     if eligibility_reason is not None and not isinstance(eligibility_reason, str):
         raise BusinessBriefUnavailable("qualification-eligibility-reason-malformed")
 
-    structure = _mapping(_required(status, field="status.structure"), field="status.structure")
+    structure = _mapping(
+        _required(status, field="status.structure"), field="status.structure"
+    )
     quote = _mapping(_required(status, field="status.quote"), field="status.quote")
     open_incidents = _sequence(
         _required(status, field="status.open_incidents"), field="status.open_incidents"
     )
-    runtime_incidents = _sequence(
-        _required(status, field="status.runtime_incidents"), field="status.runtime_incidents"
+    runtime_incidents, runtime_incident_total = _items_total_mapping(
+        _required(status, field="status.runtime_incidents"),
+        field="status.runtime_incidents",
     )
-    recovery_actions = _sequence(
-        _required(status, field="status.recovery_actions"), field="status.recovery_actions"
+    recovery_actions, _ = _items_total_mapping(
+        _required(status, field="status.recovery_actions"),
+        field="status.recovery_actions",
     )
     watchdog = _mapping(
         _required(status, field="status.runtime_watchdog"), field="status.runtime_watchdog"
     )
     opportunity_count = _required_count(opportunities, field="current_opportunity_count")
-    items = _sequence(_required(opportunities, field="opportunities.items"), field="opportunities.items")
+    items = _sequence(
+        _required(opportunities, field="opportunities.items"),
+        field="opportunities.items",
+    )
 
     return {
         "status": "available",
@@ -54,7 +61,7 @@ def build_business_brief(
             "eligibility_reason": eligibility_reason,
             "escalate": eligibility_state == "paused"
             or bool(open_incidents)
-            or bool(runtime_incidents),
+            or runtime_incident_total > 0,
         },
         "structure": structure,
         "quote": quote,
@@ -117,6 +124,16 @@ def _sequence(value: object, *, field: str) -> Sequence[object]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise BusinessBriefUnavailable(f"{field}-malformed")
     return value
+
+
+def _items_total_mapping(value: object, *, field: str) -> tuple[Mapping[str, object], int]:
+    """Validate a bounded control-plane collection without changing its shape."""
+    mapping = _mapping(value, field=field)
+    items = _sequence(_required(mapping, field=f"{field}.items"), field=f"{field}.items")
+    total = _required_count(mapping, field=f"{field}.total")
+    if total < len(items):
+        raise BusinessBriefUnavailable(f"{field}.total-malformed")
+    return mapping, total
 
 
 def _required_text(mapping: Mapping[str, object], *, field: str) -> str:

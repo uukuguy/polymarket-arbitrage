@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
 from polyarb.control_plane.business_brief import (
@@ -21,8 +23,8 @@ def _status_fixture() -> dict[str, object]:
             "eligibility_reason": "freshness.quote",
         },
         "open_incidents": [],
-        "runtime_incidents": [],
-        "recovery_actions": [],
+        "runtime_incidents": {"items": [], "total": 0},
+        "recovery_actions": {"items": [], "total": 0},
         "runtime_watchdog": {"current": None, "recent_events": []},
     }
 
@@ -41,6 +43,8 @@ def _opportunities_fixture() -> dict[str, object]:
 def test_builds_available_brief_from_canonical_authorities() -> None:
     status = _status_fixture()
     opportunities = _opportunities_fixture()
+    opportunity_items = opportunities["items"]
+    assert isinstance(opportunity_items, list)
 
     brief = build_business_brief(status, opportunities)
 
@@ -55,17 +59,44 @@ def test_builds_available_brief_from_canonical_authorities() -> None:
         "quote": status["quote"],
         "opportunities": {
             "count": 6,
-            "items": opportunities["items"][:5],
+            "items": opportunity_items[:5],
         },
         "incidents": {
             "open": [],
-            "runtime": [],
-            "recovery_actions": [],
+            "runtime": {"items": [], "total": 0},
+            "recovery_actions": {"items": [], "total": 0},
             "watchdog": status["runtime_watchdog"],
         },
     }
-    assert brief["opportunities"]["count"] == 6
-    assert len(brief["opportunities"]["items"]) == 5
+    brief_opportunities = brief["opportunities"]
+    assert isinstance(brief_opportunities, Mapping)
+    assert brief_opportunities["count"] == 6
+    items = brief_opportunities["items"]
+    assert isinstance(items, list)
+    assert len(items) == 5
+
+
+def test_preserves_real_runtime_mappings_and_escalates_for_total() -> None:
+    status = _status_fixture()
+    status["qualification"] = {
+        "eligibility_state": "qualified",
+        "eligibility_reason": None,
+    }
+    status["runtime_incidents"] = {"items": [], "total": 1}
+    status["recovery_actions"] = {
+        "items": [{"action_id": "action-1", "state": "pending"}],
+        "total": 1,
+    }
+
+    brief = build_business_brief(status, _opportunities_fixture())
+
+    incidents = brief["incidents"]
+    assert isinstance(incidents, Mapping)
+    assert incidents["runtime"] == status["runtime_incidents"]
+    assert incidents["recovery_actions"] == status["recovery_actions"]
+    conclusion = brief["conclusion"]
+    assert isinstance(conclusion, Mapping)
+    assert conclusion["escalate"] is True
 
 
 def test_renderer_emits_five_business_sections() -> None:
