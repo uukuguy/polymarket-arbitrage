@@ -24,12 +24,12 @@ Minor review findings to revisit in final whole-branch review: none.
 
 ## M1 Daily Business Intelligence
 
-Plan: `docs/superpowers/plans/2026-08-31-m1-daily-business-intelligence.md`  
+Plan: `docs/superpowers/plans/2026-08-31-m1-daily-business-intelligence.md`
 Baseline: `a9fe9229`
 
 - Task 1: complete (commits a9fe9229..f3589981, review clean)
 - Task 2: complete (commit ee9e1da6, review clean)
-- Task 3: implementation commit e3454418; summary SHA / SDD-worktree cleanup pending review fix
+- Task 3: complete (commits e3454418..f0a62324, review clean after SHA expansion and SDD cleanup)
 
 ## Scoped Upstream Fault Control
 
