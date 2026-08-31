@@ -5,6 +5,12 @@
 Task 6 closure implemented in `.worktrees/m1-self-healing` with HEAD verified
 as `e3c1fc83` before edits.
 
+Closure commit:
+
+```text
+ac91da5a docs(05.6-207): close scoped runtime role implementation
+```
+
 No production connection or mutation was performed. No Fly deploy, app
 creation, secret installation, production login provisioning, recovery
 enablement, fault injection, restart, or downgrade was performed.
@@ -167,6 +173,18 @@ Output ended with:
 ✓ no drift detected — every shipped plan has a SUMMARY.
 ```
 
+Post-commit command:
+
+```bash
+make planning-status
+```
+
+Output ended with:
+
+```text
+✓ no drift detected — every shipped plan has a SUMMARY.
+```
+
 Command:
 
 ```bash
@@ -185,3 +203,325 @@ Plan 207 were checked with the required Pyright command.
 - `.superpowers/sdd/task-5-report.md` was pre-existing dirty state and was not
   staged.
 - `dist/` build artifacts are ignored and not staged.
+
+## Review Follow-up — 2026-08-26
+
+Review request changes were completed in follow-up commit `eee29e99`
+(`fix(05.6-207): make closure state auditable`).
+
+Changed documents and guard files:
+
+- `.planning/CURRENT.md` now reflects Plan 05.6-207 local closure, final
+  Task-5 SHA `e3c1fc83`, production DB `postgres`, production revisions
+  022/023/024/025 only, revision 026 NOT APPLIED, original four apps running,
+  new two apps absent, observe-only NOT RUN, and the next action as a fresh
+  exact authorization package.
+- `.planning/workstreams/m1-perception/STATE.md`, `.planning/JOURNAL.md`, and
+  `.planning/threads/market-observation-architecture.md` now record the same
+  truth boundary and the planning guard fix.
+- `05.6-207-SUMMARY.md` now has explicit `plan-source` frontmatter:
+  `docs/superpowers/plans/2026-08-25-m1-runtime-scoped-database-roles.md`.
+- `scripts/planning_status.py` audits explicitly registered external-plan
+  summaries and reports drift when the registered plan-side anchor is missing.
+- `.githooks/pre-commit` now covers `docs(<phase-plan>)` closure commits while
+  ignoring non-plan-scoped docs commits.
+- `scripts/check_m1_manual.py` received a one-entry checker-registry fix for
+  the already-existing `smoke-control-plane-dashboard` Make target so the
+  required `tests/m1-perception` gate can pass.
+
+Initial RED evidence for the review gap:
+
+```bash
+uv run pytest tests/test_planning_status.py tests/m1-perception/test_m1_manual_contract.py::test_precommit_blocks_plan_scoped_docs_commit_without_summary tests/m1-perception/test_m1_manual_contract.py::test_precommit_ignores_non_plan_scoped_docs_commit -q
+```
+
+Output:
+
+```text
+...FFF.                                                                  [100%]
+```
+
+Final checker/hook tests:
+
+```bash
+uv run pytest tests/test_planning_status.py tests/m1-perception/test_m1_manual_contract.py::test_precommit_blocks_plan_scoped_docs_commit_without_summary tests/m1-perception/test_m1_manual_contract.py::test_precommit_ignores_non_plan_scoped_docs_commit -q
+```
+
+Output:
+
+```text
+........                                                                 [100%]
+```
+
+Broader related checker/manual-hook tests:
+
+```bash
+uv run pytest tests/test_planning_status.py tests/m1-perception/test_m1_manual_contract.py -q
+```
+
+Output:
+
+```text
+...................................................................      [100%]
+```
+
+Task 6 scoped pytest:
+
+```bash
+uv run pytest tests/alembic/test_024.py tests/alembic/test_025.py tests/alembic/test_026.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_control_plane_runtime_fault_matrix.py tests/m1-perception/test_makefile_contract.py tests/climb/test_eval_local.py -q
+```
+
+Output:
+
+```text
+..........................................
+.............................. [ 25%]
+........................................................................ [ 50%]
+........................................................................ [ 75%]
+.....................................................................    [100%]
+```
+
+Ruff:
+
+```bash
+uv run ruff check alembic/versions/026_m1_runtime_scoped_roles.py src/polyarb/control_plane src/polyarb/cli_control_plane.py tests/alembic/test_026.py tests/m1-perception tools/climb/eval_local.py scripts/planning_status.py scripts/check_m1_manual.py tests/test_planning_status.py
+```
+
+Output:
+
+```text
+All checks passed!
+```
+
+Pyright:
+
+```bash
+uv run pyright src/polyarb/control_plane/db_role_contract.py src/polyarb/control_plane/db_role_admin.py src/polyarb/control_plane/qualification_identity.py src/polyarb/cli_control_plane.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+Build:
+
+```bash
+uv build
+```
+
+Output:
+
+```text
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/polyarb-0.1.0.tar.gz
+Successfully built dist/polyarb-0.1.0-py3-none-any.whl
+```
+
+Post-commit `make status` truth excerpt:
+
+```bash
+make status
+```
+
+Output excerpt:
+
+```text
+M1 self-healing 的本地实现已经推进到 Plan 05.6-207 closure：最终 Task-5
+SHA 为 `e3c1fc83`
+
+生产边界仍然严格保持在授权前状态：production DB 是 `postgres`，只 applied
+`022`/`023`/`024`/`025`；revision `026` **NOT APPLIED**。
+
+没有 fault mutation，observe-only window 仍 **NOT RUN**。
+
+- commit: eee29e99
+- worktree: dirty
+```
+
+Post-commit planning status:
+
+```bash
+make planning-status
+```
+
+Output excerpt:
+
+```text
+Planning status — 88 plans across 3 workstreams
+
+    05.6-self-healing-structure-production
+      plan 05.6-207  SUMMARY ✓  12 commits  → OK
+
+✓ no drift detected — every shipped plan has a SUMMARY.
+```
+
+Post-commit working tree truth:
+
+```bash
+git status --short && git rev-parse --short=8 HEAD
+```
+
+Output:
+
+```text
+ M .superpowers/sdd/progress.md
+ M .superpowers/sdd/task-5-report.md
+ M .superpowers/sdd/task-6-report.md
+eee29e99
+```
+
+Truth boundary remains unchanged: no production connection, production
+migration, Fly deploy/app creation, secret installation, production login
+provisioning, recovery enablement, fault mutation, restart, or downgrade was
+performed during this follow-up.
+
+## Rereview Follow-up — 2026-08-26
+
+Remaining Important rereview item fixed in commit `93580b81`
+(`fix(05.6-207): narrow manual registry parser state`).
+
+Change:
+
+- `scripts/check_m1_manual.py` now narrows the diff header path through a local
+  `str` before storing it in `current_path` and passing it to
+  `chunks.setdefault`, preserving behavior while making the modified file
+  Pyright-clean.
+
+Initial diagnostic:
+
+```bash
+uv run pyright scripts/check_m1_manual.py
+```
+
+Output:
+
+```text
+/Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/m1-self-healing/scripts/check_m1_manual.py
+  /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/m1-self-healing/scripts/check_m1_manual.py:298:31 - error: Argument of type "str | None" cannot be assigned to parameter "key" of type "str" in function "setdefault"
+    Type "str | None" is not assignable to type "str"
+      "None" is not assignable to "str" (reportArgumentType)
+1 error, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+Fixed-file diagnostic:
+
+```bash
+uv run pyright scripts/check_m1_manual.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+Focused checker tests:
+
+```bash
+uv run pytest tests/m1-perception/test_m1_manual_contract.py tests/test_planning_status.py -q
+```
+
+Output:
+
+```text
+...................................................................      [100%]
+```
+
+Task 6 required Pyright/Ruff:
+
+```bash
+uv run pyright src/polyarb/control_plane/db_role_contract.py src/polyarb/control_plane/db_role_admin.py src/polyarb/control_plane/qualification_identity.py src/polyarb/cli_control_plane.py scripts/check_m1_manual.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+```bash
+uv run ruff check alembic/versions/026_m1_runtime_scoped_roles.py src/polyarb/control_plane src/polyarb/cli_control_plane.py tests/alembic/test_026.py tests/m1-perception tools/climb/eval_local.py scripts/planning_status.py scripts/check_m1_manual.py tests/test_planning_status.py
+```
+
+Output:
+
+```text
+All checks passed!
+```
+
+Diff check:
+
+```bash
+git diff --check
+```
+
+Output: no stdout/stderr; exit code 0.
+
+Post-commit `make status` truth excerpt:
+
+```bash
+make status
+```
+
+Output excerpt:
+
+```text
+M1 self-healing 的本地实现已经推进到 Plan 05.6-207 closure：最终 Task-5
+SHA 为 `e3c1fc83`
+
+生产边界仍然严格保持在授权前状态：production DB 是 `postgres`，只 applied
+`022`/`023`/`024`/`025`；revision `026` **NOT APPLIED**。
+
+没有 fault mutation，observe-only window 仍 **NOT RUN**。
+
+- commit: 93580b81
+- worktree: dirty
+```
+
+Post-commit planning status:
+
+```bash
+make planning-status
+```
+
+Output excerpt:
+
+```text
+Planning status — 88 plans across 3 workstreams
+
+    05.6-self-healing-structure-production
+      plan 05.6-207  SUMMARY ✓  12 commits  → OK
+
+✓ no drift detected — every shipped plan has a SUMMARY.
+```
+
+Post-commit working tree truth:
+
+```bash
+git status --short && git rev-parse --short=8 HEAD
+```
+
+Output:
+
+```text
+ M .superpowers/sdd/progress.md
+ M .superpowers/sdd/task-5-report.md
+ M .superpowers/sdd/task-6-report.md
+93580b81
+```
+
+Truth boundary remains unchanged: no production connection, production
+migration, Fly deploy/app creation, secret installation, production login
+provisioning, recovery enablement, fault mutation, restart, or downgrade was
+performed during this rereview follow-up.

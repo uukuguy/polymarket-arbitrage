@@ -1,0 +1,8 @@
+# Exact v16 transactional worker lifecycle contract. Runtime commands, env,
+# guest shape and restart policy are preserved from each fresh Machine GET.
+app = "polyarb-control-worker-m1"
+primary_region = "ams"
+kill_signal = "SIGTERM"
+kill_timeout = 40
+
+[build]

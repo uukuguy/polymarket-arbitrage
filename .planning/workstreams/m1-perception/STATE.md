@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 211 single-authority circuit timing verified; commit and build revision-034 release before exact source recovery
-last_updated: "2026-08-29T06:25:32+08:00"
+stopped_at: Plan 212 exact v11 rollout live; fast-call lease renewal proven in production; Structure chain and fresh 86400-second qualification pending
+last_updated: "2026-08-29T10:12:07+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `032`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `035`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -55,17 +55,38 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Current production boundary:** Production is revision 033. Coordinator
-  `e82d1220b2d138` runs exact release
-  `65cee5b9f05cfd4481b37ec59d1174f61927796a`; controller
-  `6e82036dce4958` is stopped. Structure `683e46ea500dd8`, Quote `4d895231f66748` and
-  qualification `876077f0274598` remain on prior release `282480ec`. Two exact
-  isolated source probes executed only `probe-circuit` for
-  `structure-source:300:5959460:fetch:events:162`; zero publication pointers
-  mutated. The circuit is open after five mixed failures and one manual recovery
-  action remains. Its budget carries an erroneous 16-hour derived cooldown;
-  do not execute it until revision 034 and Plan 211 coordinator bytes are live.
-  Every formal Machine retains `SIGTERM/40s`.
+- **Current production boundary:** Production is revision 035. Runtime controller
+  `6e82036dce4958`, coordinator `e82d1220b2d138`, Structure worker
+  `683e46ea500dd8`, Quote worker `4d895231f66748`, and qualification worker
+  `876077f0274598` all run exact linux/amd64 child manifest
+  `sha256:ad92667df1c695897bcf1e06aae4c400d7a9400fe8aa5e8434ac71891d0d206c`
+  from release `c0fa2c2be4df970a89664634ff46fb803715b2fe`. Every formal Machine
+  retains `SIGTERM/40s`; the resident controller is observe-only with an empty
+  allowlist. The exact v11 OCI revision label, nonroot UID 10001, revision 035
+  and eight-job DAG were verified before rollout. An earlier tag with a wrong
+  full revision label was superseded without Machine mutation.
+- **Plan 05.6-212 lifecycle/episode repair:** Isolated production evidence proved
+  the provider page (0.164 seconds) and eight claim-shaped DB reads (2.292 seconds)
+  healthy. Five async worker types nevertheless executed synchronous claims on
+  the shared coordinator loop, so live contention delayed provider futures and
+  their timers until an outer 29-second boundary fired. All async claims now use
+  the cancellable daemon bridge without another timeout. Failed Gamma attempts
+  replace only their transport generation; stage-start facts precede blocking
+  I/O; revision 035 keys recovery budgets to immutable attempt/fingerprint
+  episodes; planning-status reads Git history once. Quote now drains 148 batches
+  through 12 independent lanes in roughly 95 seconds; terminal fan-in is
+  serialized and self-repairing; reconciler incidents close and reopen from
+  durable target facts; pooled Structure shutdown derives grace from its common
+  lease. Production v10 SIGTERM exited the active coordinator normally with code
+  0. V11 then proved the final cumulative-heartbeat repair: Opportunity lease
+  epoch 19 ran for roughly 212 seconds against a nominal 120-second lease,
+  renewed at `02:05:21Z`, and published successfully at `02:05:51Z`; its retry
+  incident is closed and circuits remain zero. The pre-v11 complete M1 suite is
+  4,055 passed, one skip and one expected xfail; the fresh exact-v11 4,059-test
+  suite is running without an outer timeout and climb is 50/50. Qualification is
+  bound to exact release `c0fa2c2b`, currently recovering while the newer
+  Structure chain converges, and has no certificate. M1 remains incomplete until
+  it earns and independently reverifies a continuous 86,400-second certificate.
 - **Plan 05.6-211 circuit timing repair:** `next_probe_at - opened_at` was
   incorrectly converted back into `now + cooldown`, compounding elapsed open
   age into a second recovery clock. Runtime reconciliation now consumes the

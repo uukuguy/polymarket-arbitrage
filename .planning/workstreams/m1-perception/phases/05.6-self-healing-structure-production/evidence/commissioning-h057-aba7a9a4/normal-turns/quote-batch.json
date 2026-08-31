@@ -1,0 +1,1 @@
+{"attempt_id":"0e834071-91d8-489f-a47b-f8579be3866c","postcondition_fact_id":"postgres:m1_quote_batch_receipts:quote:88a6cb669b064ab1938ac6a06d4ff3f2e232bccba5001c9ef5372fed07e9e977:batch:0","succeeded_at":"2031-01-02T12:05:30+00:00","success_fact_id":"8ce8ea3d-5c92-4b93-a347-5c9b80138483","terminal_fact_id":"attempt:0e834071-91d8-489f-a47b-f8579be3866c"}

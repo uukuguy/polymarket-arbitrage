@@ -1,0 +1,24 @@
+# Exact v16 observe-only runtime controller contract.
+app = "polyarb-runtime-controller-m1"
+primary_region = "ams"
+kill_signal = "SIGTERM"
+kill_timeout = 40
+
+[env]
+POLYARB_DB_EXPECTED_DATABASE = "postgres"
+POLYARB_RUNTIME_ROLE = "control-plane"
+POLYARB_RUNTIME_RECOVERY_MODE = "observe-only"
+POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""
+
+[build]
+
+[processes]
+controller = "python -m polyarb.cli_control_plane runtime-reconcile-serve --enable --interval-seconds 30 --json"
+
+[[restart]]
+policy = "always"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["controller"]

@@ -1,0 +1,1 @@
+{"attempt_id":"476da556-94e7-486f-886a-b9527e85834b","postcondition_fact_id":"postgres:m1_structure_source_window_bundles:commissioning:normal-turn:structure-materialize:materialize","succeeded_at":"2031-01-02T12:01:30+00:00","success_fact_id":"990bb776-46be-484b-b2c6-07204093b27c","terminal_fact_id":"attempt:476da556-94e7-486f-886a-b9527e85834b"}
