@@ -182,6 +182,24 @@ LIVING_DOC_CONTRACT_GATE_COMMANDS = {
         "-q",
     ],
 }
+ATOMIC_BUSINESS_RESEARCH_READ_MODEL_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv", "run", "pytest",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "-k", "business_overview or opportunity_projection_publish_is_atomic",
+        "-q",
+    ],
+    "integration": [
+        "uv", "run", "pytest",
+        "tests/m1-perception/test_control_plane_api.py",
+        "tests/m1-perception/test_business_brief.py",
+        "tests/m1-perception/test_business_dashboard_contract.py",
+        "-q",
+    ],
+    "cli": ["make", "dashboard-typecheck"],
+    "restart": ["make", "docs-m1-check"],
+}
 OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS = {
     "planning": ["make", "planning-status"],
     "unit": [
@@ -815,7 +833,9 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
-    if manifest.get("paradigm") == "living-doc-contract":
+    if manifest.get("paradigm") == "atomic-business-research-read-model":
+        commands = ATOMIC_BUSINESS_RESEARCH_READ_MODEL_GATE_COMMANDS
+    elif manifest.get("paradigm") == "living-doc-contract":
         commands = LIVING_DOC_CONTRACT_GATE_COMMANDS
     elif manifest.get("paradigm") == "opportunity-feed-chain-truth":
         commands = OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS
