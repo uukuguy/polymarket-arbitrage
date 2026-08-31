@@ -790,6 +790,17 @@ def test_daily_business_intelligence_guide_keeps_business_truth_boundaries() -> 
     for conclusion in ("认证机会", "暂无认证机会", "资格暂停", "业务数据不可用"):
         assert conclusion in guide
     assert "不代表成交、收益或 P&L" in guide
+    assert "src/polyarb/control_plane/api.py:34" in guide
+    assert "src/polyarb/control_plane/api.py:61" in guide
+    assert ".structure" in guide
+    assert ".quote" in guide
+    assert ".qualification" in guide
+    assert ".open_incidents" in guide
+    assert ".runtime_watchdog" in guide
+    assert "早晨开盘前" in guide
+    assert "活跃时段每 15 分钟" in guide
+    for escalation in ("HTTP 503", "status=unavailable", "freshness", "recovery"):
+        assert escalation in guide
     assert "追加" in log
     assert "北京时间" in log
     assert "106-M1日常业务情报操作指南" in index

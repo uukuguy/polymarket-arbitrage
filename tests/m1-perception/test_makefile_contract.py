@@ -114,6 +114,7 @@ def _fake_curl_env(
         "    with open(body_path, 'w', encoding='utf-8') as handle:\n"
         "        handle.write(os.environ.get('FAKE_CURL_BODY', ''))\n"
         "print(os.environ.get('FAKE_CURL_STATUS', '200'), end='')\n"
+        "sys.exit(int(os.environ.get('FAKE_CURL_EXIT', '0')))\n"
     )
     fake_curl.chmod(0o755)
     env = os.environ.copy()
@@ -122,6 +123,26 @@ def _fake_curl_env(
     env["FAKE_CURL_STATUS"] = status
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     return env, log_path
+
+
+def _fake_json_formatter(env: dict[str, str], tmp_path: Path) -> Path:
+    """Install a formatter sentinel so curl failure cannot be hidden by a pipe."""
+    bin_dir = Path(env["PATH"].split(os.pathsep, 1)[0])
+    log_path = tmp_path / "json-formatter-argv.jsonl"
+    fake_python = bin_dir / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env python3\n"
+        "from __future__ import annotations\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "with open(os.environ['FAKE_JSON_FORMATTER_LOG'], 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "print('{}')\n"
+    )
+    fake_python.chmod(0o755)
+    env["FAKE_JSON_FORMATTER_LOG"] = str(log_path)
+    return log_path
 
 
 def _fake_curl_calls(log_path: Path) -> list[list[str]]:
@@ -3493,8 +3514,12 @@ def test_control_plane_opportunities_is_current_read_only_business_entrypoint() 
     recipe = match.group("recipe")
 
     assert "https://polyarb-control-api.fly.dev/perception/opportunities" in recipe
-    assert "limit=$(or $(limit),50)" in recipe
-    assert "after_group_id=$(after_group_id)" in recipe
+    assert "export limit after_group_id" in makefile
+    assert "--get" in recipe
+    assert '--data-urlencode "limit=$${limit:-50}"' in recipe
+    assert '--data-urlencode "after_group_id=$$after_group_id"' in recipe
+    assert "$(limit)" not in recipe
+    assert "$(after_group_id)" not in recipe
     assert "curl --disable" in recipe
     assert "--connect-timeout 3" in recipe
     assert "--max-time 10" in recipe
@@ -3520,6 +3545,62 @@ def test_control_plane_opportunities_is_current_read_only_business_entrypoint() 
     )
     assert result.returncode == 0, result.stderr
     assert "control-plane-opportunities:" in result.stdout
+
+
+def test_control_plane_opportunities_encodes_untrusted_make_values_without_shell_execution(
+    tmp_path: Path,
+) -> None:
+    env, curl_log = _fake_curl_env(tmp_path, body='{"status":"available"}')
+    formatter_log = _fake_json_formatter(env, tmp_path)
+    shell_escape = tmp_path / "must-not-exist"
+    limit = f'50; touch {shell_escape}; #&"'
+    after_group_id = f"group&next#'; touch {shell_escape};"
+
+    result = subprocess.run(
+        [
+            "make",
+            "control-plane-opportunities",
+            f"limit={limit}",
+            f"after_group_id={after_group_id}",
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not shell_escape.exists()
+    curl_args = _fake_curl_calls(curl_log)[0]
+    assert curl_args.count("--data-urlencode") == 2
+    assert curl_args[curl_args.index("--data-urlencode") + 1] == f"limit={limit}"
+    after_index = curl_args.index("--data-urlencode", curl_args.index("--data-urlencode") + 1)
+    assert curl_args[after_index + 1] == f"after_group_id={after_group_id}"
+    assert curl_args[-1] == "https://polyarb-control-api.fly.dev/perception/opportunities"
+    assert formatter_log.exists()
+
+
+def test_control_plane_opportunities_preserves_curl_failure_without_formatting(
+    tmp_path: Path,
+) -> None:
+    env, curl_log = _fake_curl_env(tmp_path, body='{"error":"unavailable"}')
+    env["FAKE_CURL_EXIT"] = "22"
+    formatter_log = _fake_json_formatter(env, tmp_path)
+
+    result = subprocess.run(
+        ["make", "control-plane-opportunities"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert "Error 22" in result.stderr
+    assert len(_fake_curl_calls(curl_log)) == 1
+    assert not formatter_log.exists()
 
 
 def test_retired_market_truth_production_smoke_fails_loud_without_network_recipe() -> None:
