@@ -12897,3 +12897,25 @@ integration with the evidence above.
 [NEXT] With the main worktree made clean or its overlapping changes explicitly
 reconciled, run `git merge --ff-only feat/m1-self-healing` from the main checkout
 and retain the branch evidence/commits intact.
+
+### SESSION 390 — 2026-08-31 (M1 state entry points aligned)
+
+- [STATE ALIGNMENT] Replaced the stale Plan 05.6-207 / revision-026 dynamic
+  status narrative with the verified Plan 05.6-267/268 production closure:
+  release `3a70cd9f`, durable Quote recovery, successor-chain eligibility and
+  mainline integration.
+- [RECOVERY HYGIENE] Consumed the completed one-shot HANDOFF; no interrupted
+  agent or incomplete M1 plan remains.
+- [NEXT] Await fresh, read-only production evidence, then select one bounded
+  M1 objective. Historical `[NEXT]` entries do not authorize deployment,
+  migration, qualification reset, SLA widening, or manual job-state mutation.
+
+### SESSION 391 — 2026-08-31 (production observability entrypoints corrected)
+
+- [ROOT CAUSE] Historical `polyarb-l1` and `polyarb-l2` Fly apps are absent
+  (DNS NXDOMAIN and Fly API confirms no such app), so their production smoke
+  targets were false observability paths rather than live service checks.
+- [REPLACEMENT] `make smoke-control-plane-prod` now checks the current public
+  control API strict readiness; `make control-plane-status` remains the
+  separate durable business-truth reader. Retired targets fail loud instead of
+  silently changing health semantics.

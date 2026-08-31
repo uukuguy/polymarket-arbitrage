@@ -1,122 +1,47 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-08-26（Plan 05.6-207 local
-> closure；production revision 026 pending authorization）。
-> `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
+> M1 的唯一动态状态入口。最后对齐：2026-08-31。
+> `JOURNAL.md` 是追加式历史；旧的 `[NEXT]`、revision-026 授权包和 Plan 05.6-207
+> 叙述均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
-[M1 市场感知平台使用手册](../docs/M1-市场感知平台使用手册.md)；本文继续只维护动态状态。
+[M1 市场感知平台使用手册](../docs/M1-市场感知平台使用手册.md)。
 
 ## 一句话结论
 
-M1 self-healing 的本地实现已经推进到 Plan 05.6-207 final-rereview
-closure：经修正的应用可执行 release 为
-`d050c8290c52e07acb72c8db7fe3fb02072d126c`，本地代码包含 revision
-026、scoped runtime-controller / qualification-worker 数据库能力角色、daemon
-启动身份检查、login-role operator tooling、release/config identity、两份私有
-Fly app 模板，以及 scoped-DSN deterministic fault matrix v2。Final review 还把
-所有非系统 schema 的 relation/sequence 权限、schema 权限、对象归属、SECURITY
-DEFINER EXECUTE、数据库 CREATE、search path 与 PostgreSQL 16 会员选项收敛成完整闭集；
-两个 daemon 的应用 SQL 全部 schema-qualified。
+M1 self-healing 的最新完成闭环是 Plan 05.6-267/268：生产运行的精确 release 为
+`3a70cd9f5a52294fba5709f0d390421600baa5de`。它从 durable receipts 自动恢复了
+被阻塞的 Quote certifier；随后真实 Structure → Quote → Opportunity successor
+lineage 让既有 qualification epoch 恢复 `eligible`，没有人工 SQL、epoch reset 或
+freshness-SLO 放宽。Plan 268 关闭了 merge-review 提出的 scoped connection typing
+与 daemon pool 测试边界问题，全部工作已整合到 `main`。
 
-生产边界仍然严格保持在授权前状态：production DB 是 `postgres`，只 applied
-`022`/`023`/`024`/`025`；revision `026` **NOT APPLIED**。原四个 production
-apps 运行中；新的 runtime-controller 与 qualification-worker apps 不存在。没有
-scoped production login changes、没有新 secrets、没有 recovery enablement、
-没有 fault mutation，observe-only window 仍 **NOT RUN**。
+当前没有进行中的 M1 实现、部署、迁移或合并任务。下一步只能根据**新的、只读的生产
+证据**定义一个有界目标；不得因为本文曾包含的旧授权包而重走 revision-026 路径。
 
-下一步不是直接 migration 或 deploy，而是准备一份全新的 exact authorization
-package，明确绑定 corrected application release
-`d050c8290c52e07acb72c8db7fe3fb02072d126c`、production DB `postgres`、
-revision 026、两个 scoped login roles、两个新 private apps、observe-only mode、
-empty recovery allowlist、rollback procedure 和 05.6 evidence directory。
+## 最后验证的生产边界
 
-## 已验证可用的内容
-
-| 范围 | 当前结论 | 现在能否使用 |
+| 范围 | 已验证结论 | 当前约束 |
 |---|---|---|
-| M1 L1/L2/L3 existing production apps | 原四个 apps 运行；2026-08-25 post-migration worker health pass | 继续作为只读生产事实来源 |
-| Production database | `postgres`，revisions 022/023/024/025 applied；026 NOT APPLIED | 不允许假定 revision 026 权限已存在 |
-| Qualification incident ingress | 2026-08-25 audit rows = 1643 | 只作为生产审计事实，不替代新 observe-only window |
-| Plan 05.6-207 local runtime-role implementation | corrected application release `d050c8290c52e07acb72c8db7fe3fb02072d126c`；final-rereview fixes complete；local matrix v2 pass | 可用于准备授权包 |
-| New runtime-controller / qualification-worker apps | templates exist locally; production apps absent | 不可当作已部署 |
-| Observe-only production window | NOT RUN | 不可声明生产 enablement 通过 |
-| M2 paper execution/accounting | 既有本地模拟、账本和恢复测试可用 | 仍非真实下单系统 |
-| M3/M4 | 未开始 | 不可用 |
-| M5 | 有计划但依赖 M1 closure | 尚不可用 |
+| Quote durable recovery | Q1 的 140/140 receipt 由 coordinator 自动从 waiting 推进到 succeeded | 不使用 operator SQL 修复同类阻塞 |
+| Opportunity freshness | 过期 Q1 被正确隔离；新 Q2 在 29.768514 秒后发布 Opportunity | 不放宽 900 秒 SLA 来掩盖旧数据 |
+| Rolling qualification | `epoch-f66adc…` 从 `paused(freshness.structure)` 恢复为 `eligible` | 不重置 epoch 或重启整个窗口 |
+| Runtime health | 最后确认时零 expired leases、零 open circuits，API/controller 健康 | 新故障须以新证据处理 |
+| Delivery boundary | 8 个既有 Machines 保持身份和配置；release `3a70cd9f` 经 OrbStack 构建验证 | 不切换全局 Docker context，不配置 Colima |
 
-## Plan 05.6-207 本地证据
+## 当前权威证据
 
-- Additive revision 026 defines `m1_runtime_controller_capability` and
-  `m1_qualification_worker_capability` as non-login, non-inheriting,
-  non-elevated capability roles.
-- Runtime controller and qualification worker startup catalog-enumerate every
-  non-system schema, relation, sequence and SECURITY DEFINER routine, including
-  ownership/effective authority, database CREATE, active/role/database
-  search-path settings, and exact PostgreSQL 16 membership options before
-  service construction. Direct, PUBLIC, inherited and namespace amplification
-  fails closed; daemon application SQL is schema-qualified.
-- Runtime controller reads only `POLYARB_SUPABASE_DB_DSN`; qualification worker
-  reads only `POLYARB_QUALIFICATION_DB_DSN`. Templates and the operator runbook
-  preserve the same app-scoped mapping without aliases. Admin-only preflight,
-  provision and disable reconnect through
-  `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`, which is never installed in either app.
-- DSNs containing `options` or `search_path` overrides are rejected before a
-  connection or mutation. Database `TEMPORARY` remains explicitly allowed for
-  old-app compatibility; controlled active search path plus schema-qualified
-  SQL prevents temporary or user-schema shadow resolution.
-- Operator login-role commands are default-off and require `enable=1`; they do
-  not print DSNs, passwords, auth headers, provider response bodies, or SQL
-  password literals.
-- Real PG16 adversarial tests reject login-owned shadow schemas, role/database/
-  DSN search-path overrides, database CREATE, non-public ownership/grants and
-  non-exact `admin_option`/`inherit_option`/`set_option` membership while the
-  exact baseline lets both daemons work.
-- Local deterministic PG16/testcontainers matrix v2 covered 12 cases with
-  77 qualification facts, 12 observe decisions, 0 recovery actions, 0 database
-  leaks, 0 role leaks, repeated byte-for-byte `cmp` pass, output SHA256
-  `d4acee8edaa795adfd8d8e530f5140a97c52c71422ffcad6200de0adc60b173b`,
-  embedded digest
-  `2cb16da6eeaccb7e576530742da6d7c0afcfe3133d18c1969c242efa6885b63f`,
-  and qualification identity digest
-  `f1f4abe704d859409d01ba1e060839abf47b039a5b5cd4898aed76110c6b860c`.
-
-## 不要误用
-
-- Local PG16/testcontainers matrix evidence is local-only; it is not production
-  evidence and does not prove production revision 026.
-- A clean review does not authorize production migration, Fly deploy/app
-  creation, secret installation, login provisioning, recovery enablement, fault
-  injection, restart, or downgrade.
-- `make runtime-reconcile-serve enable=1` still defaults to observe-only unless
-  execute mode, exact allowlist, provider authority, budgets, leases and
-  independent health checks are all separately authorized.
-- `make qualification-worker-serve enable=1` cannot be treated as a production
-  epoch claim until revision 026 and the exact app/login/release/config package
-  are authorized and deployed, then the certificate independently verifies the
-  full window.
-- `make planning-status` now audits Plan 05.6-207 through its explicit
-  `plan-source` summary anchor and recomputes the SHA256 of every reviewed
-  template named in the NOT-RUN evidence. `.githooks/pre-commit` retains staged
-  SUMMARY safety while `.githooks/commit-msg` enforces plan-scoped subjects from
-  the actual commit message.
-- Fresh append-only local H-018 cycle 21 run `20260826-135855-h-018` scored 100/100,
-  includes the four scoped authority/identity/zero-action nodes, and binds to
-  executable commit `d050c8290c52e07acb72c8db7fe3fb02072d126c`.
+- [M1 STATE](workstreams/m1-perception/STATE.md) — 当前 phase、生产事实和硬约束。
+- [JOURNAL Session 387–390](JOURNAL.md) — Quote recovery、successor proof、merge
+  closure 与本次状态对齐。
+- [Plan 05.6-267 summary](workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-267-SUMMARY.md)
+  和 [Plan 05.6-268 summary](workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-268-SUMMARY.md)
+  — 完成证据。
+- [双时钟教学章节](../docs/learning/105-市场全集与可执行报价必须使用两个时钟.md)
+  — Structure/Quote 时钟与 lost-wakeup 的操作模型。
 
 ## 当前下一步
 
-Run:
-
-```bash
-/gsd-resume-work --ws m1-perception
-make planning-status
-```
-
-Then prepare, but do not execute, a fresh exact authorization package for:
-corrected application release `d050c8290c52e07acb72c8db7fe3fb02072d126c`;
-production database `postgres`;
-revision 026; the
-two scoped login roles; the two new private Fly apps; observe-only mode; empty
-recovery allowlist; rollback; and evidence directory
-`.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/`.
+1. 先运行 `make smoke-control-plane-prod` 验证公开控制 API strict readiness，再运行 `make control-plane-status` 读取 durable business truth；两者不可互相替代。
+2. 将新发现路由为：有明确验证产出的 M1 phase、跨 workstream 的 thread 更新，或暂不做的 backlog。
+3. 在没有新的证据与授权前，不进行 deploy、migration、secret、recovery 或 qualification mutation；已退役 L1/L2 smoke 命令会明确失败并给出替代入口。

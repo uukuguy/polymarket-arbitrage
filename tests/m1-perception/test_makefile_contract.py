@@ -3471,7 +3471,7 @@ def test_makefile_exposes_safe_worktree_lifecycle_targets() -> None:
     assert "--discard-unmerged" in makefile
 
 
-def test_make_help_exposes_market_truth_production_smoke() -> None:
+def test_make_help_exposes_control_plane_production_smoke() -> None:
     result = subprocess.run(
         ["make", "help"],
         cwd=PROJECT_ROOT,
@@ -3481,10 +3481,10 @@ def test_make_help_exposes_market_truth_production_smoke() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "smoke-market-truth-prod:" in result.stdout
+    assert "smoke-control-plane-prod:" in result.stdout
 
 
-def test_market_truth_production_smoke_is_read_only() -> None:
+def test_retired_market_truth_production_smoke_fails_loud_without_network_recipe() -> None:
     result = subprocess.run(
         ["make", "-n", "smoke-market-truth-prod"],
         cwd=PROJECT_ROOT,
@@ -3494,9 +3494,10 @@ def test_market_truth_production_smoke_is_read_only() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "https://polyarb-l1.fly.dev/health" in result.stdout
-    assert "market_truth:coverage" in result.stdout
-    assert "POST" not in result.stdout
+    assert "RETIRED: polyarb-l1 no longer exists." in result.stdout
+    assert "make smoke-control-plane-prod" in result.stdout
+    assert "make control-plane-status" in result.stdout
+    assert "fly.dev" not in result.stdout
 
 
 def test_l1_deploy_binds_exact_source_sha_and_scales_noninteractively() -> None:

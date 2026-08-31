@@ -782,64 +782,50 @@ def test_docs_m1_check_make_target() -> None:
     assert "M1 manual contract: OK" in result.stdout
 
 
-def test_smoke_health_prod_make_target_is_strict_and_read_only() -> None:
+def test_smoke_control_plane_prod_make_target_is_strict_and_read_only() -> None:
     makefile = (ROOT / "Makefile").read_text()
-    match = re.search(r"(?m)^smoke-health-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile)
-    assert match is not None, "strict production health target must exist"
+    match = re.search(r"(?m)^smoke-control-plane-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile)
+    assert match is not None, "strict control-plane production health target must exist"
     recipe = match.group("recipe")
     assert "curl --disable" in recipe
     assert re.search(r"--request\s+GET\b", recipe)
-    assert "https://polyarb-l1.fly.dev/health" in recipe
+    assert "https://polyarb-control-api.fly.dev/health" in recipe
+    assert '.status == "ok" and .control_plane == "available"' in recipe
     assert "/healthz" not in recipe
-    forbidden = ("flyctl", "scale", "post", "deploy", "secret", "restart", "chaos")
+    forbidden = ("flyctl", "scale", "post", "deploy", "secret", "restart", "chaos", "dsn")
     assert not any(re.search(rf"\b{token}\b", recipe.lower()) for token in forbidden)
 
 
-def test_smoke_l2_health_strict_prod_make_target_is_strict_and_read_only() -> None:
+def test_retired_production_health_targets_fail_loud_with_replacements() -> None:
     makefile = (ROOT / "Makefile").read_text()
-    match = re.search(r"(?m)^smoke-l2-health-strict-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile)
-    assert match is not None, "strict L2 production health target must exist"
-    recipe = match.group("recipe")
-    assert "curl --disable" in recipe
-    assert re.search(r"--request\s+GET\b", recipe)
-    assert "https://polyarb-l2.fly.dev/health" in recipe
-    assert "/healthz" not in recipe
-    assert re.search(
-        r'if \[ "\$\$HTTP_STATUS" = "200" \]; then.*else.*exit 1; fi',
-        recipe,
-        re.DOTALL,
-    ), "strict target must exit nonzero unless HTTP status is 200"
-    forbidden = (
-        "flyctl",
-        "scale",
-        "post",
-        "deploy",
-        "secret",
-        "secrets",
-        "restart",
-        "schema",
-        "migrate",
-        "migration",
-        "chaos",
-    )
-    recipe_lower = recipe.lower()
-    assert not any(
-        re.search(rf"\b{re.escape(operation)}\b", recipe_lower) for operation in forbidden
-    )
+    for target in (
+        "smoke-health-prod",
+        "smoke-market-truth-prod",
+        "smoke-healthz",
+        "smoke-l2-health-prod",
+        "smoke-l2-health-strict-prod",
+        "fly-l2-status",
+    ):
+        match = re.search(rf"(?m)^{target}:\n(?P<recipe>(?:\t.*\n)+)", makefile)
+        assert match is not None, f"retired target {target} must remain discoverable"
+        recipe = match.group("recipe")
+        assert "exit 2" in recipe
+        assert "make smoke-control-plane-prod" in recipe
+        assert "make control-plane-status" in recipe
 
 
-def test_manual_routes_l2_strict_health_through_make() -> None:
+def test_manual_routes_current_production_observability_through_make() -> None:
     text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
     daily = text.split("## 3. ", 1)[1].split("## 4. ", 1)[0]
     read_only = text.split("生产巡检（只读）", 1)[1].split("L1→L2 市场候选链（只读观察）", 1)[0]
-    candidates = text.split("L1→L2 市场候选链（只读观察）", 1)[1].split("### 本地验证", 1)[0]
 
-    for section in (daily, read_only, candidates):
-        assert "`make smoke-l2-health-strict-prod`" in section
-    assert "`make smoke-l2-health-prod`" in daily
-    assert "`make smoke-l2-health-prod`" in read_only
-    assert "`make smoke-l2-health-prod`" in candidates
-    assert "smoke-l2-health-prod` 只证明" in text
+    for section in (daily, read_only):
+        assert "`make smoke-control-plane-prod`" in section
+        assert "`make control-plane-status`" in section
+    assert "公开控制 API" in text
+    assert "durable business truth" in text
+    assert "polyarb-l1.fly.dev/health" not in daily
+    assert "polyarb-l2.fly.dev/health" not in daily
 
 
 def test_manual_keeps_reviewed_operator_safety_facts() -> None:
@@ -847,9 +833,10 @@ def test_manual_keeps_reviewed_operator_safety_facts() -> None:
     daily = text.split("## 3. ", 1)[1].split("## 4. ", 1)[0]
     read_only = text.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
 
-    assert "`make smoke-health-prod`" in daily
+    assert "`make smoke-control-plane-prod`" in daily
     assert "`make smoke-test`" not in daily
-    assert "`make smoke-health-prod`" in read_only
+    assert "`make smoke-control-plane-prod`" in read_only
+    assert "`make control-plane-status`" in read_only
     assert "`make smoke-test`" not in read_only
     assert "候选不是独立 staging 部署" in text
     assert "`POLYARB_SCAN_SHARED_SECRET`" in text

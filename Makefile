@@ -489,7 +489,7 @@ triple-check:
 # tail-logs-local     — stream daemon stdout (for a separately launched daemon)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-run-local smoke-health-local smoke-health-prod smoke-market-truth-prod smoke-healthz tail-logs-local
+.PHONY: daemon-run-local smoke-health-local smoke-control-plane-prod smoke-health-prod smoke-market-truth-prod smoke-healthz tail-logs-local
 
 ## daemon-run-local: Start the polyarb daemon locally on :19080 (HMAC-authenticated /scan + /health). Ctrl-C to stop. Override port via POLYARB_HTTP_PORT.
 daemon-run-local:
@@ -509,33 +509,39 @@ smoke-health-local:
 	echo ""; \
 	curl -sf http://127.0.0.1:$$PORT/health | python3 -m json.tool
 
-## smoke-health-prod: Read-only GET of prod L1 strict /health; prints HTTP status and JSON body
-smoke-health-prod:
+## smoke-control-plane-prod: Read-only strict public readiness of the current M1 control API.
+smoke-control-plane-prod:
 	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
-	URL="https://polyarb-l1.fly.dev/health"; \
-	echo ">> smoke-health-prod — GET $$URL"; \
+	URL="https://polyarb-control-api.fly.dev/health"; \
+	echo ">> smoke-control-plane-prod — GET $$URL"; \
 	HTTP_STATUS=$$(curl --disable --request GET -sS -o "$$BODY" -w "%{http_code}" "$$URL") || { rc=$$?; echo "FAIL: request error" >&2; exit $$rc; }; \
 	echo "HTTP $$HTTP_STATUS"; \
 	python3 -m json.tool < "$$BODY" || cat "$$BODY"; \
-	if [ "$$HTTP_STATUS" = "200" ]; then echo "PASS: L1 strict /health returned 200"; else echo "FAIL: L1 strict /health returned $$HTTP_STATUS" >&2; exit 1; fi
+	if [ "$$HTTP_STATUS" != "200" ] || ! jq -e '.status == "ok" and .control_plane == "available"' "$$BODY" >/dev/null; then \
+		echo "FAIL: control-plane strict readiness is unavailable" >&2; exit 1; \
+	fi; \
+	echo "PASS: control-plane strict readiness returned 200/available"
 
-## smoke-market-truth-prod: Read-only production proof that the latest L1 snapshot attempt published complete market truth
+## smoke-health-prod: Retired L1 probe; use smoke-control-plane-prod plus control-plane-status.
+smoke-health-prod:
+	@echo "RETIRED: polyarb-l1 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
+
+## smoke-market-truth-prod: Retired L1 market-truth probe; use current control-plane observability.
 smoke-market-truth-prod:
-	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
-	URL="https://polyarb-l1.fly.dev/health"; \
-	echo ">> smoke-market-truth-prod — GET $$URL"; \
-	curl --disable --request GET -fsS -o "$$BODY" "$$URL"; \
-	jq -e '.checks["market_truth:coverage"][0] | select(.status == "pass" and .observedValue == "complete")' "$$BODY" >/dev/null; \
-	jq '{releaseId, market_truth_coverage: .checks["market_truth:coverage"][0], market_truth_last_complete: .checks["market_truth:last_complete_age_seconds"][0]}' "$$BODY"; \
-	echo "PASS: latest L1 snapshot attempt published complete market truth"
+	@echo "RETIRED: polyarb-l1 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
 
-## smoke-healthz: Verify prod /healthz always returns 200 (Fly probe target — D-05). No auth required.
+## smoke-healthz: Retired L1 probe; use smoke-control-plane-prod plus control-plane-status.
 smoke-healthz:
-	@echo ">> smoke-healthz — GET https://polyarb-l1.fly.dev/healthz"
-	@STATUS=$$(curl -s -o /tmp/healthz_body.json -w "%{http_code}" https://polyarb-l1.fly.dev/healthz); \
-	echo "HTTP $$STATUS"; \
-	cat /tmp/healthz_body.json | python3 -m json.tool; \
-	if [ "$$STATUS" = "200" ]; then echo "PASS: /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
+	@echo "RETIRED: polyarb-l1 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03 Plan 03: L2 daemon (orderbook tracking) — D-06 separate process
@@ -571,23 +577,19 @@ smoke-l2-health:
 	echo ""; echo ">> smoke-l2-health — GET http://127.0.0.1:$$PORT/healthz"; \
 	curl -fsS http://127.0.0.1:$$PORT/healthz | python3 -m json.tool
 
-## smoke-l2-health-prod: Verify prod L2 /healthz reachability only; this is not strict business health
+## smoke-l2-health-prod: Retired L2 probe; use smoke-control-plane-prod plus control-plane-status.
 smoke-l2-health-prod:
-	@echo ">> smoke-l2-health-prod — GET https://polyarb-l2.fly.dev/healthz"
-	@STATUS=$$(curl -s -o /tmp/l2_healthz_body.json -w "%{http_code}" https://polyarb-l2.fly.dev/healthz); \
-	echo "HTTP $$STATUS"; \
-	cat /tmp/l2_healthz_body.json | python3 -m json.tool; \
-	if [ "$$STATUS" = "200" ]; then echo "PASS: L2 /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
+	@echo "RETIRED: polyarb-l2 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
 
-## smoke-l2-health-strict-prod: Read-only GET of prod L2 strict /health; prints HTTP status and JSON body
+## smoke-l2-health-strict-prod: Retired L2 probe; use smoke-control-plane-prod plus control-plane-status.
 smoke-l2-health-strict-prod:
-	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
-	URL="https://polyarb-l2.fly.dev/health"; \
-	echo ">> smoke-l2-health-strict-prod — GET $$URL"; \
-	HTTP_STATUS=$$(curl --disable --request GET -sS -o "$$BODY" -w "%{http_code}" "$$URL") || { rc=$$?; echo "FAIL: request error" >&2; exit $$rc; }; \
-	echo "HTTP $$HTTP_STATUS"; \
-	python3 -m json.tool < "$$BODY" || cat "$$BODY"; \
-	if [ "$$HTTP_STATUS" = "200" ]; then echo "PASS: L2 strict /health returned 200"; else echo "FAIL: L2 strict /health returned $$HTTP_STATUS" >&2; exit 1; fi
+	@echo "RETIRED: polyarb-l2 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
 
 ## smoke-l2-ws: 30s WS sanity against a known liquid Polymarket asset (Phase 03 Plan 04, D-02 manual smoke)
 ##   Connects to wss://ws-subscriptions-clob.polymarket.com/ws/market, subscribes,
@@ -1643,12 +1645,12 @@ deploy-l2-prod:
 	@echo "L2 deploy triggered. Watch:  gh run watch  (then 'make fly-l2-status')"
 .PHONY: deploy-l2-prod
 
-## fly-l2-status: List polyarb-l2 machines + checks (post-deploy verification)
+## fly-l2-status: Retired L2 Fly diagnostic; use smoke-control-plane-prod plus control-plane-status.
 fly-l2-status:
-	@echo ">> fly-l2-status — flyctl status -a polyarb-l2"
-	FLY_API_TOKEN= flyctl status -a polyarb-l2
-	@echo "--- checks ---"
-	FLY_API_TOKEN= flyctl checks list -a polyarb-l2
+	@echo "RETIRED: polyarb-l2 no longer exists." >&2; \
+	echo "Use: make smoke-control-plane-prod  # public API readiness" >&2; \
+	echo "Use: make control-plane-status       # durable business truth" >&2; \
+	exit 2
 .PHONY: fly-l2-status
 
 ## fly-l2-logs: Tail polyarb-l2 daemon logs
