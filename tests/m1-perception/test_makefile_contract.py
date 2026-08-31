@@ -3484,6 +3484,34 @@ def test_make_help_exposes_control_plane_production_smoke() -> None:
     assert "smoke-control-plane-prod:" in result.stdout
 
 
+def test_control_plane_opportunities_is_current_read_only_business_entrypoint() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    match = re.search(
+        r"(?m)^control-plane-opportunities:\n(?P<recipe>(?:\t.*\n)+)", makefile
+    )
+    assert match is not None
+    recipe = match.group("recipe")
+
+    assert "https://polyarb-control-api.fly.dev/perception/opportunities" in recipe
+    assert "limit=$(or $(limit),50)" in recipe
+    assert "after_group_id=$(after_group_id)" in recipe
+    assert "curl --disable" in recipe
+    assert "--connect-timeout 3" in recipe
+    assert "--max-time 10" in recipe
+    assert "-f" in recipe
+    assert "python -m json.tool" in recipe
+    assert not any(
+        re.search(rf"\b{token}\b", recipe.lower())
+        for token in ("flyctl", "deploy", "post", "secret", "dsn", "sqlite", "wallet", "order", "trade")
+    )
+
+    result = subprocess.run(
+        ["make", "help"], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+    assert "control-plane-opportunities:" in result.stdout
+
+
 def test_retired_market_truth_production_smoke_fails_loud_without_network_recipe() -> None:
     result = subprocess.run(
         ["make", "-n", "smoke-market-truth-prod"],
