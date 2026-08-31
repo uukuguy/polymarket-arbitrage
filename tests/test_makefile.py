@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -147,6 +148,52 @@ def test_eval_local_quote_profile_is_offline_and_discoverable() -> None:
     assert dry_run.returncode == 0, dry_run.stderr
     assert "opportunity-feed-cadence-sla" in dry_run.stdout
     assert "eval_local" in dry_run.stdout
+
+
+def test_control_plane_opportunities_preserves_literal_make_query_values_without_execution(
+    tmp_path: Path,
+) -> None:
+    """A command-line Make value stays data all the way to curl, never shell code."""
+    sentinel = tmp_path / "SENTINEL"
+    curl_args = tmp_path / "curl-args"
+    unexpected_command = tmp_path / "unexpected-command"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
+        "printf '%s\\n' '{\"source\": \"FAKE_CURL_BODY\"}'\n"
+    )
+    fake_curl.chmod(0o755)
+    fake_touch = fake_bin / "touch"
+    fake_touch.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$FAKE_UNEXPECTED_COMMAND\"\n"
+    )
+    fake_touch.chmod(0o755)
+    environment = os.environ | {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_CURL_ARGS": str(curl_args),
+        "FAKE_UNEXPECTED_COMMAND": str(unexpected_command),
+    }
+
+    # Pass argv directly so the pytest runner's shell cannot expand $(shell ...).
+    literal_value = f"$(shell touch {sentinel})"
+    result = subprocess.run(
+        ["make", "control-plane-opportunities", f"limit={literal_value}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+    assert not unexpected_command.exists()
+    assert curl_args.read_text().splitlines().count(f"limit={literal_value}") == 1
+    assert "FAKE_CURL_BODY" in result.stdout
 
 
 def test_chaos_image_check_accepts_current_and_legacy_fly_status_shapes() -> None:

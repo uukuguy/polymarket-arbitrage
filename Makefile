@@ -14,10 +14,8 @@
 .DEFAULT_GOAL := help
 .PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-control-plane perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume control-plane-opportunities
 
-# Keep read-only opportunity query values out of generated shell source.
-export limit after_group_id
-
 comma := ,
+unexport limit after_group_id
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -779,11 +777,13 @@ control-plane-status:
 	uv run python -m polyarb.cli_control_plane status --limit "$(or $(limit),20)" --json
 
 ## control-plane-opportunities: Read current certified M1 business opportunities from production; optional limit=1..500 and after_group_id=.
+control-plane-opportunities: export CONTROL_PLANE_OPPORTUNITIES_LIMIT := $(value limit)
+control-plane-opportunities: export CONTROL_PLANE_OPPORTUNITIES_AFTER_GROUP_ID := $(value after_group_id)
 control-plane-opportunities:
 	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
 	curl --disable --connect-timeout 3 --max-time 10 --retry 0 -fsS --get \
-	  --data-urlencode "limit=$${limit:-50}" \
-	  --data-urlencode "after_group_id=$$after_group_id" \
+	  --data-urlencode "limit=$${CONTROL_PLANE_OPPORTUNITIES_LIMIT:-50}" \
+	  --data-urlencode "after_group_id=$$CONTROL_PLANE_OPPORTUNITIES_AFTER_GROUP_ID" \
 	  "https://polyarb-control-api.fly.dev/perception/opportunities" > "$$BODY" || exit $$?; \
 	python -m json.tool < "$$BODY"
 
