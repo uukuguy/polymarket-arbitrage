@@ -29,25 +29,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             fontSize: 14,
           }}
         >
-          <strong>polyarb L1</strong>
-          <a href="/business" style={{ color: "#9ec5fe" }}>
-            /business
-          </a>
-          <a href="/status" style={{ color: "#9ec5fe" }}>
-            /status
-          </a>
-          <a href="/movers" style={{ color: "#9ec5fe" }}>
-            /movers
-          </a>
-          <a href="/scan" style={{ color: "#9ec5fe" }}>
-            /scan
-          </a>
-          <a href="/perception" style={{ color: "#9ec5fe" }}>
-            /perception
-          </a>
-          <a href="/control-plane" style={{ color: "#9ec5fe" }}>
-            /control-plane
-          </a>
+          <strong>polyarb M1</strong>
+          <a href="/business" style={{ color: "#9ec5fe" }}>Business Research</a>
+          <a href="/control-plane" style={{ color: "#9ec5fe" }}>Runtime</a>
         </nav>
         {children}
       </body>

@@ -1,9 +1,18 @@
 import { readBusinessOverview } from "../../lib/business-overview";
+import { BusinessShell, ProductCard, Status, UnavailableBusiness } from "./business-ui";
 
 export default async function BusinessPage() {
   const overview = await readBusinessOverview();
-  if (overview.status === "unavailable") return <main style={{ padding: 24 }}><h1>Business research unavailable</h1><p>{overview.reason}; this is not zero opportunities.</p></main>;
+  if (overview.status === "unavailable") return <UnavailableBusiness />;
   const { data } = overview;
-  const product = (name: string, item: { status: string; generation_key?: string; parent_structure_generation_key?: string }) => <section><h2>{name}</h2><p>Status: {item.status}</p><p>Generation: {item.generation_key ?? "not provided"}</p>{item.parent_structure_generation_key && <p>Parent Structure generation: {item.parent_structure_generation_key}</p>}</section>;
-  return <main style={{ padding: 24, maxWidth: 960 }}><h1>Business research</h1><p>As of: {data.observed_at}</p><p>Eligibility: {data.eligibility.state} ({data.eligibility.reason_code ?? "none"})</p>{product("Structure", data.structure)}{product("Quote", data.quote)}{product("Analysis", data.analysis)}<section><h2>Certified opportunities</h2><p>Status: {data.opportunities.status}</p><p>Count: {data.opportunities.count ?? "not provided"}</p><p>Quote generation: {data.opportunities.quote_generation_key ?? "not provided"}</p></section><section><h2>Business blockers</h2>{data.blockers.length ? data.blockers.map((item) => <p key={`${item.scope}:${item.code}`}>{item.scope} / {item.code} — {item.impact}</p>) : <p>None</p>}</section></main>;
+  return <BusinessShell overview={data} title="Business research" subtitle="A lineage-consistent view of what M1 has published, what is ready to use, and what is still not observable.">
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+      <ProductCard title="Structure" item={data.structure}><p>{data.structure.record_count ?? "—"} records across the published market structure.</p><a href="/business/structure">Inspect structure →</a></ProductCard>
+      <ProductCard title="Quotes" item={data.quote}><p>{data.quote.record_count ?? "—"} current quote records.</p><a href="/business/quotes">Inspect quote coverage →</a></ProductCard>
+      <ProductCard title="Analysis" item={data.analysis}><p>Decision funnel: {data.analysis.status === "not-published" ? "not yet projected" : "published"}.</p><a href="/business/analysis">Inspect analysis truth →</a></ProductCard>
+      <ProductCard title="Certified opportunities" item={data.opportunities}><p><strong>{data.opportunities.count ?? "—"}</strong> current certified opportunities.</p><a href="/business/opportunities">Inspect opportunities →</a></ProductCard>
+    </div>
+    <section style={{ marginTop: 24 }}><h2>What to trust now</h2><p><Status value={data.opportunities.status} /> opportunities are a real zero only when status is AVAILABLE and count is 0. Any other status means the current result is not publishable business truth.</p></section>
+    <section><h2>Business blockers</h2>{data.blockers.length ? data.blockers.map((item) => <p key={`${item.scope}:${item.code}`}>{item.scope} / {item.code} — {item.impact}</p>) : <p>No published blockers. Qualification can still be paused while its durable evidence is being built.</p>}</section>
+  </BusinessShell>;
 }
