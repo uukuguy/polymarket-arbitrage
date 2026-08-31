@@ -53,6 +53,18 @@ def test_living_doc_contract_selects_focused_gates() -> None:
     }
 
 
+def test_atomic_business_research_profile_selects_business_contract_gates() -> None:
+    commands = eval_local.gate_commands_for({"paradigm": "atomic-business-research-read-model"})
+
+    assert tuple(commands) == ("planning", "unit", "integration", "cli", "restart")
+    flattened = [argument for command in commands.values() for argument in command]
+    assert "tests/m1-perception/test_control_plane_postgres.py" in flattened
+    assert "tests/m1-perception/test_control_plane_api.py" in flattened
+    assert "tests/m1-perception/test_business_dashboard_contract.py" in flattened
+    assert ["make", "dashboard-typecheck"] in commands.values()
+    assert ["make", "docs-m1-check"] in commands.values()
+
+
 def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
     commands = eval_local.gate_commands_for({"paradigm": "opportunity-feed-chain-truth"})
 
@@ -263,6 +275,7 @@ def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() ->
 def test_every_explicit_climb_pytest_node_id_is_collectable() -> None:
     profiles = (
         eval_local.GATE_COMMANDS,
+        eval_local.ATOMIC_BUSINESS_RESEARCH_READ_MODEL_GATE_COMMANDS,
         eval_local.LIVING_DOC_CONTRACT_GATE_COMMANDS,
         eval_local.OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS,
         eval_local.OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS,
