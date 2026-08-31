@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from types import SimpleNamespace
+from urllib.request import Request
 
 import pytest
 
@@ -163,7 +164,7 @@ def test_business_brief_json_reads_bounded_status_and_public_opportunities(
         def close(self) -> None:
             calls["closed"] = True
 
-    def fake_urlopen(request: object, *, timeout: float) -> _OpportunityResponse:
+    def fake_urlopen(request: Request, *, timeout: float) -> _OpportunityResponse:
         calls["request"] = request
         calls["timeout"] = timeout
         return _OpportunityResponse(opportunities)
@@ -174,7 +175,7 @@ def test_business_brief_json_reads_bounded_status_and_public_opportunities(
     assert cli_control_plane.main(["business-brief", "--format", "json"]) == 0
 
     request = calls["request"]
-    assert hasattr(request, "method")
+    assert isinstance(request, Request)
     assert request.method == "GET"
     assert request.full_url == (
         "https://polyarb-control-api.fly.dev/perception/opportunities?limit=50"
@@ -208,5 +209,13 @@ def test_business_brief_redacts_unavailable_authority(
 def test_business_brief_parser_rejects_unknown_format() -> None:
     with pytest.raises(SystemExit) as error:
         cli_control_plane._parser().parse_args(["business-brief", "--format", "xml"])
+
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("limit", (0, -1, 501))
+def test_business_brief_parser_rejects_limit_outside_local_bound(limit: int) -> None:
+    with pytest.raises(SystemExit) as error:
+        cli_control_plane._parser().parse_args(["business-brief", "--limit", str(limit)])
 
     assert error.value.code == 2

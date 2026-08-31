@@ -143,6 +143,8 @@ _FLY_CLI_READ_TIMEOUT_SECONDS = 30.0
 _MAX_FLY_MACHINES_PER_APP = 16
 _MAX_WATCHDOG_APPS = 8
 _WATCHDOG_OBSERVATION_TIMEOUT_SECONDS = 2 * _FLY_HTTP_TIMEOUT_SECONDS + 1.0
+_BUSINESS_BRIEF_LIMIT_MIN = 1
+_BUSINESS_BRIEF_LIMIT_MAX = 500
 
 
 class _RuntimeReconcileControlPlane(Protocol):
@@ -163,6 +165,19 @@ class _RuntimeReconcileControlPlane(Protocol):
 _RETRY_FAULT_ACK = "staging-retry-before-receipt"
 
 
+def _business_brief_limit(raw_limit: str) -> int:
+    """Parse the bounded public opportunity read limit locally."""
+    try:
+        limit = int(raw_limit)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if not _BUSINESS_BRIEF_LIMIT_MIN <= limit <= _BUSINESS_BRIEF_LIMIT_MAX:
+        raise argparse.ArgumentTypeError(
+            f"must be between {_BUSINESS_BRIEF_LIMIT_MIN} and {_BUSINESS_BRIEF_LIMIT_MAX}"
+        )
+    return limit
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="control-plane")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -181,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
         help="read the fixed M1 business brief from durable and public authorities",
     )
     business_brief.add_argument("--format", choices=("text", "json"), default="text")
-    business_brief.add_argument("--limit", type=int, default=50)
+    business_brief.add_argument("--limit", type=_business_brief_limit, default=50)
     preflight = subcommands.add_parser(
         "preflight",
         help="read-only proof that one named database and R2 bucket are ready for shadow work",
@@ -598,7 +613,9 @@ def _read_soak_control_snapshot(url: str) -> dict[str, object]:
 
 def _read_business_brief_opportunities(*, limit: int) -> Mapping[str, object]:
     """Read the bounded public opportunity projection through an explicit GET."""
-    if isinstance(limit, bool) or limit <= 0:
+    if isinstance(limit, bool) or not (
+        _BUSINESS_BRIEF_LIMIT_MIN <= limit <= _BUSINESS_BRIEF_LIMIT_MAX
+    ):
         raise BusinessBriefUnavailable("opportunity-limit-malformed")
     query = urlencode({"limit": limit})
     request = Request(
@@ -1956,6 +1973,29 @@ async def _run_runtime_reconcile_service(
     return {"status": "stopped", "turns": turns}
 
 
+def _dispatch_business_brief(
+    control_plane: PostgresControlPlane, args: argparse.Namespace
+) -> int:
+    """Build and render the bounded business brief from its two authorities."""
+    try:
+        status = {
+            **control_plane.operational_snapshot(sample_limit=20),
+            "status": "available",
+        }
+        brief = build_business_brief(
+            status,
+            _read_business_brief_opportunities(limit=args.limit),
+        )
+    except (OSError, RuntimeError, ValueError, psycopg.Error, BusinessBriefUnavailable):
+        print("业务数据不可用", file=sys.stderr)
+        return 2
+    if args.format == "json":
+        _write(brief, as_json=True)
+    else:
+        print(render_business_brief(brief))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     requires_enable = {
@@ -2216,23 +2256,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         if args.command == "business-brief":
-            try:
-                status = {
-                    **control_plane.operational_snapshot(sample_limit=20),
-                    "status": "available",
-                }
-                brief = build_business_brief(
-                    status,
-                    _read_business_brief_opportunities(limit=args.limit),
-                )
-            except (OSError, RuntimeError, ValueError, psycopg.Error, BusinessBriefUnavailable):
-                print("业务数据不可用", file=sys.stderr)
-                return 2
-            if args.format == "json":
-                _write(brief, as_json=True)
-            else:
-                print(render_business_brief(brief))
-            return 0
+            return _dispatch_business_brief(control_plane, args)
         if args.command in {"cloud-soak-start", "cloud-soak-sample"}:
             try:
                 observation = _record_cloud_soak_observation(

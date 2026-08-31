@@ -3567,7 +3567,11 @@ def test_control_plane_business_brief_is_a_safe_read_only_make_entrypoint() -> N
     assert match is not None
     recipe = match.group("recipe")
 
-    assert 'business-brief --format "$(or $(format),text)"' in recipe
+    assert "CONTROL_PLANE_BUSINESS_BRIEF_FORMAT := $(value format)" in makefile
+    assert 'format="$${CONTROL_PLANE_BUSINESS_BRIEF_FORMAT:-text}"' in recipe
+    assert 'case "$$format" in text|json)' in recipe
+    assert 'business-brief --format "$$format"' in recipe
+    assert "$(format)" not in recipe
     assert "POLYARB_SUPABASE_DB_DSN" in recipe
     assert not any(
         re.search(rf"\b{token}\b", recipe.lower())
@@ -3579,6 +3583,36 @@ def test_control_plane_business_brief_is_a_safe_read_only_make_entrypoint() -> N
     )
     assert result.returncode == 0, result.stderr
     assert "control-plane-business-brief:" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "format_value",
+    [
+        'json; touch SHOULD_NOT_EXIST; #',
+        "$$(shell touch SHOULD_NOT_EXIST)",
+    ],
+    ids=("shell-injection", "make-function-injection"),
+)
+def test_control_plane_business_brief_preserves_untrusted_format_as_literal(
+    tmp_path: Path, format_value: str
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_SUPABASE_DB_DSN"] = "postgresql://operator@example.test/control"
+    marker = tmp_path / "SHOULD_NOT_EXIST"
+    format_value = format_value.replace("SHOULD_NOT_EXIST", str(marker))
+
+    result = subprocess.run(
+        ["make", "control-plane-business-brief", f"format={format_value}"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert not marker.exists()
+    assert _fake_uv_calls(log_path) == []
 
 
 def test_control_plane_opportunities_encodes_untrusted_make_values_without_shell_execution(
