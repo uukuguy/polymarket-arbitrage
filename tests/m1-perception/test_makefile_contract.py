@@ -3514,10 +3514,22 @@ def test_control_plane_opportunities_is_current_read_only_business_entrypoint() 
     recipe = match.group("recipe")
 
     assert "https://polyarb-control-api.fly.dev/perception/opportunities" in recipe
-    assert "export limit after_group_id" in makefile
+    assert not re.search(r"(?m)^export\s+.*\b(limit|after_group_id)\b", makefile)
+    assert (
+        "control-plane-opportunities: export CONTROL_PLANE_OPPORTUNITIES_LIMIT := $(value limit)"
+        in makefile
+    )
+    assert (
+        "control-plane-opportunities: export "
+        "CONTROL_PLANE_OPPORTUNITIES_AFTER_GROUP_ID := $(value after_group_id)"
+        in makefile
+    )
     assert "--get" in recipe
-    assert '--data-urlencode "limit=$${limit:-50}"' in recipe
-    assert '--data-urlencode "after_group_id=$$after_group_id"' in recipe
+    assert '--data-urlencode "limit=$${CONTROL_PLANE_OPPORTUNITIES_LIMIT:-50}"' in recipe
+    assert (
+        '--data-urlencode "after_group_id=$$CONTROL_PLANE_OPPORTUNITIES_AFTER_GROUP_ID"'
+        in recipe
+    )
     assert "$(limit)" not in recipe
     assert "$(after_group_id)" not in recipe
     assert "curl --disable" in recipe

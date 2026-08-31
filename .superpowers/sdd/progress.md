@@ -27,8 +27,10 @@ Minor review findings to revisit in final whole-branch review: none.
 Plan: `docs/superpowers/plans/2026-08-31-m1-daily-business-intelligence.md`
 Baseline: `a9fe9229`
 
-- Task 1: complete (commits a9fe9229..f3589981, review clean)
-- Task 2: complete (commit ee9e1da6, review clean)
+- Task 1: complete (commits a9fe9229..05ff19a9; final query-security
+  remediation and contract closure recorded)
+- Task 2: complete (commits ee9e1da6, 6640b330, 05ff19a9; final cadence and
+  runtime/recovery contract closure recorded)
 - Task 3: complete (commits e3454418..f0a62324, review clean after SHA expansion and SDD cleanup)
 
 ## Scoped Upstream Fault Control

@@ -797,8 +797,11 @@ def test_daily_business_intelligence_guide_keeps_business_truth_boundaries() -> 
     assert ".qualification" in guide
     assert ".open_incidents" in guide
     assert ".runtime_watchdog" in guide
-    assert "早晨开盘前" in guide
-    assert "活跃时段每 15 分钟" in guide
+    assert "每天 `08:30`" in guide
+    assert "`09:00–23:00`" in guide
+    assert "每 `15` 分钟" in guide
+    for runtime_path in (".runtime_incidents", ".recovery_actions", ".runtime_watchdog"):
+        assert runtime_path in guide
     for escalation in ("HTTP 503", "status=unavailable", "freshness", "recovery"):
         assert escalation in guide
     assert "追加" in log

@@ -31,3 +31,18 @@ return or P&L.
 
 - `ee9e1da6e2d43c6cf3d26bebb379fed2411d430f` — daily business-intelligence
   guide, index, append-only log, and regression contract.
+
+## Final operations and security-remediation closure
+
+The guide now fixes the observation schedule to Beijing `08:30` for the daily
+three-command baseline and `09:00–23:00` every `15` minutes for active-session
+status/opportunity review. It explicitly routes observation faults through
+`.runtime_incidents`, `.recovery_actions`, and `.runtime_watchdog`.
+
+The accompanying reader hardening is documented here because the guide directs
+operators to that target: `6640b330` removed shell interpolation/failure-pipe
+ambiguity, and `05ff19a9` removed globally exported lowercase Make values in
+favour of target-scoped raw `CONTROL_PLANE_OPPORTUNITIES_*` capture. The final
+manual contract locks this cadence and runtime/recovery vocabulary; the related
+literal Make syntax regression is in `tests/test_makefile.py`. Fresh final
+verification is recorded in `.superpowers/sdd/daily-intel-closure-fix-report.md`.

@@ -21,6 +21,12 @@ freshness-SLO 放宽。Plan 268 关闭了 merge-review 提出的 scoped connecti
 只读的生产证据**定义一个有界目标；不得因为本文曾包含的旧授权包而重走 revision-026
 路径。
 
+认证机会入口的参数边界已在 `6640b330` 与 `05ff19a9` 完成修复：不再全局导出
+小写 Make 参数；`control-plane-opportunities` 仅以 target-scoped
+`CONTROL_PLANE_OPPORTUNITIES_*` 原始值传递给 URL 编码的只读 curl 请求。每日基线为
+北京时间 `08:30`，活跃会话为 `09:00–23:00` 每 `15` 分钟；异常证据应读取
+`.runtime_incidents`、`.recovery_actions` 和 `.runtime_watchdog`，而不是将失败写成零机会。
+
 ## 最后验证的生产边界
 
 | 范围 | 已验证结论 | 当前约束 |

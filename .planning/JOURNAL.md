@@ -12940,3 +12940,24 @@ and retain the branch evidence/commits intact.
 order and append the factual result to `docs/ops/m1-daily-business-intelligence-log.md`.
 Route only a fresh supported finding to a bounded M1 objective, thread, or backlog;
 do not deploy, migrate, reset qualification, or trade from this observation path.
+
+### SESSION 393 — 2026-08-31 (daily-intelligence security closure)
+
+- [SECURITY ROOT CAUSE / FIX] Command-line Make values had first been expanded
+  into generated shell/URL source. `6640b330` contained shell interpolation and
+  curl failure-pipe ambiguity; `05ff19a9` completed the fix by unexporting the
+  lowercase globals and target-scoping raw `$(value ...)` capture as
+  `CONTROL_PLANE_OPPORTUNITIES_*` before URL encoding.
+- [CONTRACT] Delivery tests now assert the final Make boundary, exact Beijing
+  cadence (`08:30`; `09:00–23:00` every `15` minutes), and the required runtime
+  evidence paths (`.runtime_incidents`, `.recovery_actions`,
+  `.runtime_watchdog`).
+- [LIVE READ-ONLY] strict readiness returned HTTP 200 / `control_plane=available`;
+  the opportunity projection returned `status=available`, count 0 and an empty
+  item list. `make control-plane-status limit=20` exited nonzero with
+  `QueryCanceled`; record this observation as business data unavailable for the
+  status surface, never as a zero-opportunity conclusion.
+
+[NEXT] Treat the status-reader `QueryCanceled` as a fresh, read-only observation
+to diagnose only with a bounded objective if it recurs; do not mutate deployment,
+database, qualification, recovery, or trading state from this entrypoint.

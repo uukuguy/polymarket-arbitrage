@@ -30,6 +30,12 @@ progress:
 - **Current decision:** select a fresh, bounded M1 objective only from new
   production evidence. Do not reopen the superseded revision-026 authorization
   path merely because older status documents mention it.
+- **Daily-intelligence boundary:** `6640b330` and `05ff19a9` close Make query
+  expansion risk for the read-only opportunity projection. The target captures
+  only its own raw `CONTROL_PLANE_OPPORTUNITIES_*` values; the operator cadence
+  is `08:30` daily plus `09:00–23:00` every `15` minutes, with runtime/recovery
+  evidence read from `.runtime_incidents`, `.recovery_actions`, and
+  `.runtime_watchdog`.
 
 ## Production Invariants
 
