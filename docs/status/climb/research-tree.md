@@ -4,8 +4,8 @@
 
 ## Session
 
-- Last cycle: 70
-- Next action: plan and execute H-064 atomic business research read model
+- Last cycle: 71
+- Next action: rank next pending hypothesis
 
 ## In flight
 
@@ -71,7 +71,7 @@
 - **H-061** [confirmed]: A certified Structure generation can parent recurring immutable Quote and Opportunity runs through an authoritative lineage relation and one serialized 300-second admission boundary, keeping executable freshness within 900 seconds without overlapping Gamma source windows or widening the SLO.
 - **H-062** [confirmed]: A recurring Quote certifier whose direct wake is skipped by a busy successor row can recover solely from durable batch receipts keyed by the independent Quote generation, publish without operator SQL, and hand an expired executable generation to the normal stale-isolation plus next-cadence continuation policy.
 - **H-063** [confirmed]: A production Structure successor can restore the exact dependent Quote and Opportunity lineage and resume rolling qualification on the same epoch without operator mutation, an all-window restart, or freshness-SLO relaxation.
-- **H-064** [pending]: A versioned M1 BusinessOverview snapshot assembled in one bounded read-only database transaction can make the CLI and Dashboard present the same lineage-consistent business truth without treating unavailable, not-published, stale, or paused products as zero opportunities.
+- **H-064** [confirmed]: A versioned M1 BusinessOverview snapshot assembled in one bounded read-only database transaction can make the CLI and Dashboard present the same lineage-consistent business truth without treating unavailable, not-published, stale, or paused products as zero opportunities.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -150,3 +150,4 @@
 - 20260830-230127-h-062: 100.0 (confirmed)
 - 20260830-234125-h-063: 100.0 (confirmed)
 - 20260830-235304-h-063: 100.0 (confirmed)
+- 20260831-142957-h-064: 100.0 (confirmed)
