@@ -12974,6 +12974,27 @@ do not deploy, migrate, reset qualification, or trade from this observation path
 to diagnose only with a bounded objective if it recurs; do not mutate deployment,
 database, qualification, recovery, or trading state from this entrypoint.
 
+### SESSION 395 — 2026-08-31 (atomic business research product)
+
+- [DELIVERY] `BusinessOverviewV1` now reads Structure, Quote, Analysis and
+  Opportunity publication state in one bounded read-only Postgres transaction;
+  its public fail-closed API powers both `make control-plane-business-brief` and
+  the Dashboard business-research pages. The UI now has `/business`,
+  `/business/structure`, `/business/quotes`, `/business/analysis`, and
+  `/business/opportunities`; Runtime remains `/control-plane`.
+- [LIVE] Control API Fly release v5 returned a lineage-consistent current
+  Structure and Quote, `analysis=not-published`, and
+  `opportunities=available,count=0`. The Dashboard was promoted on Vercel;
+  anonymous verification correctly stopped at Vercel Access and made no claim
+  about authenticated rendering.
+- [VERIFICATION] H-064 passed planning, projection, API/CLI/Dashboard,
+  TypeScript and living-manual gates (100/100) and is confirmed in Climb cycle
+  71. A real zero is still only `available + count=0`.
+
+[NEXT] Implement one bounded durable Analysis funnel projection alongside the
+Opportunity publisher, then expose its versioned counts through BusinessOverview;
+do not infer candidate/no-edge/rejected counts from final opportunities.
+
 ### SESSION 394 — 2026-08-31 (business brief delivery)
 
 - [DELIVERY] `make control-plane-business-brief` is the daily default after strict

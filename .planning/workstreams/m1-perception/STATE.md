@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: objective_selection
-stopped_at: Plan 05.6-268 complete and merged; no active implementation task
-last_updated: "2026-08-31T08:43:09+08:00"
+stopped_at: H-064 atomic business research read model confirmed and deployed
+last_updated: "2026-08-31T14:35:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -36,12 +36,13 @@ progress:
   is `08:30` daily plus `09:00–23:00` every `15` minutes, with runtime/recovery
   evidence read from `.runtime_incidents`, `.recovery_actions`, and
   `.runtime_watchdog`.
-- **Business-brief delivery:** the daily default is now `make
-  control-plane-business-brief`; its text and `format=json` are one canonical,
-  read-only summary. It exposes at most five research candidates and never
-  implies a fill, return, P&L, order, or trading authority. Nonzero means
-  `业务数据不可用`; operators audit with `control-plane-status` and
-  `control-plane-opportunities` rather than treating it as zero opportunities.
+- **Business research delivery:** `BusinessOverviewV1` is a one-transaction,
+  read-only authority published at `/perception/business-overview`. The daily
+  brief and deployed `/business` Dashboard read it rather than composing
+  independent status/opportunity reads. `/business` separates Structure, Quote,
+  Analysis and final Opportunity research; only `available + count=0` means a
+  real zero. The deployed UI is Vercel Access protected; anonymous curl proves
+  route/access only, not an authenticated render.
 
 ## Production Invariants
 
@@ -74,10 +75,10 @@ progress:
 
 ## Next Action
 
-1. Active Climb hypothesis H-064 is establishing an atomic `BusinessOverviewV1`
-   business read model. The HTTP transport route is present and fail-closed; do
-   not redirect the CLI or Dashboard until `PostgresControlPlane.business_overview()`
-   provides the single bounded transaction authority.
+1. H-064 is confirmed (all five focused local gates passed). The next bounded
+   objective is a durable analysis-funnel projection: candidate, invalid-input,
+   no-edge, and certified counts must be written with the Opportunity generation
+   before the business Analysis page reports them.
 2. Obtain fresh, read-only business evidence in order: `make
    smoke-control-plane-prod`, then `make control-plane-business-brief`. Use
    `format=json` only for automation of the same summary; audit a result through
