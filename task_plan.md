@@ -75,8 +75,10 @@ Phase 7 — Consolidated M1 production repair
 - [x] Self-review the staged design for ambiguity and scope drift
 - [x] Obtain written-spec review before implementation planning
 - [x] Create the executable first-wave repair plan for attempt/incident truth
-- [ ] Create the Structure/Archive contract migration plan after first-wave interfaces are verified
-- [ ] Implement and verify the repair in dependency order
+- [x] Persist scheduler attempt outcomes, expose them in strict health, and add the local read-only diagnostic
+- [x] Make Polywatch alert and recovery state component-scoped
+- [x] Create the Structure/Archive contract migration plan after first-wave interfaces are verified
+- [ ] Implement the Structure/Archive repair in dependency order
 - [ ] Obtain a new clean production baseline and start a meaningful 24-hour observation
 - **Status:** in progress
 
@@ -100,6 +102,8 @@ Phase 7 — Consolidated M1 production repair
 | Run quotes inside the L1 app process every 120 seconds | The HTTP route and collector must share `/data/state.db`; the cron process has no mounted volume |
 | Keep the public quote SLA at 300 seconds | Operationalizing the producer must not relabel stale quotes as executable |
 | Make quote collection fail-soft and non-overlapping | A quote outage must be visible without stopping snapshots or serving partial runs |
+| Record snapshot attempts separately from published snapshots | A new OOM must be visible even while an older complete market revision remains readable |
+| Track Polywatch incidents per component | A continuing L2 fault must never hide L1 recovery or cause misleading Telegram state |
 
 ## Errors Encountered
 
@@ -124,3 +128,10 @@ Phase 7 — Consolidated M1 production repair
 - The current repair must not reduce the scope to snapshot OOM: direct
   snapshot-failure visibility, quote freshness under snapshot load, and
   component-level recovery notifications are separate chain-truth gaps.
+- First-wave attempt/incident truth is committed locally (`f971fc9`, `499ffdf`,
+  `a035497`, `7d4e7e0`) and passed focused scheduler, health, watcher, operator,
+  manual, and docs checks. It deliberately made no Fly mutation or new soak claim.
+- The next plan is `docs/superpowers/plans/2026-07-27-m1-structure-archive-separation.md`.
+  It uses the existing published snapshot identity as the Structure revision,
+  rejects legacy combined rows after cutover, and removes the no-volume cron
+  snapshot jobs instead of treating them as online truth.

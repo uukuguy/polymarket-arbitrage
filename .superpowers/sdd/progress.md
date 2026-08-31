@@ -22,6 +22,35 @@ Baseline: `76f9e75`
 
 Minor review findings to revisit in final whole-branch review: none.
 
+## Scoped Upstream Fault Control
+
+Plan:
+`docs/superpowers/plans/2026-07-30-scoped-upstream-fault-control.md`
+Baseline: `2bbbcef`
+
+- Pre-flight correction: complete (commit b6b794d; cleanup precedes recovery)
+- Task 1: complete (commits d766308..ad1cf72, review clean)
+- Task 2: complete (commits ad1cf72..8ab8091, review clean)
+- Task 3: complete (commits 8ab8091..79060eb, review clean)
+- Task 4: complete (commits 79060eb..c58264a, review clean)
+- Task 5: complete (commits c58264a..f303b29, review clean)
+- Task 6: complete (commits f303b29..fe89de0, review clean)
+- Task 7: complete (commits fe89de0..91f758a, dual review approved)
+- Task 8: complete (commits 91f758a..9e70395, review approved)
+- Final whole-branch review: complete (HEAD 6305ff9; dual remediation review approved)
+
+Minor review findings to revisit in final whole-branch review: none.
+
+Baseline evidence:
+
+- `make test`: 3305 passed, 4 failed, 1 skipped, 1 xfailed. The four failures
+  were fixed-sleep/subprocess timing cases in `tests/perception/test_supervisor.py`
+  after about 11 minutes of full-suite load.
+- Exact four failures rerun: 4 passed.
+- Full `tests/perception/test_supervisor.py` rerun: 43 passed.
+- Task 2 review must re-check condition-based waits and pristine subprocess
+  cleanup; the full-suite timing result is not relabeled as green.
+
 - Neg-risk opportunity watcher / Task 3: complete (commits 8bd6ce1..c2fda53, review clean)
 - Neg-risk opportunity watcher / Task 4: complete (commits c2fda53..8b9200b, review clean)
 - Structure stage diagnostics / Task 1: complete (commits 4212216..b5f9ccc, review clean)
