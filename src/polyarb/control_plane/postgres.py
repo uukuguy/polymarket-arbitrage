@@ -8806,6 +8806,81 @@ class PostgresControlPlane:
             "eligibility_reason": eligibility_reason,
         }
 
+    def business_overview(self) -> dict[str, object]:
+        """Read the initial business authority inside one repeatable-read transaction.
+
+        This deliberately starts with only durable pointer facts.  Products whose
+        durable projection has not yet been published are explicit, never zero.
+        """
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            cursor.execute(
+                sql.SQL("SET LOCAL statement_timeout = {}").format(
+                    sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting)
+                )
+            )
+            cursor.execute(
+                sql.SQL("SET LOCAL lock_timeout = {}").format(
+                    sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting)
+                )
+            )
+            cursor.execute(
+                "SELECT clock_timestamp() AS observed_at, "
+                "(SELECT to_jsonb(manifest) FROM ("
+                " SELECT manifest.generation_key, manifest.published_at, manifest.record_count, "
+                "        inputs.identity->'component_counts' AS component_counts"
+                " FROM m1_generation_manifests manifest"
+                " LEFT JOIN m1_structure_generation_inputs inputs"
+                "   ON inputs.generation_key = manifest.generation_key"
+                " WHERE manifest.generation_key LIKE 'structure:' || chr(37)"
+                " ORDER BY manifest.published_at DESC, manifest.generation_key DESC LIMIT 1"
+                ") manifest) AS structure, "
+                "(SELECT to_jsonb(quote) FROM ("
+                " SELECT pointer.generation_key, pointer.published_at, manifest.record_count, "
+                "        lineage.structure_generation_key"
+                " FROM m1_publication_pointers pointer"
+                " JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key"
+                " JOIN m1_quote_generation_inputs lineage ON lineage.generation_key = pointer.generation_key"
+                " WHERE pointer.pointer_key = 'quote:current'"
+                ") quote) AS quote, "
+                "(SELECT to_jsonb(opportunity) FROM ("
+                " SELECT projection.generation_key, projection.record_count"
+                " FROM m1_opportunity_publication_pointers pointer"
+                " JOIN m1_opportunity_projections projection ON projection.generation_key = pointer.generation_key"
+                " WHERE pointer.pointer_key = 'opportunity:current'"
+                ") opportunity) AS opportunity",
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ControlPlaneError("business overview database projection is unavailable")
+
+        observed_at = _snapshot_aware(row["observed_at"], "business_overview.observed_at").isoformat()
+        structure = _snapshot_optional_mapping(row["structure"], "business_overview.structure")
+        quote = _snapshot_optional_mapping(row["quote"], "business_overview.quote")
+        opportunity = _snapshot_optional_mapping(row["opportunity"], "business_overview.opportunity")
+        if structure is None:
+            return {
+                "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
+                "eligibility": {"state": "paused", "reason_code": "structure-not-published"},
+                "structure": {"status": "not-published", "reason_code": "structure-not-published"},
+                "quote": {"status": "not-published", "reason_code": "structure-not-published"},
+                "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
+                "opportunities": {"status": "not-published", "reason_code": "structure-not-published"},
+                "blockers": [{"scope": "structure", "code": "structure-not-published", "impact": "blocking"}],
+            }
+        return {
+            "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
+            "eligibility": {"state": "paused", "reason_code": "not-yet-qualified"},
+            "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "component_counts": dict(structure.get("component_counts") or {})},
+            "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count")}),
+            "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
+            "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available", "generation_key": str(opportunity["generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
+            "blockers": [],
+        }
+
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:
         """Read one complete, atomically published opportunity projection."""
         if not 1 <= limit <= 500 or len(after_group_id) > 256 or "\x00" in after_group_id:

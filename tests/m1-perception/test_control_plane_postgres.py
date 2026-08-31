@@ -14401,3 +14401,22 @@ def _certificate_identity_key_for_test(payload: dict[str, object]) -> str:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def test_business_overview_distinguishes_absent_products_from_zero(
+    control_plane: PostgresControlPlane,
+) -> None:
+    overview = control_plane.business_overview()
+
+    assert overview["schema_version"] == "m1.business-overview.v1"
+    assert overview["status"] == "available"
+    assert overview["eligibility"] == {
+        "state": "paused",
+        "reason_code": "structure-not-published",
+    }
+    for product in ("structure", "quote", "analysis", "opportunities"):
+        assert overview[product]["status"] == "not-published"
+    assert overview["opportunities"].get("count") is None
+    assert overview["blockers"] == [
+        {"scope": "structure", "code": "structure-not-published", "impact": "blocking"}
+    ]
