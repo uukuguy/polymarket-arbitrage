@@ -14451,3 +14451,16 @@ def test_business_overview_reports_the_published_quote_and_real_zero_opportuniti
     assert overview["structure"]["generation_key"] == structure
     assert overview["quote"]["parent_structure_generation_key"] == structure
     assert overview["opportunities"] == {"status": "not-published", "reason_code": "opportunity-not-published"}
+    newer_structure = "structure:" + "f" * 64
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)",
+            ("newer-structure-certify", newer_structure, now, now + timedelta(seconds=1)),
+        )
+        connection.execute(
+            "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+            (newer_structure, "newer-structure-certify", "c" * 64, "d" * 64, now + timedelta(seconds=1)),
+        )
+    lagging = control_plane.business_overview()
+    assert lagging["structure"]["generation_key"] == newer_structure
+    assert lagging["quote"]["status"] == "lagging"
