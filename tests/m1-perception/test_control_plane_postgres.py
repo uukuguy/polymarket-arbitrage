@@ -5274,6 +5274,8 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
                WHERE pointer_key='quote:current'""",
             (successor_quote, quote_generation, now),
         )
+    lagging_overview = control_plane.business_overview()
+    assert lagging_overview["opportunities"]["status"] == "lagging"
     successor_row = {**row, "group_id": "group-b", "event_id": "event-b"}
     control_plane.publish_opportunity_projection(
         quote_generation_key=successor_quote,
