@@ -3392,6 +3392,8 @@ def test_make_dashboard_deploy_dry_run() -> None:
     )
     assert result.returncode == 0, f"make -n dashboard-deploy failed: {result.stderr}"
     assert "vercel" in result.stdout
+    assert "cd dashboard &&" not in result.stdout
+    assert "vercel --prod --yes" in result.stdout
 
 
 def test_makefile_phase02_plan06_targets_phony() -> None:

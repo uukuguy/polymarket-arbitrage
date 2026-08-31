@@ -1365,10 +1365,10 @@ dashboard-typecheck:
 	@echo ">> dashboard-typecheck — pnpm tsc --noEmit"
 	cd dashboard && pnpm tsc --noEmit
 
-## dashboard-deploy: Vercel CLI deploy --prod (requires `vercel login` first time)
+## dashboard-deploy: Vercel production deploy from repo root (project Root Directory is dashboard).
 dashboard-deploy:
-	@echo ">> dashboard-deploy — vercel deploy --prod"
-	cd dashboard && pnpm dlx vercel --prod
+	@echo ">> dashboard-deploy — vercel deploy --prod from repository root"
+	pnpm dlx vercel --prod --yes
 
 ## smoke-l2-dashboard: curl all 4 L2 Vercel pages, expect HTTP 200 each (D-07 reachability)
 ## Usage: make smoke-l2-dashboard                     # uses default URL
