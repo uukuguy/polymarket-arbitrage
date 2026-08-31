@@ -120,6 +120,49 @@ def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies()
     assert opportunities.json()["items"] == [{"group_id": "g-1", "gross_edge_bps": 120.0}]
 
 
+def test_business_overview_route_transports_one_authoritative_snapshot() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    expected = {
+        "schema_version": "m1.business-overview.v1",
+        "status": "available",
+        "observed_at": "2026-08-31T05:00:00+00:00",
+        "eligibility": {"state": "paused", "reason_code": "freshness.structure"},
+        "structure": {"status": "stale"},
+        "quote": {"status": "lagging"},
+        "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
+        "opportunities": {"status": "not-published", "reason_code": "quote-lineage-lagging"},
+        "blockers": [],
+    }
+
+    class BusinessFocusedControlPlane:
+        def business_overview(self) -> dict[str, object]:
+            return expected
+
+    with TestClient(create_control_plane_app(control_plane=BusinessFocusedControlPlane())) as client:
+        response = client.get("/perception/business-overview")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_business_overview_route_fails_closed_when_authority_fails() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class FailingBusinessControlPlane:
+        def business_overview(self) -> dict[str, object]:
+            raise RuntimeError("database read failed")
+
+    with TestClient(create_control_plane_app(control_plane=FailingBusinessControlPlane())) as client:
+        response = client.get("/perception/business-overview")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "business-overview-unavailable",
+    }
+
+
 def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 

@@ -92,6 +92,28 @@ async def current_opportunities(request: Request) -> JSONResponse:
         )
 
 
+async def business_overview(request: Request) -> JSONResponse:
+    """Serve one authority-owned M1 business snapshot without response composition."""
+    control_plane = getattr(request.app.state, "control_plane", None)
+    if control_plane is None or not hasattr(control_plane, "business_overview"):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "business-overview-unavailable"},
+            status_code=503,
+        )
+    try:
+        overview = await run_blocking_call_with_timeout(
+            control_plane.business_overview,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:business-overview-read",
+        )
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "business-overview-unavailable"},
+            status_code=503,
+        )
+    return JSONResponse(overview)
+
+
 def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
     """Create an HTTP app with no SQLite, scheduler, or data-worker dependency."""
     app = Starlette(
@@ -100,6 +122,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
             Route("/health", control_plane_health, methods=["GET"]),
             Route("/perception/control-plane", control_plane_status, methods=["GET"]),
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
+            Route("/perception/business-overview", business_overview, methods=["GET"]),
         ]
     )
     app.state.control_plane = control_plane

@@ -7,6 +7,18 @@
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
 
+## 2026-08-31 — atomic business research read model
+
+- [DECISION] H-064 supersedes the mixed-authority business brief as the target
+  business fact boundary: `BusinessOverviewV1` must be one bounded read-only
+  transaction and is the only permitted source for the future CLI and Dashboard.
+- [SESSION] Added a fail-closed `/perception/business-overview` transport route;
+  its focused API contract test suite passes. It cannot report a business result
+  until the Postgres projection exists.
+- [NEXT] Continue H-064 with tests first for `PostgresControlPlane.business_overview()`:
+  prove snapshot generation lineage, zero/not-published/paused semantics, then
+  migrate the CLI and Dashboard to the same versioned authority.
+
 ## 2026-08-26 — runtime scoped database role closure
 
 - [SESSION] Closed Plan 05.6-207 Task 6 in the `m1-self-healing` worktree at

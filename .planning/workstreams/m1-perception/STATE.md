@@ -74,7 +74,11 @@ progress:
 
 ## Next Action
 
-1. Obtain fresh, read-only business evidence in order: `make
+1. Active Climb hypothesis H-064 is establishing an atomic `BusinessOverviewV1`
+   business read model. The HTTP transport route is present and fail-closed; do
+   not redirect the CLI or Dashboard until `PostgresControlPlane.business_overview()`
+   provides the single bounded transaction authority.
+2. Obtain fresh, read-only business evidence in order: `make
    smoke-control-plane-prod`, then `make control-plane-business-brief`. Use
    `format=json` only for automation of the same summary; audit a result through
    `make control-plane-status limit=20` and `make control-plane-opportunities
