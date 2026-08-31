@@ -1,4 +1,18 @@
 hypotheses:
+- id: H-064
+  description: A versioned M1 BusinessOverview snapshot assembled in one bounded
+    read-only database transaction can make the CLI and Dashboard present the
+    same lineage-consistent business truth without treating unavailable,
+    not-published, stale, or paused products as zero opportunities.
+  parent_paradigm: atomic-business-research-read-model
+  expected_lift: Replace the current two-authority business brief with a safe,
+    auditable product-level fact boundary that supports business research before
+    opportunity discovery while preserving the control-plane operator reader.
+  cost_h: 4.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-31T13:10:00+08:00'
+  results: []
 - id: H-063
   description: A production Structure successor can restore the exact dependent Quote
     and Opportunity lineage and resume rolling qualification on the same epoch without
