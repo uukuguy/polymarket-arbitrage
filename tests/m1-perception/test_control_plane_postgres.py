@@ -5229,6 +5229,13 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
         "limit": 1,
         "next_after_group_id": None,
     }
+    overview = control_plane.business_overview()
+    assert overview["opportunities"] == {
+        "status": "available",
+        "quote_generation_key": quote_generation,
+        "parent_structure_generation_key": structure_generation,
+        "count": 1,
+    }
     with pytest.raises(ValueError, match="invalid-opportunity-projection-row"):
         control_plane.publish_opportunity_projection(
             quote_generation_key=quote_generation,

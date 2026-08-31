@@ -8847,7 +8847,7 @@ class PostgresControlPlane:
                 " WHERE pointer.pointer_key = 'quote:current'"
                 ") quote) AS quote, "
                 "(SELECT to_jsonb(opportunity) FROM ("
-                " SELECT projection.generation_key, projection.record_count"
+                " SELECT projection.generation_key, projection.structure_generation_key, projection.record_count"
                 " FROM m1_opportunity_publication_pointers pointer"
                 " JOIN m1_opportunity_projections projection ON projection.generation_key = pointer.generation_key"
                 " WHERE pointer.pointer_key = 'opportunity:current'"
@@ -8877,7 +8877,7 @@ class PostgresControlPlane:
             "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "component_counts": dict(structure.get("component_counts") or {})},
             "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count")}),
             "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
-            "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available", "generation_key": str(opportunity["generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
+            "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available", "quote_generation_key": str(opportunity["generation_key"]), "parent_structure_generation_key": str(opportunity["structure_generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
             "blockers": [],
         }
 
