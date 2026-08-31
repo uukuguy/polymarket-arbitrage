@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from typing import Any, Protocol, cast
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -31,6 +32,11 @@ from polyarb.control_plane.alert_delivery import (
 from polyarb.control_plane.blocking_bridge import (
     run_blocking_call,
     run_blocking_call_until_stopped,
+)
+from polyarb.control_plane.business_brief import (
+    BusinessBriefUnavailable,
+    build_business_brief,
+    render_business_brief,
 )
 from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY, RECOVERY_DB_POLICY
 from polyarb.control_plane.db_role_contract import (
@@ -170,6 +176,12 @@ def _parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="read bounded durable operator state")
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--json", action="store_true")
+    business_brief = subcommands.add_parser(
+        "business-brief",
+        help="read the fixed M1 business brief from durable and public authorities",
+    )
+    business_brief.add_argument("--format", choices=("text", "json"), default="text")
+    business_brief.add_argument("--limit", type=int, default=50)
     preflight = subcommands.add_parser(
         "preflight",
         help="read-only proof that one named database and R2 bucket are ready for shadow work",
@@ -581,6 +593,25 @@ def _read_soak_control_snapshot(url: str) -> dict[str, object]:
         payload = json.loads(response.read())
     if not isinstance(payload, dict):
         raise SoakEvidenceError("control API response must be an object")
+    return payload
+
+
+def _read_business_brief_opportunities(*, limit: int) -> Mapping[str, object]:
+    """Read the bounded public opportunity projection through an explicit GET."""
+    if isinstance(limit, bool) or limit <= 0:
+        raise BusinessBriefUnavailable("opportunity-limit-malformed")
+    query = urlencode({"limit": limit})
+    request = Request(
+        f"https://polyarb-control-api.fly.dev/perception/opportunities?{query}",
+        method="GET",
+    )
+    with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed public authority
+        response_status = getattr(response, "status", None)
+        if not isinstance(response_status, int) or not 200 <= response_status < 300:
+            raise BusinessBriefUnavailable("opportunity-http-unavailable")
+        payload = json.loads(response.read())
+    if not isinstance(payload, Mapping):
+        raise BusinessBriefUnavailable("opportunity-response-malformed")
     return payload
 
 
@@ -2165,6 +2196,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         control_plane = _control_plane_from_env()
     except DatabaseRoleContractError as error:
+        if args.command == "business-brief":
+            print("业务数据不可用", file=sys.stderr)
+            return 2
         if args.command in {
             "runtime-reconcile-once",
             "runtime-reconcile-serve",
@@ -2175,9 +2209,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"control-plane command unavailable: {error}", file=sys.stderr)
         return 1
     if control_plane is None:
+        if args.command == "business-brief":
+            print("业务数据不可用", file=sys.stderr)
+            return 2
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
         return 2
     try:
+        if args.command == "business-brief":
+            try:
+                status = {
+                    **control_plane.operational_snapshot(sample_limit=20),
+                    "status": "available",
+                }
+                brief = build_business_brief(
+                    status,
+                    _read_business_brief_opportunities(limit=args.limit),
+                )
+            except (OSError, RuntimeError, ValueError, psycopg.Error, BusinessBriefUnavailable):
+                print("业务数据不可用", file=sys.stderr)
+                return 2
+            if args.format == "json":
+                _write(brief, as_json=True)
+            else:
+                print(render_business_brief(brief))
+            return 0
         if args.command in {"cloud-soak-start", "cloud-soak-sample"}:
             try:
                 observation = _record_cloud_soak_observation(

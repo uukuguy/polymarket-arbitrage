@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 
+from polyarb import cli_control_plane
 from polyarb.control_plane.business_brief import (
     BusinessBriefUnavailable,
     build_business_brief,
@@ -128,3 +131,82 @@ def test_rejects_unavailable_or_malformed_authority(
 ) -> None:
     with pytest.raises(BusinessBriefUnavailable):
         build_business_brief(status, opportunities)
+
+
+class _OpportunityResponse:
+    def __init__(self, payload: Mapping[str, object], *, status: int = 200) -> None:
+        self.status = status
+        self._payload = payload
+
+    def __enter__(self) -> _OpportunityResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode()
+
+
+def test_business_brief_json_reads_bounded_status_and_public_opportunities(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status = _status_fixture()
+    opportunities = _opportunities_fixture()
+    calls: dict[str, object] = {}
+
+    class _ControlPlane:
+        def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
+            calls["sample_limit"] = sample_limit
+            return status
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    def fake_urlopen(request: object, *, timeout: float) -> _OpportunityResponse:
+        calls["request"] = request
+        calls["timeout"] = timeout
+        return _OpportunityResponse(opportunities)
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: _ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "urlopen", fake_urlopen)
+
+    assert cli_control_plane.main(["business-brief", "--format", "json"]) == 0
+
+    request = calls["request"]
+    assert hasattr(request, "method")
+    assert request.method == "GET"
+    assert request.full_url == (
+        "https://polyarb-control-api.fly.dev/perception/opportunities?limit=50"
+    )
+    assert calls["sample_limit"] == 20
+    assert calls["timeout"] == 10
+    assert calls["closed"] is True
+    assert json.loads(capsys.readouterr().out) == build_business_brief(status, opportunities)
+
+
+def test_business_brief_redacts_unavailable_authority(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: SimpleNamespace(operational_snapshot=lambda *, sample_limit: _status_fixture()),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "urlopen",
+        lambda request, *, timeout: _OpportunityResponse({"status": "unavailable"}),
+    )
+
+    assert cli_control_plane.main(["business-brief"]) == 2
+    captured = capsys.readouterr()
+    assert "业务数据不可用" in captured.err
+    assert captured.out == ""
+
+
+def test_business_brief_parser_rejects_unknown_format() -> None:
+    with pytest.raises(SystemExit) as error:
+        cli_control_plane._parser().parse_args(["business-brief", "--format", "xml"])
+
+    assert error.value.code == 2

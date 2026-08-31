@@ -3559,6 +3559,28 @@ def test_control_plane_opportunities_is_current_read_only_business_entrypoint() 
     assert "control-plane-opportunities:" in result.stdout
 
 
+def test_control_plane_business_brief_is_a_safe_read_only_make_entrypoint() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    match = re.search(
+        r"(?m)^control-plane-business-brief:\n(?P<recipe>(?:\t.*\n)+)", makefile
+    )
+    assert match is not None
+    recipe = match.group("recipe")
+
+    assert 'business-brief --format "$(or $(format),text)"' in recipe
+    assert "POLYARB_SUPABASE_DB_DSN" in recipe
+    assert not any(
+        re.search(rf"\b{token}\b", recipe.lower())
+        for token in ("flyctl", "deploy", "secret", "wallet", "order", "trade")
+    )
+
+    result = subprocess.run(
+        ["make", "help"], cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+    assert "control-plane-business-brief:" in result.stdout
+
+
 def test_control_plane_opportunities_encodes_untrusted_make_values_without_shell_execution(
     tmp_path: Path,
 ) -> None:
