@@ -37,6 +37,7 @@ from polyarb.control_plane.business_brief import (
     BusinessBriefUnavailable,
     build_business_brief,
     render_business_brief,
+    render_business_overview,
 )
 from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY, RECOVERY_DB_POLICY
 from polyarb.control_plane.db_role_contract import (
@@ -1978,21 +1979,14 @@ def _dispatch_business_brief(
 ) -> int:
     """Build and render the bounded business brief from its two authorities."""
     try:
-        status = {
-            **control_plane.operational_snapshot(sample_limit=20),
-            "status": "available",
-        }
-        brief = build_business_brief(
-            status,
-            _read_business_brief_opportunities(limit=args.limit),
-        )
+        brief = control_plane.business_overview()
     except (OSError, RuntimeError, ValueError, psycopg.Error, BusinessBriefUnavailable):
         print("业务数据不可用", file=sys.stderr)
         return 2
     if args.format == "json":
         _write(brief, as_json=True)
     else:
-        print(render_business_brief(brief))
+        print(render_business_overview(brief))
     return 0
 
 

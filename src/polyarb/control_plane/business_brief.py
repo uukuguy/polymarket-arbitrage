@@ -153,6 +153,51 @@ def render_business_brief(brief: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+def render_business_overview(overview: Mapping[str, object]) -> str:
+    """Render the atomic business authority without importing runtime detail."""
+    overview = _mapping(overview, field="overview")
+    eligibility = _optional_mapping(overview.get("eligibility"))
+    structure = _optional_mapping(overview.get("structure"))
+    quote = _optional_mapping(overview.get("quote"))
+    analysis = _optional_mapping(overview.get("analysis"))
+    opportunities = _optional_mapping(overview.get("opportunities"))
+    blockers = _optional_sequence(overview.get("blockers"))
+    lines = [
+        "今日业务结论",
+        f"快照时间：{_display(overview.get('observed_at'))}",
+        f"资格：{_display(eligibility.get('state'))}",
+        f"资格原因：{_display(eligibility.get('reason_code'))}",
+        "",
+        "Structure",
+        f"状态：{_display(structure.get('status'))}",
+        f"generation：{_display(structure.get('generation_key'))}",
+        "",
+        "Quote",
+        f"状态：{_display(quote.get('status'))}",
+        f"generation：{_display(quote.get('generation_key'))}",
+        f"父 Structure：{_display(quote.get('parent_structure_generation_key'))}",
+        "",
+        "Analysis",
+        f"状态：{_display(analysis.get('status'))}",
+        "",
+        "认证机会",
+        f"状态：{_display(opportunities.get('status'))}",
+        f"数量：{_display(opportunities.get('count'))}",
+        "",
+        "业务阻塞",
+    ]
+    if blockers:
+        for blocker in blockers:
+            item = _optional_mapping(blocker)
+            lines.append(
+                f"{_display(item.get('scope'))} / {_display(item.get('code'))} — "
+                f"{_display(item.get('impact'))}"
+            )
+    else:
+        lines.append("无")
+    return "\n".join(lines)
+
+
 def _optional_mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
