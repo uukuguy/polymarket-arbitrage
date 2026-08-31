@@ -133,6 +133,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 INSERT INTO m1_soak_runs (
@@ -196,6 +197,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT control_api_url, machine_ids FROM m1_soak_runs WHERE run_id = %s
@@ -469,6 +471,8 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT window_key, stream, ordinal, requested_cursor,
@@ -490,6 +494,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
@@ -586,7 +591,10 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            return self._structure_source_window_digest_cursor(cursor, window_key)
+            _set_structure_read_timeouts(cursor, read_only=True)
+            return self._structure_source_window_digest_cursor(
+                cursor, window_key, lock_window=False
+            )
 
     def structure_source_window_bundle(self, window_key: str) -> dict[str, str] | None:
         """Read the one immutable bundle receipt bound to a source window."""
@@ -595,6 +603,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT source_digest, bundle_key, bundle_digest
@@ -620,7 +629,8 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            self._structure_source_window_digest_cursor(cursor, window_key)
+            _set_structure_read_timeouts(cursor, read_only=True)
+            self._structure_source_window_digest_cursor(cursor, window_key, lock_window=False)
             cursor.execute(
                 """
                 SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
@@ -653,6 +663,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT checkpoint_cursor, checkpoint_digest, artifact_key
@@ -677,6 +688,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT checkpoint_cursor, checkpoint_digest, artifact_key
@@ -853,10 +865,14 @@ class PostgresControlPlane:
 
     @staticmethod
     def _structure_source_window_digest_cursor(
-        cursor: psycopg.Cursor[dict[str, Any]], window_key: str
+        cursor: psycopg.Cursor[dict[str, Any]],
+        window_key: str,
+        *,
+        lock_window: bool = True,
     ) -> str:
         cursor.execute(
-            "SELECT state FROM m1_structure_source_windows WHERE window_key = %s FOR SHARE",
+            "SELECT state FROM m1_structure_source_windows WHERE window_key = %s"
+            + (" FOR SHARE" if lock_window else ""),
             (window_key,),
         )
         window = cursor.fetchone()

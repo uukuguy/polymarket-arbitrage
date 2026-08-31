@@ -1,67 +1,122 @@
-### Task 7: Dashboard Perception and Incident Views
+## Task 7: Complete orchestrator, cleanup guarantees, and independent evaluator
 
-**Goal**
+**Files:**
 
-Expose the Task 6 bounded public read models as an operator-facing Dashboard
-without turning transport failures into a false zero-opportunity state.
-
-**Files**
-
-- Create: `dashboard/app/perception/page.tsx`
-- Create: `dashboard/app/perception/[group_id]/page.tsx`
-- Create: `dashboard/lib/perception.ts`
-- Modify: `dashboard/app/layout.tsx`
-- Modify: `dashboard/lib/types.ts`
+- Modify: `scripts/perception_chaos.py`
+- Modify: `scripts/perception_fault_readonly.py`
+- Modify: `scripts/perception_fault_acceptance.py`
+- Modify: `tests/m1-perception/test_perception_chaos_contract.py`
+- Modify: `tests/m1-perception/test_perception_fault_acceptance.py`
+- Create: `tests/m1-perception/test_upstream_fault_e2e.py`
 - Modify: `Makefile`
-- Modify: `scripts/check_m1_manual.py`
-- Modify: `docs/M1-市场感知平台使用手册.md`
-- Test: `tests/m1-perception/test_dashboard_perception_contract.py`
 
-**Required interfaces**
+**Step 1: Write RED lifecycle/orchestrator tests**
 
-- Consume Task 6 public GET endpoints only.
-- Produce `/perception` overview.
-- Produce `/perception/[group_id]` history.
-- Add `make smoke-perception-dashboard`.
+For all eight upstream faults, assert:
 
-**Non-negotiable behavior**
+- execute remains blocked without exact release, target runtime, target key,
+  separate authorization, and a new evidence directory;
+- baseline must be green before arm;
+- arm response binds exact fault/release/machine/boot/call-class/target;
+- `try/finally` always calls cleanup after arm, including cancellation,
+  detection timeout, malformed API response, evidence write failure, and
+  `KeyboardInterrupt`;
+- cleanup response proves data-plane clear before receipt persistence;
+- `cleanup-failed` freezes the remaining matrix;
+- orchestrator accepts exactly one expected Incident (or the explicitly
+  modeled Gamma partial coverage fact);
+- business recovery receipt is newer than injection and cleanup;
+- resulting `evidence.json` contains a complete immutable fault history;
+- fixture-generated evidence can test evaluator determinism but uses
+  `scope=local-conformance`;
+- evaluator rejects missing/duplicate/mismatched intent, injection, Incident,
+  cleanup, recovery, runtime identity, event hash, or terminal verified event;
+- evaluator cannot write to the source DB or call control endpoints.
 
-1. The typed reader uses `cache: "no-store"` and a three-second absolute
-   timeout.
-2. Transport, HTTP, and JSON failures render a typed unavailable warning.
-   They never render as a valid zero-opportunity state.
-3. The overview distinguishes watching, stale, unavailable, and invalidated
-   groups and shows opportunity edge/capacity, Structure and Quote age,
-   15/30/60-minute raw and weighted coverage, Discovery/Reconciliation
-   progress, resource mode, and open incidents.
-4. The group page presents membership revisions, Quote batches, opportunity
-   transitions, and incident events on one timestamped timeline.
-5. All new executable entry points are exposed through the Makefile and the
-   living M1 manual remains synchronized.
-6. No production deployment or cutover occurs in Task 7. Deployment remains
-   Task 8 scope.
+Run:
 
-**Execution**
+```bash
+uv run pytest \
+  tests/m1-perception/test_perception_chaos_contract.py \
+  tests/m1-perception/test_perception_fault_acceptance.py \
+  tests/m1-perception/test_upstream_fault_e2e.py -q
+```
 
-1. Write and run the Dashboard source-contract RED test.
-2. Implement the typed fail-soft reader.
-3. Implement overview and group-history pages.
-4. Add the smoke target and manual route.
-5. Run:
+Expected: FAIL.
 
-   ```bash
-   make dashboard-typecheck
-   make dashboard-build
-   uv run pytest tests/m1-perception/test_dashboard_perception_contract.py -q
-   make docs-m1-check
-   make planning-status
-   ```
+**Step 2: Implement arm → observe → cleanup → recover**
 
-6. Commit atomically, write the Task 7 summary, and run an independent
-   six-pillar visual/UI review before Task 8.
+For upstream faults, `perception_chaos.py` must:
 
-**Safety boundary**
+1. collect the read-only green baseline;
+2. resolve the current exact producer runtime;
+3. create one canonical typed intent;
+4. arm via the doubly signed control endpoint;
+5. queue/wait for the matching component call;
+6. observe injection and one authoritative Incident/coverage fact;
+7. run cleanup in `finally`;
+8. wait for the exact business recovery receipt;
+9. export bounded read-only evidence; and
+10. invoke no evaluator mutation.
 
-- Observer-only.
-- No wallet, signing, order placement, balance mutation, or real-money action.
-- No production deployment in this task.
+Only after these paths pass tests, set `execute_supported=True` for:
+
+```text
+gamma-timeout gamma-partial gamma-malformed gamma-cursor
+clob-missing-leg clob-429 clob-latency telegram-failure
+```
+
+Keep SQLite/disk/load/process/restart/deploy primitives separate.
+
+**Step 3: Strengthen the independent evaluator**
+
+For `scope=production-fault`, require:
+
+```text
+authorized → armed → injected → detected/coverage → contained
+→ cleaned → recovered → verified
+```
+
+The evaluator must recompute every digest/hash and require exact:
+
+- release/machine/boot;
+- fault ID, call class, target digest, parameter digest, nonce digest;
+- one injection;
+- one Incident/coverage fact;
+- cleanup before recovery;
+- component-specific recovery table and row ID;
+- zero open fault/Incident state;
+- existing cross-membership, partial-publication, orphan-run, freshness, and
+  reconciliation gates.
+
+Any absent field is a named FAIL reason, never an implicit default.
+
+**Step 4: Run focused and full local gates**
+
+```bash
+uv run pytest \
+  tests/m1-perception/test_perception_chaos_contract.py \
+  tests/m1-perception/test_perception_fault_acceptance.py \
+  tests/m1-perception/test_upstream_fault_e2e.py -q
+make test-m1-perception
+make planning-status
+```
+
+Expected: PASS; no DRIFT.
+
+**Step 5: Commit**
+
+```bash
+git add scripts/perception_chaos.py \
+  scripts/perception_fault_readonly.py \
+  scripts/perception_fault_acceptance.py \
+  tests/m1-perception/test_perception_chaos_contract.py \
+  tests/m1-perception/test_perception_fault_acceptance.py \
+  tests/m1-perception/test_upstream_fault_e2e.py Makefile
+git commit -m "feat(m1): qualify typed upstream fault lifecycles"
+make planning-status
+```
+
+Expected: commit succeeds; no DRIFT.
+
+---

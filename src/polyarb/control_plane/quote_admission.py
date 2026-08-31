@@ -32,7 +32,7 @@ class _ObjectClient(Protocol):
 
     def put_object(self, **kwargs: Any) -> Any: ...
 
-    def head_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+    def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def quote_legs_from_structure_components(
@@ -250,6 +250,7 @@ class TransactionalQuoteAdmitter:
             if isinstance(error, QuoteAdmissionError):
                 raise
             raise QuoteAdmissionError("Quote admission bundle digest or contract failed") from error
+        raise AssertionError("quote admission runtime exited without a result")
 
     def _read_bundle(self, key: str) -> bytes:
         response = self._object_client.get_object(Bucket=self._bucket, Key=key)

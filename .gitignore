@@ -76,3 +76,5 @@ dashboard/.pnpm-store/
 # Local launchd stdout/stderr for the transactional staging soak sampler.
 # The signed JSONL evidence itself remains tracked at the end of the window.
 .planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/*.log
+.vercel
+.env*

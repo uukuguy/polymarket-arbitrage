@@ -168,3 +168,21 @@
 - Commit `9bf026a` is present on the active branch. It binds quote runs to the
   existing verified source truth hash; the new Structure revision should extend
   that already-shipped identity chain rather than duplicate it.
+
+## First-wave repair result — 2026-07-27
+
+- `snapshot_attempts` is append-only and terminal rows cannot be overwritten.
+  Scheduler attempt lifecycle is now independent of `snapshots`, so a child
+  SIGKILL has durable operational evidence even if no new snapshot row exists.
+- `snapshot:latest_attempt=never-started` is compatibility-neutral: existing
+  published snapshots can predate the new table. Explicit `failed`/`cancelled`
+  is the alert signal; it becomes fail only when published truth is also stale.
+- A fail-status `snapshot:failure_counter` remains a hard L1 signal. Polywatch
+  immediately pushes explicit latest-attempt failure even when last success age
+  is fresh, rather than treating warn as routine snapshot activity.
+- Legacy Polywatch `active_keys` is converted on read into independent incident
+  records. A grouped Telegram message still reduces noise, but component state
+  updates only when that component's own delivery succeeds.
+- `make snapshot-attempt-status` intentionally does not initialize schema,
+  connect to Fly, or need the daemon HMAC secret. `latest: null` is absence of
+  local evidence, not an operational green signal.

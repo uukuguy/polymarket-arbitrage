@@ -186,6 +186,37 @@
   component Polywatch recovery, a read-only operator command, tests, manual,
   learning documentation, and no production mutation.
 
+### First-wave attempt and incident truth
+
+- **Status:** complete locally; not deployed and not a new qualification run.
+- Added append-only `snapshot_attempts`: every scheduler-launched run now has a
+  durable terminal outcome, including SIGKILL/possible-OOM and cancellation.
+- Strict health now exposes `snapshot:latest_attempt` and
+  `snapshot:failure_counter` beside published market truth. A fresh old revision
+  no longer conceals a new failed run.
+- Replaced Polywatch's shared `active_keys` lifecycle with component-scoped
+  incidents. L1, opportunity, L2, and Dashboard now alert/recover independently
+  while retaining failed delivery retries.
+- Added `make snapshot-attempt-status`, a local read-only JSON inspection command,
+  plus learning document 26 and manual guidance.
+- Verification: 34 scheduler/health tests, 37 Polywatch tests, 58
+  command/manual-contract tests, changed-file Ruff, `make docs-m1-check`, and
+  `git diff --check` all passed during the respective RED/GREEN commits.
+
+### Structure / Archive separation plan
+
+- Re-audited the current write path and confirmed `snapshots.id` already owns the
+  atomic structure boundary: source coverage, event membership, neg-risk truth,
+  and current market replacement commit together. A new revision table would
+  duplicate and risk diverging from the existing Quote provenance chain.
+- Wrote `docs/superpowers/plans/2026-07-27-m1-structure-archive-separation.md`.
+  It introduces an explicit data-product marker, Gamma-only online Structure,
+  CLOB/Parquet-only Archive, strict legacy rejection after cutover, and removal
+  of no-volume cron snapshot jobs.
+- The plan intentionally defers Archive production scheduling and any Fly memory
+  resize. First prove Gamma-only Structure + Quote capacity; then set resources
+  from measured peak and SLO evidence.
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
