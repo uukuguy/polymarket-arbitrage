@@ -3502,7 +3502,17 @@ def test_control_plane_opportunities_is_current_read_only_business_entrypoint() 
     assert "python -m json.tool" in recipe
     assert not any(
         re.search(rf"\b{token}\b", recipe.lower())
-        for token in ("flyctl", "deploy", "post", "secret", "dsn", "sqlite", "wallet", "order", "trade")
+        for token in (
+            "flyctl",
+            "deploy",
+            "post",
+            "secret",
+            "dsn",
+            "sqlite",
+            "wallet",
+            "order",
+            "trade",
+        )
     )
 
     result = subprocess.run(

@@ -68,3 +68,19 @@ Live read-only verification returned HTTP success and valid JSON:
 None. The live endpoint currently reports zero available opportunities, which
 is a valid authenticated projection rather than a synthesized fallback.
 
+## Task 1 Review Fix Verification
+
+Wrapped the forbidden-token tuple in `tests/m1-perception/test_makefile_contract.py:3505`
+to satisfy Ruff E501 without changing the token set or assertion behavior.
+
+Exact commands and results:
+
+```text
+uv run ruff check tests/m1-perception/test_makefile_contract.py; ruff_status=$?; uv run pytest tests/m1-perception/test_makefile_contract.py -q; pytest_status=$?; printf 'RUFF_STATUS=%s\nPYTEST_STATUS=%s\n' "$ruff_status" "$pytest_status"; exit $((ruff_status || pytest_status))
+All checks passed!
+........................................................................ [ 39%]
+........................................................................ [ 79%]
+.....................................                                    [100%]
+RUFF_STATUS=0
+PYTEST_STATUS=0
+```
