@@ -60,6 +60,10 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
     assert payload["app"] == "__CONTROL_PLANE_WORKER_APP__"
     assert payload["env"]["POLYARB_ALERT_CHANNELS"] == "dashboard,telegram"
     assert payload["env"]["POLYARB_RUNTIME_ROLE"] == "control-plane"
+    # Each quote lane owns a synchronous database write path.  Keep the lane
+    # count within the worker's two-session pool so a normal publication wave
+    # cannot starve itself with PoolTimeout while committing its receipts.
+    assert payload["env"]["POLYARB_CLOB_BATCH_MAX_CONCURRENCY"] == "2"
     assert payload["processes"] == {
         "coordinator": (
             "python -m polyarb.cli_control_plane serve --enable "
