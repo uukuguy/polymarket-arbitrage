@@ -1078,8 +1078,10 @@ async def _run_runtime_watchdog_service(
     stop_event = asyncio.Event()
     restart_gate = RestartEventGate()
     progress_gate = ProgressGate(max_stall=timedelta(minutes=5))
-    soak_evidence_gate = SoakEvidenceGate(
-        max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id
+    soak_evidence_gate = (
+        SoakEvidenceGate(max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id)
+        if args.soak_run_id
+        else None
     )
     cloud_usage_gate = CloudUsageGate(max_age=timedelta(minutes=15))
     loop = asyncio.get_running_loop()
@@ -2149,8 +2151,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args,
                     restart_gate=RestartEventGate(),
                     progress_gate=ProgressGate(max_stall=timedelta(minutes=5)),
-                    soak_evidence_gate=SoakEvidenceGate(
-                        max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id
+                    soak_evidence_gate=(
+                        SoakEvidenceGate(
+                            max_age=timedelta(minutes=15),
+                            expected_run_id=args.soak_run_id,
+                        )
+                        if args.soak_run_id
+                        else None
                     ),
                 )
                 _write(

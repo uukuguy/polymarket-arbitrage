@@ -118,7 +118,10 @@ def test_control_alert_template_is_a_database_independent_runtime_watchdog() -> 
     assert '"$POLYARB_QUOTE_BATCH_MACHINE_ID"' in watchdog
     assert '"$POLYARB_EVIDENCE_APP"' not in watchdog
     assert '"$POLYARB_EVIDENCE_MACHINE_ID"' not in watchdog
-    assert '"$POLYARB_WATCHDOG_SOAK_RUN_ID_V2"' in watchdog
+    # A fresh database commissioning does not inherit the retired sampler's
+    # formal-run identifier.  Runtime liveness is checked from the live API
+    # and exact Machines; a formal soak is an explicit, opt-in acceptance gate.
+    assert '"$POLYARB_WATCHDOG_SOAK_RUN_ID_V2"' not in watchdog
     assert (
         "--secondary-target "
         '"$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID"' in watchdog
