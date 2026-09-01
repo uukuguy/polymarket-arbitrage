@@ -4,8 +4,8 @@
 
 - Added Alembic revision 042, replacing the append-only runtime-observe ledger with bounded status, current-state, transition, and hourly-rollup projections.
 - All writes now go through a lease-fenced `SECURITY DEFINER` turn function. Direct controller DML is revoked; only status reads and the function grant remain.
-- Enforced finite retention: 100 evaluated targets per turn, 500 current targets, 5,000 transitions, and 30 days of hourly rollups. The legacy raw table is dropped by the forward-only migration.
-- Changed the observe-only controller to probe `limit + 1`; it publishes a visible `coverage_truncated` degradation instead of incorrectly inferring recovery from a partial scan.
+- Enforced finite retention: 500 evaluated/current targets per turn, 5,000 transitions, and 30 days of hourly rollups. The legacy raw table is dropped by the forward-only migration.
+- Changed the observe-only controller to probe `limit + 1`; it publishes a visible `coverage_truncated` degradation instead of incorrectly inferring recovery from a partial scan. Revision 043 raised the original 100-target scan bound to the 500-target current-state cap after production proved M1 has 216 active targets.
 - Reworked read-only verification to use the bounded status row: controller identity, continuity, freshness, gap, current-candidate parity, coverage/storage flags, and zero recovery actions.
 
 ## Verification

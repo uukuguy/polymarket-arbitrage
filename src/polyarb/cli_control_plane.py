@@ -457,7 +457,7 @@ def _parser() -> argparse.ArgumentParser:
     runtime_once.add_argument("--lease-seconds", type=int, default=30)
     runtime_once.add_argument("--action-lease-seconds", type=int, default=30)
     runtime_once.add_argument("--heartbeat-lease-seconds", type=int, default=30)
-    runtime_once.add_argument("--limit", type=int, default=100)
+    runtime_once.add_argument("--limit", type=int, default=500)
     runtime_once.add_argument("--target-type", choices=("job", "circuit"))
     runtime_once.add_argument("--target-id")
     runtime_once.add_argument(
@@ -476,7 +476,7 @@ def _parser() -> argparse.ArgumentParser:
     runtime_serve.add_argument("--lease-seconds", type=int, default=90)
     runtime_serve.add_argument("--action-lease-seconds", type=int, default=30)
     runtime_serve.add_argument("--heartbeat-lease-seconds", type=int, default=30)
-    runtime_serve.add_argument("--limit", type=int, default=100)
+    runtime_serve.add_argument("--limit", type=int, default=500)
     runtime_serve.add_argument("--interval-seconds", type=float, default=30.0)
     runtime_serve.add_argument("--json", action="store_true")
     runtime_until = subcommands.add_parser(
@@ -490,7 +490,7 @@ def _parser() -> argparse.ArgumentParser:
     runtime_until.add_argument("--lease-seconds", type=int, default=90)
     runtime_until.add_argument("--action-lease-seconds", type=int, default=30)
     runtime_until.add_argument("--heartbeat-lease-seconds", type=int, default=30)
-    runtime_until.add_argument("--limit", type=int, default=100)
+    runtime_until.add_argument("--limit", type=int, default=500)
     runtime_until.add_argument("--target-type", choices=("job", "circuit"), required=True)
     runtime_until.add_argument("--target-id", required=True)
     runtime_until.add_argument(
@@ -1624,8 +1624,8 @@ def _runtime_reconcile_once(
         raise ValueError("lease seconds must be positive")
     if args.heartbeat_lease_seconds <= 0:
         raise ValueError("heartbeat lease seconds must be positive")
-    if args.limit <= 0 or args.limit > 100:
-        raise ValueError("limit must be in 1..100")
+    if args.limit <= 0 or args.limit > 500:
+        raise ValueError("limit must be in 1..500")
     target_type = getattr(args, "target_type", None)
     target_id = getattr(args, "target_id", None)
     expected_action = getattr(args, "expected_action", None)

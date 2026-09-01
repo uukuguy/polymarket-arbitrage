@@ -505,7 +505,7 @@ def verify_runtime_observe_window(
             cursor,
             controller_id=controller_id,
             now=now,
-            sample_limit=min(100, sample_limit),
+            sample_limit=min(500, sample_limit),
         )
     recovery_action_count = _count_from_row(action_row)
     if recovery_action_count != 0:
@@ -597,8 +597,8 @@ def _read_runtime_reconcile_states_in_snapshot(
 ) -> tuple[RuntimeReconcileCandidate, ...]:
     _require_nonempty("controller_id", controller_id)
     require_timezone_aware(now, field_name="now")
-    if not 1 <= sample_limit <= 100:
-        raise ValueError("sample_limit must be in 1..100")
+    if not 1 <= sample_limit <= 500:
+        raise ValueError("sample_limit must be in 1..500")
     cursor.execute(
         """
         SELECT j.job_key, j.job_type, j.state AS job_state, j.attempt_count,

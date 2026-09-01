@@ -28,9 +28,9 @@ def upgrade() -> None:
             continuous_since timestamptz NOT NULL,
             last_completed_at timestamptz NOT NULL,
             max_gap_seconds integer NOT NULL CHECK (max_gap_seconds >= 0),
-            candidate_count integer NOT NULL CHECK (candidate_count BETWEEN 0 AND 100),
-            actionable_count integer NOT NULL CHECK (actionable_count BETWEEN 0 AND 100),
-            critical_count integer NOT NULL CHECK (critical_count BETWEEN 0 AND 100),
+            candidate_count integer NOT NULL CHECK (candidate_count BETWEEN 0 AND 500),
+            actionable_count integer NOT NULL CHECK (actionable_count BETWEEN 0 AND 500),
+            critical_count integer NOT NULL CHECK (critical_count BETWEEN 0 AND 500),
             coverage_truncated boolean NOT NULL,
             storage_limited boolean NOT NULL,
             suppressed_transition_count integer NOT NULL CHECK (suppressed_transition_count >= 0),
@@ -118,7 +118,7 @@ def upgrade() -> None:
                OR jsonb_typeof(COALESCE(turn->'candidates', '[]'::jsonb)) <> 'array' THEN
                 RAISE EXCEPTION 'invalid bounded runtime observe turn';
             END IF;
-            IF jsonb_array_length(turn->'candidates') > 100 THEN
+            IF jsonb_array_length(turn->'candidates') > 500 THEN
                 RAISE EXCEPTION 'runtime observe candidate limit exceeded';
             END IF;
             PERFORM 1 FROM public.m1_runtime_controller_leases
