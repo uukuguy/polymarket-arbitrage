@@ -4930,8 +4930,8 @@ class PostgresControlPlane:
             raise ValueError("artifact_key must not be empty")
         if isinstance(record_count, bool) or record_count < 0:
             raise ValueError("record_count must be non-negative")
-        if research_rows is not None and len(research_rows) != record_count:
-            raise ValueError("structure research rows must match the range record count")
+        if research_rows is not None and len(research_rows) > record_count:
+            raise ValueError("structure research rows cannot exceed the range record count")
 
         spec = self.structure_range_spec(lease.job_key)
         if range_digest != spec.range_digest:
@@ -9064,7 +9064,7 @@ class PostgresControlPlane:
                 """SELECT manifest.generation_key, manifest.record_count,
                           (SELECT count(*) FROM m1_business_structure_rows AS research
                            WHERE research.generation_key = manifest.generation_key)
-                              AS materialized_record_count
+                              AS indexed_record_count
                    FROM m1_generation_manifests AS manifest
                    WHERE manifest.generation_key LIKE 'structure:' || chr(37)
                    ORDER BY manifest.published_at DESC, manifest.generation_key DESC
@@ -9076,21 +9076,8 @@ class PostgresControlPlane:
             current = str(pointer["generation_key"])
             if generation_key is not None and generation_key != current:
                 return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
-            expected_record_count = int(pointer["record_count"])
-            materialized_record_count = int(pointer["materialized_record_count"])
-            if materialized_record_count != expected_record_count:
-                return {
-                    "schema_version": "m1.business-research-page.v1",
-                    "product": "structure",
-                    "status": "unavailable",
-                    "reason_code": "research-index-incomplete",
-                    "generation_key": current,
-                    "expected_record_count": expected_record_count,
-                    "materialized_record_count": materialized_record_count,
-                    "items": [],
-                    "limit": limit,
-                    "next_after": None,
-                }
+            source_record_count = int(pointer["record_count"])
+            indexed_record_count = int(pointer["indexed_record_count"])
             cursor.execute(
                 """SELECT entity_id, payload FROM m1_business_structure_rows
                    WHERE generation_key=%s AND entity_id > %s ORDER BY entity_id LIMIT %s""",
@@ -9099,7 +9086,20 @@ class PostgresControlPlane:
             rows = cursor.fetchall()
             has_more = len(rows) > limit
             page = rows[:limit]
-            return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "available", "generation_key": current, "items": [{"entity_id": str(row["entity_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["entity_id"]) if has_more else None}
+            return {
+                "schema_version": "m1.business-research-page.v1",
+                "product": "structure",
+                "status": "available",
+                "generation_key": current,
+                "source_record_count": source_record_count,
+                "indexed_record_count": indexed_record_count,
+                "items": [
+                    {"entity_id": str(row["entity_id"]), **dict(row["payload"])}
+                    for row in page
+                ],
+                "limit": limit,
+                "next_after": str(page[-1]["entity_id"]) if has_more else None,
+            }
 
     def stage_business_quote_rows(
         self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]

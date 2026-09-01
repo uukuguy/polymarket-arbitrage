@@ -45,6 +45,36 @@ from polyarb.control_plane.structure_worker import (
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
+def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> None:
+    event_rows = structure_worker_module._business_structure_research_rows(
+        "events", ({"id": "event-a"},)
+    )
+    market_rows = structure_worker_module._business_structure_research_rows(
+        "markets", ({"market_id": "market-a"},)
+    )
+    truth_rows = structure_worker_module._business_structure_research_rows(
+        "group_truth", ({"neg_risk_market_id": "group-a"},)
+    )
+
+    assert event_rows == (
+        (
+            "events:event-a",
+            {"component": "events", "source_cursor": "event-a", "row": {"id": "event-a"}},
+        ),
+    )
+    assert market_rows == ()
+    assert truth_rows == (
+        (
+            "group_truth:group-a",
+            {
+                "component": "group_truth",
+                "source_cursor": "group-a",
+                "row": {"neg_risk_market_id": "group-a"},
+            },
+        ),
+    )
+
+
 class _RangePoolLane:
     def __init__(
         self,

@@ -14661,7 +14661,7 @@ def test_business_structure_page_exposes_only_current_generation_rows(
     assert page["items"] == [{"entity_id": "event:001", "component": "events", "name": "Current"}]
 
 
-def test_business_structure_page_rejects_an_incomplete_current_research_index(
+def test_business_structure_page_exposes_a_bounded_index_without_claiming_full_mirror(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
@@ -14688,12 +14688,11 @@ def test_business_structure_page_rejects_an_incomplete_current_research_index(
     assert page == {
         "schema_version": "m1.business-research-page.v1",
         "product": "structure",
-        "status": "unavailable",
-        "reason_code": "research-index-incomplete",
+        "status": "available",
         "generation_key": current,
-        "expected_record_count": 2,
-        "materialized_record_count": 1,
-        "items": [],
+        "source_record_count": 2,
+        "indexed_record_count": 1,
+        "items": [{"entity_id": "event:001", "component": "events"}],
         "limit": 10,
         "next_after": None,
     }

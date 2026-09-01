@@ -51,6 +51,9 @@ class StructureWorkerError(RuntimeError):
     """An admitted Structure bundle violates its frozen range contract."""
 
 
+_BUSINESS_STRUCTURE_INDEX_COMPONENTS = frozenset({"events", "group_truth"})
+
+
 class StructureNormalizationInputInvalid(StructureWorkerError):
     """One manifest-authorized immutable input is schema-invalid."""
 
@@ -595,13 +598,7 @@ class TransactionalStructureWorker:
                 rows=rows,
             )
         )
-        return artifact, len(rows), tuple(
-            (
-                f"{spec.component}:{_row_cursor(spec.component, row)}",
-                {"component": spec.component, "source_cursor": _row_cursor(spec.component, row), "row": row},
-            )
-            for row in rows
-        )
+        return artifact, len(rows), _business_structure_research_rows(spec.component, rows)
 
     def _read_v3_shard_range(
         self,
@@ -1102,3 +1099,22 @@ def _row_cursor(component: str, row: Mapping[str, object]) -> str:
     if any(isinstance(value, bool) or not isinstance(value, (str, int)) for value in values):
         raise StructureWorkerError(f"structure-range-cursor-invalid:{component}")
     return "\x00".join(str(value) for value in values)
+
+
+def _business_structure_research_rows(
+    component: str, rows: Sequence[Mapping[str, object]]
+) -> tuple[tuple[str, Mapping[str, object]], ...]:
+    """Keep a compact, browseable Structure index; R2 remains the full artifact."""
+    if component not in _BUSINESS_STRUCTURE_INDEX_COMPONENTS:
+        return ()
+    return tuple(
+        (
+            f"{component}:{_row_cursor(component, row)}",
+            {
+                "component": component,
+                "source_cursor": _row_cursor(component, row),
+                "row": row,
+            },
+        )
+        for row in rows
+    )
