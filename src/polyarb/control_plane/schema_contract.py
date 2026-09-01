@@ -2,6 +2,6 @@
 
 from typing import Final
 
-CONTROL_PLANE_SCHEMA_REVISION: Final[str] = "040"
+CONTROL_PLANE_SCHEMA_REVISION: Final[str] = "041"
 
 __all__ = ["CONTROL_PLANE_SCHEMA_REVISION"]

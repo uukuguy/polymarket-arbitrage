@@ -13475,6 +13475,42 @@ def test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor(
         )
 
 
+def test_qualification_ingress_omits_noisy_normal_quote_batch_lifecycle(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """Qualification keeps failures, but not routine batch progress chatter."""
+    now = _now()
+    job_key = "qualification:normal-runtime-projection"
+    _insert_runtime_event(
+        control_plane,
+        job_key=job_key,
+        kind="job.stage-changed",
+        reason_code="",
+        occurred_at=now,
+        sequence=2,
+    )
+    _insert_runtime_event(
+        control_plane,
+        job_key=job_key,
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now + timedelta(seconds=1),
+        sequence=3,
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT payload->>'kind'
+            FROM m1_qualification_ingress_ledger
+            WHERE source = 'runtime' AND payload->>'job_key' = %s
+            ORDER BY ingest_seq
+            """,
+            (job_key,),
+        )
+        assert cursor.fetchall() == [("job.terminal-failed",)]
+
+
 def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
     control_plane: PostgresControlPlane,
 ) -> None:
