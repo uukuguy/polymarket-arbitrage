@@ -116,8 +116,8 @@ def test_control_alert_template_is_a_database_independent_runtime_watchdog() -> 
     assert '"$POLYARB_COORDINATOR_MACHINE_ID"' in watchdog
     assert '"$POLYARB_STRUCTURE_RANGE_MACHINE_ID"' in watchdog
     assert '"$POLYARB_QUOTE_BATCH_MACHINE_ID"' in watchdog
-    assert '"$POLYARB_EVIDENCE_APP"' in watchdog
-    assert '"$POLYARB_EVIDENCE_MACHINE_ID"' in watchdog
+    assert '"$POLYARB_EVIDENCE_APP"' not in watchdog
+    assert '"$POLYARB_EVIDENCE_MACHINE_ID"' not in watchdog
     assert '"$POLYARB_WATCHDOG_SOAK_RUN_ID_V2"' in watchdog
     assert (
         "--secondary-target "
