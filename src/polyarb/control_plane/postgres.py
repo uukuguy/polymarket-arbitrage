@@ -9207,15 +9207,19 @@ class PostgresControlPlane:
     ) -> None:
         """Stage bounded normalized rows; publication remains pointer-gated."""
         self._validate_nonempty(generation_key=generation_key)
+        prepared_rows: list[tuple[str, str, Jsonb]] = []
+        for entity_id, payload in rows:
+            self._validate_nonempty(entity_id=entity_id)
+            prepared_rows.append((generation_key, entity_id, Jsonb(dict(payload))))
+        if not prepared_rows:
+            return
         with self._connection_factory() as connection, connection.cursor() as cursor:
             _set_structure_read_timeouts(cursor, read_only=False)
-            for entity_id, payload in rows:
-                self._validate_nonempty(entity_id=entity_id)
-                cursor.execute(
-                    """INSERT INTO m1_business_structure_rows(generation_key, entity_id, payload)
-                       VALUES (%s,%s,%s) ON CONFLICT (generation_key, entity_id) DO NOTHING""",
-                    (generation_key, entity_id, Jsonb(dict(payload))),
-                )
+            cursor.executemany(
+                """INSERT INTO m1_business_structure_rows(generation_key, entity_id, payload)
+                   VALUES (%s,%s,%s) ON CONFLICT (generation_key, entity_id) DO NOTHING""",
+                prepared_rows,
+            )
 
     def published_structure_range_artifacts(
         self, *, generation_key: str
