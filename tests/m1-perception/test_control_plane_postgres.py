@@ -14652,6 +14652,10 @@ def test_business_overview_reports_the_published_quote_and_real_zero_opportuniti
             )
         connection.execute("INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)", (quote, structure, "e" * 64, now))
         connection.execute("INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)", (quote, now))
+    control_plane.stage_business_quote_rows(
+        generation_key=quote,
+        rows=(("token:001", {"terminal_state": "executable"}),),
+    )
     overview = control_plane.business_overview()
     assert overview["structure"]["generation_key"] == structure
     assert overview["quote"]["parent_structure_generation_key"] == structure
@@ -14679,6 +14683,51 @@ def test_business_overview_reports_the_published_quote_and_real_zero_opportuniti
     lagging = control_plane.business_overview()
     assert lagging["structure"]["generation_key"] == newer_structure
     assert lagging["quote"]["status"] == "lagging"
+
+
+def test_business_overview_fails_closed_when_current_quote_research_is_missing(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure = "structure:" + "4" * 64
+    quote = "quote:" + "5" * 64
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (quote, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) "
+                "VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)",
+                (job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests("
+                "generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,"
+                "record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, job_key, "c" * 64, "d" * 64, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs("
+            "generation_key,structure_generation_key,universe_hash,cadence_seconds,"
+            "cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (quote, structure, "e" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers("
+            "pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) "
+            "VALUES ('quote:current',%s,NULL,1,%s)",
+            (quote, now),
+        )
+
+    overview = control_plane.business_overview()
+
+    assert overview["quote"] == {
+        "status": "unavailable",
+        "reason_code": "research-index-incomplete",
+        "generation_key": quote,
+        "parent_structure_generation_key": structure,
+        "published_at": now.isoformat(),
+        "record_count": 1,
+        "indexed_record_count": 0,
+    }
 
 
 def test_business_structure_page_exposes_only_current_generation_rows(
