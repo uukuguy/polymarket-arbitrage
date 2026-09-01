@@ -1457,6 +1457,9 @@ def _backfill_published_structure_index(
     retired_rows = control_plane.retire_superseded_structure_research_rows(
         generation_key=generation_key
     )
+    staged_entity_ids = set(
+        control_plane.business_structure_research_entity_ids(generation_key=generation_key)
+    )
 
     def read_research_rows(
         artifact: tuple[str, str, str],
@@ -1483,11 +1486,17 @@ def _backfill_published_structure_index(
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="structure-index") as executor:
         research_rows_by_artifact = executor.map(read_research_rows, artifacts)
         for research_rows in research_rows_by_artifact:
-            if research_rows:
+            missing_rows = tuple(
+                (entity_id, payload)
+                for entity_id, payload in research_rows
+                if entity_id not in staged_entity_ids
+            )
+            if missing_rows:
                 control_plane.stage_business_structure_rows(
-                    generation_key=generation_key, rows=research_rows
+                    generation_key=generation_key, rows=missing_rows
                 )
-                staged_rows += len(research_rows)
+                staged_entity_ids.update(entity_id for entity_id, _payload in missing_rows)
+                staged_rows += len(missing_rows)
     page = control_plane.business_structure_page(generation_key=generation_key, limit=1, after="")
     return {
         "status": "ok",

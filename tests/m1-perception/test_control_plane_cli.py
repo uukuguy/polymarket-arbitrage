@@ -2348,6 +2348,9 @@ def test_structure_index_backfill_reads_published_artifacts_with_bounded_paralle
         def retire_superseded_structure_research_rows(self, *, generation_key: str) -> int:
             return 0
 
+        def business_structure_research_entity_ids(self, *, generation_key: str) -> frozenset[str]:
+            return frozenset({"events:0"})
+
         def stage_business_structure_rows(self, *, generation_key: str, rows) -> None:
             assert rows
 
@@ -2370,7 +2373,7 @@ def test_structure_index_backfill_reads_published_artifacts_with_bounded_paralle
         cast(object, ControlPlane()), generation_key=generation_key
     )
 
-    assert result["staged_rows"] == 8
+    assert result["staged_rows"] == 7
     assert max_active_reads == 4
 
 

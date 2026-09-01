@@ -9221,6 +9221,18 @@ class PostgresControlPlane:
                 prepared_rows,
             )
 
+    def business_structure_research_entity_ids(self, *, generation_key: str) -> frozenset[str]:
+        """Return current staged IDs so an interrupted index rebuild skips known rows."""
+        self._validate_nonempty(generation_key=generation_key)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT entity_id FROM m1_business_structure_rows
+                   WHERE generation_key=%s""",
+                (generation_key,),
+            )
+            return frozenset(str(row[0]) for row in cursor.fetchall())
+
     def published_structure_range_artifacts(
         self, *, generation_key: str
     ) -> tuple[tuple[str, str, str], ...]:
