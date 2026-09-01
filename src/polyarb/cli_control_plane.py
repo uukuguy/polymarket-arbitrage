@@ -192,6 +192,10 @@ def _parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="read bounded durable operator state")
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--json", action="store_true")
+    capacity = subcommands.add_parser(
+        "capacity", help="read the independent M1 database capacity diagnostic"
+    )
+    capacity.add_argument("--json", action="store_true")
     business_brief = subcommands.add_parser(
         "business-brief",
         help="read the fixed M1 business brief from durable and public authorities",
@@ -2700,6 +2704,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             _write(result, as_json=args.json)
+            return 0
+        if args.command == "capacity":
+            capacity_reader = getattr(control_plane, "database_capacity", None)
+            if not callable(capacity_reader):
+                capacity = {
+                    "state": "unavailable",
+                    "reason_code": "database-size-observation-unavailable",
+                }
+            else:
+                try:
+                    capacity = capacity_reader()
+                except (OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
+                    capacity = {
+                        "state": "unavailable",
+                        "reason_code": "database-size-observation-unavailable",
+                    }
+            _write({"status": "ok", "database_capacity": capacity}, as_json=args.json)
             return 0
         snapshot = control_plane.operational_snapshot(sample_limit=args.limit)
         capacity_reader = getattr(control_plane, "database_capacity", None)

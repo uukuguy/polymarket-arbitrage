@@ -129,6 +129,43 @@ def test_status_merges_the_independent_capacity_probe(monkeypatch, capsys) -> No
     assert payload["database_capacity"]["state"] == "healthy"
 
 
+def test_capacity_reads_only_the_independent_capacity_probe(monkeypatch, capsys) -> None:
+    """The daily capacity command must not pay for the whole operator snapshot."""
+    from polyarb import cli_control_plane
+
+    class ControlPlane:
+        def operational_snapshot(self, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("capacity command must not read the full operational snapshot")
+
+        def database_capacity(self) -> dict[str, object]:
+            return {
+                "state": "healthy",
+                "used_bytes": 10,
+                "budget_bytes": 100,
+                "used_percent": 10,
+                "reason_code": "within-budget",
+                "largest_relations": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+
+    assert cli_control_plane.main(["capacity", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ok",
+        "database_capacity": {
+            "state": "healthy",
+            "used_bytes": 10,
+            "budget_bytes": 100,
+            "used_percent": 10,
+            "reason_code": "within-budget",
+            "largest_relations": [],
+        },
+    }
+
+
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
