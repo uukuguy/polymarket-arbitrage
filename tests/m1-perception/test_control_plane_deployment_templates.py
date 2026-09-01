@@ -64,6 +64,9 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
     # count within the worker's two-session pool so a normal publication wave
     # cannot starve itself with PoolTimeout while committing its receipts.
     assert payload["env"]["POLYARB_CLOB_BATCH_MAX_CONCURRENCY"] == "2"
+    # Structure normalization stages its research rows through the same pool,
+    # so its lease lanes must obey the identical database-session budget.
+    assert payload["env"]["POLYARB_STRUCTURE_RANGE_MAX_CONCURRENCY"] == "2"
     assert payload["processes"] == {
         "coordinator": (
             "python -m polyarb.cli_control_plane serve --enable "

@@ -15,6 +15,9 @@ POLYARB_DB_POOL_MAX_SIZE = "2"
 # Receipt commits share this two-session pool.  Bound quote lease lanes to the
 # same count so a publication wave cannot self-starve while staging rows.
 POLYARB_CLOB_BATCH_MAX_CONCURRENCY = "2"
+# Structure normalization also stages its research index through this pool.
+# Keep its concurrent fenced leases within the same two-session envelope.
+POLYARB_STRUCTURE_RANGE_MAX_CONCURRENCY = "2"
 POLYARB_RUNTIME_ROLE = "control-plane"
 
 [build]
