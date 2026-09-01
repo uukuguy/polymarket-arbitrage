@@ -44,6 +44,16 @@ export default async function ControlPlanePage() {
       {evidence ? <><p>Latest sample: {evidence.latest_observed_at} ({evidenceAge}s ago)</p><p style={{ color: "#aaa" }}>Run: {evidence.latest_run_id}</p></> : <p style={{ color: "#fecaca" }}>No cloud evidence sample is present. This is an operational failure, not a healthy empty state.</p>}
     </section>
     <h2>Runtime incident and recovery ledger</h2>
-    {view.runtime_watchdog.recent_events.length === 0 ? <p>No watchdog transitions recorded yet.</p> : <ol>{view.runtime_watchdog.recent_events.map((event, index) => <li key={`${event.incident_key}-${event.occurred_at}-${index}`} style={{ marginBottom: 14, padding: 12, borderLeft: `4px solid ${event.kind === "detected" ? "#ef4444" : "#22c55e"}`, background: "#111" }}><strong style={{ color: event.kind === "detected" ? "#fecaca" : "#bbf7d0" }}>{event.kind === "detected" ? "Detected — open until a recovery event" : "Recovered"}</strong> · {event.occurred_at}<br /><strong>{event.summary}</strong><br /><span style={{ color: "#aaa" }}>Severity: {event.severity} · Observed by: {event.detail.source ?? "legacy-runtime-watchdog"} · Incident: {event.incident_key}</span><br /><span style={{ color: "#aaa" }}>Affected checks: {event.detail.failures.length ? event.detail.failures.join("; ") : "control API and monitored machines healthy"}</span></li>)}</ol>}
+    {view.runtime_watchdog.recent_events.length === 0 ? <p>No watchdog transitions recorded yet.</p> : <ol>{view.runtime_watchdog.recent_events.map((event, index) => {
+      const detected = event.kind === "detected";
+      const escalated = event.kind === "escalated";
+      const color = detected || escalated ? "#ef4444" : "#22c55e";
+      const label = detected
+        ? "Detected — open until a recovery event"
+        : escalated
+          ? "Escalated — automatic remediation requested"
+          : "Recovered";
+      return <li key={`${event.incident_key}-${event.occurred_at}-${index}`} style={{ marginBottom: 14, padding: 12, borderLeft: `4px solid ${color}`, background: "#111" }}><strong style={{ color: detected || escalated ? "#fecaca" : "#bbf7d0" }}>{label}</strong> · {event.occurred_at}<br /><strong>{event.summary}</strong><br /><span style={{ color: "#aaa" }}>Severity: {event.severity} · Observed by: {event.detail.source ?? "legacy-runtime-watchdog"} · Incident: {event.incident_key}</span><br /><span style={{ color: "#aaa" }}>Affected checks: {event.detail.failures.length ? event.detail.failures.join("; ") : "control API and monitored machines healthy"}</span></li>;
+    })}</ol>}
   </main>;
 }

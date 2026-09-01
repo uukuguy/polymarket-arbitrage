@@ -39,7 +39,7 @@ export type RuntimeEvent = {
   incident_key: string;
   severity: IncidentSeverity;
   summary: string;
-  kind: "detected" | "recovered";
+  kind: "detected" | "recovered" | "escalated";
   occurred_at: string;
   detail: { failures: string[]; source?: string };
 };
@@ -509,7 +509,10 @@ function validateOpenIncident(value: unknown): {
 }
 
 function validateRuntimeEvent(value: unknown): RuntimeEvent | null {
-  if (!isRecord(value) || (value.kind !== "detected" && value.kind !== "recovered")) {
+  if (
+    !isRecord(value) ||
+    (value.kind !== "detected" && value.kind !== "recovered" && value.kind !== "escalated")
+  ) {
     return null;
   }
   if (

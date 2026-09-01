@@ -386,6 +386,10 @@ assert.equal(decoded.qualification.policy_version, "m1-rolling-qualification-v1"
 assert.equal(decoded.database_capacity.state, "unavailable");
 assert.equal(decoded.alert_delivery.pending_count, 2);
 
+const escalatedWatchdog = clone(fixture);
+escalatedWatchdog.runtime_watchdog.recent_events[0].kind = "escalated";
+assert.equal(decodeControlPlaneRead(escalatedWatchdog).status, "available");
+
 const overBudget = clone(fixture);
 overBudget.database_capacity = {{
   state: "exhausted",
