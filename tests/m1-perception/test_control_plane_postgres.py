@@ -14507,19 +14507,15 @@ def test_business_structure_page_exposes_only_current_generation_rows(
     current = "structure:" + "1" * 64
     other = "structure:" + "2" * 64
     with control_plane._connection_factory() as connection:
-        for generation in (current, other):
+        for generation, published_at in ((current, now + timedelta(seconds=1)), (other, now)):
             connection.execute(
                 "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'structure-certify',%s,'succeeded',%s,%s)",
                 (f"{generation}:certify", generation, now, now),
             )
             connection.execute(
                 "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
-                (generation, f"{generation}:certify", "a" * 64, "b" * 64, now),
+                (generation, f"{generation}:certify", "a" * 64, "b" * 64, published_at),
             )
-        connection.execute(
-            "INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('structure:current',%s,NULL,1,%s)",
-            (current, now),
-        )
     control_plane.stage_business_structure_rows(
         generation_key=current,
         rows=(("event:001", {"component": "events", "name": "Current"}),),

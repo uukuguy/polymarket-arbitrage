@@ -9022,10 +9022,11 @@ class PostgresControlPlane:
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
-                """SELECT pointer.generation_key, manifest.record_count
-                   FROM m1_publication_pointers pointer
-                   JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key
-                   WHERE pointer.pointer_key='structure:current'"""
+                """SELECT manifest.generation_key, manifest.record_count
+                   FROM m1_generation_manifests AS manifest
+                   WHERE manifest.generation_key LIKE 'structure:' || chr(37)
+                   ORDER BY manifest.published_at DESC, manifest.generation_key DESC
+                   LIMIT 1"""
             )
             pointer = cursor.fetchone()
             if pointer is None:
