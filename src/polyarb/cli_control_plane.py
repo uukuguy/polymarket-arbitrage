@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -1456,8 +1457,11 @@ def _backfill_published_structure_index(
     retired_rows = control_plane.retire_superseded_structure_research_rows(
         generation_key=generation_key
     )
-    staged_rows = 0
-    for expected_component, artifact_key, artifact_digest in artifacts:
+
+    def read_research_rows(
+        artifact: tuple[str, str, str],
+    ) -> tuple[tuple[str, Mapping[str, object]], ...]:
+        expected_component, artifact_key, artifact_digest = artifact
         response = object_client.get_object(Bucket=bucket, Key=artifact_key)
         body = response.get("Body")
         if body is None or not hasattr(body, "read"):
@@ -1470,12 +1474,20 @@ def _backfill_published_structure_index(
         )
         if component != expected_component:
             raise RuntimeError("published-structure-range-component-mismatch")
-        research_rows = _business_structure_research_rows(component, rows)
-        if research_rows:
-            control_plane.stage_business_structure_rows(
-                generation_key=generation_key, rows=research_rows
-            )
-            staged_rows += len(research_rows)
+        return _business_structure_research_rows(component, rows)
+
+    staged_rows = 0
+    # R2 reads are independent and bounded.  Keep staging serial so the
+    # existing Postgres write budget and idempotent restart semantics remain
+    # unchanged.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="structure-index") as executor:
+        research_rows_by_artifact = executor.map(read_research_rows, artifacts)
+        for research_rows in research_rows_by_artifact:
+            if research_rows:
+                control_plane.stage_business_structure_rows(
+                    generation_key=generation_key, rows=research_rows
+                )
+                staged_rows += len(research_rows)
     page = control_plane.business_structure_page(generation_key=generation_key, limit=1, after="")
     return {
         "status": "ok",

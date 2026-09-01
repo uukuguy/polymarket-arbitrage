@@ -2313,6 +2313,67 @@ def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch)
     assert {lane["bucket"] for lane in captured} == {"source-bucket"}
 
 
+def test_structure_index_backfill_reads_published_artifacts_with_bounded_parallelism(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    generation_key = "structure:" + "a" * 64
+    active_reads = 0
+    max_active_reads = 0
+    lock = threading.Lock()
+
+    class Body:
+        def __init__(self, ordinal: int) -> None:
+            self.ordinal = ordinal
+
+        def read(self) -> bytes:
+            nonlocal active_reads, max_active_reads
+            with lock:
+                active_reads += 1
+                max_active_reads = max(max_active_reads, active_reads)
+            threading.Event().wait(0.02)
+            with lock:
+                active_reads -= 1
+            return str(self.ordinal).encode()
+
+    class ObjectClient:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            assert Bucket == "research"
+            return {"Body": Body(int(Key.rsplit("/", 1)[-1]))}
+
+    class ControlPlane:
+        def published_structure_range_artifacts(self, *, generation_key: str):
+            assert generation_key == generation_key
+            return tuple(("events", f"ranges/{ordinal}", "digest") for ordinal in range(8))
+
+        def retire_superseded_structure_research_rows(self, *, generation_key: str) -> int:
+            return 0
+
+        def stage_business_structure_rows(self, *, generation_key: str, rows) -> None:
+            assert rows
+
+        def business_structure_page(self, **_kwargs):
+            return {"indexed_record_count": 8}
+
+    monkeypatch.setattr(cli_control_plane, "_structure_object_client", lambda: (ObjectClient(), "research"))
+    monkeypatch.setattr(
+        cli_control_plane,
+        "parse_structure_range_bytes",
+        lambda payload, *, expected_sha256: (("bundle", "events", "range"), ({"id": payload.decode()},)),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_business_structure_research_rows",
+        lambda _component, rows: tuple((f"events:{row['id']}", row) for row in rows),
+    )
+
+    result = cli_control_plane._backfill_published_structure_index(
+        cast(object, ControlPlane()), generation_key=generation_key
+    )
+
+    assert result["staged_rows"] == 8
+    assert max_active_reads == 4
+
+
 def test_structure_source_factory_disables_hidden_gamma_retries(monkeypatch) -> None:
     from polyarb import cli_control_plane
     from polyarb.control_plane.postgres import PostgresControlPlane
