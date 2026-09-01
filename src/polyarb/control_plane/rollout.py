@@ -35,16 +35,21 @@ def render_rollout_artifacts(
     runtime_recovery_allowed_targets: Sequence[str] = (),
     expected_database: str,
     output_dir: Path,
+    alert_delivery_app: str | None = None,
 ) -> dict[str, str]:
     """Render non-deployable staged rollout inputs without cloud access."""
     _validate_app("api_app", api_app)
     _validate_app("worker_app", worker_app)
     _validate_app("alert_app", alert_app)
     _validate_app("runtime_event_writer_app", runtime_event_writer_app)
+    if alert_delivery_app is not None:
+        _validate_app("alert_delivery_app", alert_delivery_app)
     render_runtime_topology = (
         runtime_controller_app is not None or qualification_worker_app is not None
     )
     app_names = [api_app, worker_app, alert_app, runtime_event_writer_app]
+    if alert_delivery_app is not None:
+        app_names.append(alert_delivery_app)
     runtime_apps: tuple[str, str] | None = None
     if render_runtime_topology:
         if runtime_controller_app is None or qualification_worker_app is None:
@@ -71,6 +76,8 @@ def render_rollout_artifacts(
         "runtime_event_writer_config": output_dir / "fly-runtime-event-writer.toml",
         "checklist": output_dir / "rollout-checklist.json",
     }
+    if alert_delivery_app is not None:
+        destinations["alert_delivery_config"] = output_dir / "fly-control-alert-delivery.toml"
     if _RELEASE_ID.fullmatch(release_id) is None:
         raise RolloutArtifactError("release_id must be a 40-character lowercase Git SHA")
     qualification_payload = qualification_config_payload(
@@ -95,6 +102,13 @@ def render_rollout_artifacts(
     alert_config = _render_template(
         "fly-control-alert.toml.template", "__CONTROL_PLANE_ALERT_APP__", alert_app
     )
+    alert_delivery_config = ""
+    if alert_delivery_app is not None:
+        alert_delivery_config = _render_template(
+            "fly-control-alert-delivery.toml.template",
+            "__CONTROL_PLANE_ALERT_DELIVERY_APP__",
+            alert_delivery_app,
+        )
     runtime_event_writer_config = _render_template(
         "fly-runtime-event-writer.toml.template",
         "__RUNTIME_EVENT_WRITER_APP__",
@@ -123,8 +137,14 @@ def render_rollout_artifacts(
                 "__RUNTIME_RECOVERY_ALLOWED_TARGETS__": ",".join(allowed_targets),
             },
         )
+    if alert_delivery_app is not None:
+        artifact_version = 11
+    elif render_runtime_topology:
+        artifact_version = 10
+    else:
+        artifact_version = 7
     checklist = {
-        "artifact_version": 10 if render_runtime_topology else 7,
+        "artifact_version": artifact_version,
         "api_app": api_app,
         "worker_app": worker_app,
         "alert_app": alert_app,
@@ -160,6 +180,8 @@ def render_rollout_artifacts(
         "cloud_actions_performed": False,
         "rendered_secret_values": False,
     }
+    if alert_delivery_app is not None:
+        checklist["alert_delivery_app"] = alert_delivery_app
     if runtime_apps is not None:
         checklist.update(
             {
@@ -179,6 +201,8 @@ def render_rollout_artifacts(
     destinations["api_config"].write_text(api_config)
     destinations["worker_config"].write_text(worker_config)
     destinations["alert_config"].write_text(alert_config)
+    if alert_delivery_app is not None:
+        destinations["alert_delivery_config"].write_text(alert_delivery_config)
     destinations["runtime_event_writer_config"].write_text(runtime_event_writer_config)
     if runtime_apps is not None:
         destinations["runtime_controller_config"].write_text(runtime_controller_config)

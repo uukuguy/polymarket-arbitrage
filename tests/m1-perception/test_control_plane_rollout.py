@@ -165,6 +165,28 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["source_window_admission"] == "explicit-operator-command"
 
 
+def test_rollout_renderer_includes_an_isolated_alert_delivery_app(tmp_path: Path) -> None:
+    from polyarb.control_plane.rollout import render_rollout_artifacts
+
+    rendered = render_rollout_artifacts(
+        api_app="api",
+        worker_app="worker",
+        alert_app="watchdog",
+        alert_delivery_app="alert-delivery",
+        runtime_event_writer_app="writer",
+        runtime_controller_app="controller",
+        qualification_worker_app="qualification",
+        release_id="0123456789abcdef0123456789abcdef01234567",
+        expected_database="control_plane_staging",
+        output_dir=tmp_path,
+    )
+
+    assert rendered["alert_delivery_config"] == str(tmp_path / "fly-control-alert-delivery.toml")
+    assert 'app = "alert-delivery"' in (tmp_path / "fly-control-alert-delivery.toml").read_text()
+    checklist = json.loads((tmp_path / "rollout-checklist.json").read_text())
+    assert checklist["alert_delivery_app"] == "alert-delivery"
+
+
 @pytest.mark.parametrize(
     (
         "api_app,worker_app,alert_app,runtime_event_writer_app,"

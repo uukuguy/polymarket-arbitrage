@@ -1,4 +1,17 @@
 hypotheses:
+- id: H-066
+  description: A production recovery closure that combines a database-independent
+    pager, a deployed transactional delivery consumer, bounded capacity observations,
+    and protected evidence retention can prevent M1 business collection from silently
+    stopping or exhausting its primary database while preserving inspectable business truth.
+  parent_paradigm: runtime-recovery-closure
+  expected_lift: Replace HTTP-only and machine-only liveness with a fail-closed business,
+    delivery, and capacity verdict that proves the complete route to an operator.
+  cost_h: 12.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-09-01T22:30:00+08:00'
+  results: []
 - id: H-065
   description: A receipt-coupled, generation-scoped research index whose rows remain
     invisible until the matching certified pointer is published can expose dense Structure
