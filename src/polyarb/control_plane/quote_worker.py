@@ -609,6 +609,17 @@ class TransactionalQuoteCertifier:
                 )
             if not isinstance(artifact_digest, str):
                 raise TypeError("Quote certification must return its artifact digest")
+            space_reuse_pending = False
+            reuse_space = getattr(self._control_plane, "reuse_quote_research_space", None)
+            if callable(reuse_space):
+                try:
+                    # Certification has already atomically switched the pointer and
+                    # retired the old logical rows.  Reclaiming those pages is
+                    # maintenance, never a reason to revoke a published quote
+                    # generation or retry its terminal job.
+                    reuse_space()
+                except Exception:
+                    space_reuse_pending = True
             try:
                 recovery = (
                     _runtime_sync_call(
@@ -632,10 +643,17 @@ class TransactionalQuoteCertifier:
             except Exception:
                 return QuoteBatchWorkerResult(
                     job_key=lease.job_key,
-                    outcome="certified:recovery-pending",
+                    outcome=(
+                        "certified:space-reuse-and-recovery-pending"
+                        if space_reuse_pending
+                        else "certified:recovery-pending"
+                    ),
                 )
             del recovery
-            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="certified")
+            return QuoteBatchWorkerResult(
+                job_key=lease.job_key,
+                outcome="certified:space-reuse-pending" if space_reuse_pending else "certified",
+            )
         except ServiceStopRequested:
             current_lease = lease if runtime is None else runtime.current_lease
             if runtime is None:

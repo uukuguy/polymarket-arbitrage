@@ -9051,6 +9051,24 @@ class PostgresControlPlane:
             )
         )
 
+    def reuse_quote_research_space(self) -> None:
+        """Make pages from a retired Quote generation reusable by the next one.
+
+        Quote index retirement is logical and pointer-fenced during certification.
+        A regular ``VACUUM`` (not ``VACUUM FULL``) then marks its dead pages for
+        reuse without rewriting the relation or requiring an exclusive outage.
+        PostgreSQL forbids VACUUM inside a transaction, so this deliberately
+        borrows one autocommit connection and restores its pool-safe setting.
+        """
+        with self._connection_factory() as connection:
+            original_autocommit = connection.autocommit
+            connection.autocommit = True
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("VACUUM (ANALYZE) public.m1_business_quote_rows")
+            finally:
+                connection.autocommit = original_autocommit
+
     def stage_business_structure_rows(
         self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]
     ) -> None:

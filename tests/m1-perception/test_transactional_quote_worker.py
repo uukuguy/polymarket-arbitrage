@@ -734,6 +734,59 @@ def test_quote_certifier_service_stop_uses_interruption_not_defect_retry() -> No
     assert control_plane.interruption == {"component": "quote-certify", "now": NOW}
 
 
+def test_quote_certifier_reuses_retired_index_space_after_publication() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def claim_job(self, **_kwargs):
+            return _runtime_quote_certifier_lease()
+
+        def certify_quote_generation(self, _lease, **_kwargs):
+            self.calls.append("certify")
+            return "d" * 64
+
+        def reuse_quote_research_space(self):
+            self.calls.append("reuse-space")
+
+        def record_job_recovery(self, _lease, **_kwargs):
+            self.calls.append("recovery")
+            return False
+
+    control_plane = ControlPlane()
+    result = TransactionalQuoteCertifier(
+        control_plane=control_plane,
+        worker_id="quote-certifier",
+        now=lambda: NOW,
+    ).run_once()
+
+    assert result.outcome == "certified"
+    assert control_plane.calls == ["certify", "reuse-space", "recovery"]
+
+
+def test_quote_certifier_keeps_published_quote_available_when_space_reuse_fails() -> None:
+    class ControlPlane:
+        def claim_job(self, **_kwargs):
+            return _runtime_quote_certifier_lease()
+
+        def certify_quote_generation(self, _lease, **_kwargs):
+            return "d" * 64
+
+        def reuse_quote_research_space(self):
+            raise RuntimeError("maintenance connection unavailable")
+
+        def record_job_recovery(self, _lease, **_kwargs):
+            return False
+
+    result = TransactionalQuoteCertifier(
+        control_plane=ControlPlane(),
+        worker_id="quote-certifier",
+        now=lambda: NOW,
+    ).run_once()
+
+    assert result.outcome == "certified:space-reuse-pending"
+
+
 def test_quote_certifier_terminal_commit_wins_heartbeat_race_and_drains_thread() -> None:
     class ControlPlane:
         def __init__(self) -> None:

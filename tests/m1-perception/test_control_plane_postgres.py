@@ -173,6 +173,46 @@ def test_database_pool_snapshot_is_secret_free_and_close_is_idempotent_per_owner
     assert readiness.close_calls == 1
 
 
+def test_quote_index_space_reuse_runs_vacuum_outside_a_transaction() -> None:
+    class Cursor:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, command: str) -> None:
+            self.commands.append(command)
+
+    class Connection:
+        def __init__(self) -> None:
+            self.autocommit = False
+            self.cursor_instance = Cursor()
+
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            assert self.autocommit is True
+            return self.cursor_instance
+
+    connection = Connection()
+    control_plane = PostgresControlPlane(cast(Any, lambda: connection))
+
+    control_plane.reuse_quote_research_space()
+
+    assert connection.cursor_instance.commands == [
+        "VACUUM (ANALYZE) public.m1_business_quote_rows"
+    ]
+    assert connection.autocommit is False
+
+
 # Diagnostic watchdog only: concurrent PostgreSQL contracts do not assert wall
 # time. Reuse the named full transaction/shutdown envelope so host load cannot
 # turn a magic test-only wait into a false product failure, while a missing peer
