@@ -5562,6 +5562,20 @@ class PostgresControlPlane:
                 )
                 if cursor.rowcount != 1:
                     raise StaleLeaseError("Quote pointer changed during certification")
+            # A complete quote candidate may contain tens of thousands of
+            # dashboard rows.  Its one safe retirement point is after the
+            # pointer fence is held, but the ordinary request timeout is too
+            # short for that bounded delete.  Never extend beyond the lease.
+            remaining_prune_ms = int(
+                (lease.lease_expires_at - datetime.now(UTC)).total_seconds() * 1000
+            ) - 1
+            if remaining_prune_ms <= 0:
+                raise StaleLeaseError("Quote publication lease expired before index retirement")
+            cursor.execute(
+                sql.SQL("SET LOCAL statement_timeout = {}").format(
+                    sql.Literal(f"{min(110_000, remaining_prune_ms)}ms")
+                )
+            )
             self._prune_superseded_business_research_rows_cursor(
                 cursor,
                 product="quote",
