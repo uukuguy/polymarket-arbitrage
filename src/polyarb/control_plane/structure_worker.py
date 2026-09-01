@@ -374,7 +374,7 @@ class TransactionalStructureWorker:
             )
             await _progress(runtime, stage="read-range", current=1, total=1)
             await _heartbeat(runtime)
-            artifact, record_count = await _runtime_sync_call_async(
+            artifact, record_count, research_rows = await _runtime_sync_call_async(
                 runtime,
                 lambda: self._process_range(spec),
             )
@@ -406,6 +406,7 @@ class TransactionalStructureWorker:
                         artifact_key=artifact.key,
                         artifact_digest=artifact.sha256,
                         record_count=record_count,
+                        research_rows=research_rows,
                         now=self._now(),
                     ),
                     terminal=True,
@@ -555,7 +556,7 @@ class TransactionalStructureWorker:
         spec: StructureRangeSpec,
         *,
         heartbeat: Callable[[], None] | None = None,
-    ) -> tuple[StructureRangeArtifact, int]:
+    ) -> tuple[StructureRangeArtifact, int, tuple[tuple[str, Mapping[str, object]], ...]]:
         if heartbeat is not None:
             heartbeat()
         response = self._object_client.get_object(Bucket=self._bucket, Key=spec.bundle_key)
@@ -594,7 +595,13 @@ class TransactionalStructureWorker:
                 rows=rows,
             )
         )
-        return artifact, len(rows)
+        return artifact, len(rows), tuple(
+            (
+                f"{spec.component}:{_row_cursor(spec.component, row)}",
+                {"component": spec.component, "source_cursor": _row_cursor(spec.component, row), "row": row},
+            )
+            for row in rows
+        )
 
     def _read_v3_shard_range(
         self,

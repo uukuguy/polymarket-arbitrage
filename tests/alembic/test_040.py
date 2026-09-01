@@ -16,7 +16,6 @@ def test_revision_040_declares_generation_bound_read_indexes() -> None:
     assert "generation_key" in text
     assert "m1_business_structure_rows_page" in text
     assert "m1_business_quote_rows_page" in text
-    assert "GRANT SELECT" in text
-    assert "GRANT INSERT" not in text
+    assert "GRANT SELECT, INSERT" in text
     assert "GRANT UPDATE" not in text
     assert "GRANT DELETE" not in text

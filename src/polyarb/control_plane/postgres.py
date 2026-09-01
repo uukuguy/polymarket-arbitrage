@@ -4491,6 +4491,7 @@ class PostgresControlPlane:
         quoted_at: datetime,
         now: datetime,
         terminal: bool = False,
+        research_rows: Sequence[tuple[str, Mapping[str, object]]] | None = None,
     ) -> CheckpointReceipt:
         """Commit one bounded Quote range under its current worker fence.
 
@@ -4630,6 +4631,13 @@ class PostgresControlPlane:
                     quoted_at,
                 ),
             )
+            for token_id, payload in research_rows or ():
+                self._validate_nonempty(token_id=token_id)
+                cursor.execute(
+                    """INSERT INTO m1_business_quote_rows(generation_key, token_id, payload)
+                       VALUES (%s, %s, %s) ON CONFLICT (generation_key, token_id) DO NOTHING""",
+                    (f"quote:{_quote_generation}", token_id, Jsonb(dict(payload))),
+                )
             cursor.execute(
                 """
                 UPDATE m1_job_attempts SET state = 'checkpointed', finished_at = %s
@@ -4801,6 +4809,7 @@ class PostgresControlPlane:
         artifact_digest: str,
         record_count: int,
         now: datetime,
+        research_rows: Sequence[tuple[str, Mapping[str, object]]] | None = None,
     ) -> CheckpointReceipt:
         """Atomically checkpoint one normalized Structure range under its lease fence."""
         return self._record_structure_range(
@@ -4809,6 +4818,7 @@ class PostgresControlPlane:
             artifact_key=artifact_key,
             artifact_digest=artifact_digest,
             record_count=record_count,
+            research_rows=research_rows,
             now=now,
             terminal=False,
         )
@@ -4822,6 +4832,7 @@ class PostgresControlPlane:
         artifact_digest: str,
         record_count: int,
         now: datetime,
+        research_rows: Sequence[tuple[str, Mapping[str, object]]] | None = None,
     ) -> CheckpointReceipt:
         """Commit one normalized range and its terminal runtime success atomically."""
         return self._record_structure_range(
@@ -4830,6 +4841,7 @@ class PostgresControlPlane:
             artifact_key=artifact_key,
             artifact_digest=artifact_digest,
             record_count=record_count,
+            research_rows=research_rows,
             now=now,
             terminal=True,
         )
@@ -4842,6 +4854,7 @@ class PostgresControlPlane:
         artifact_key: str,
         artifact_digest: str,
         record_count: int,
+        research_rows: Sequence[tuple[str, Mapping[str, object]]] | None,
         now: datetime,
         terminal: bool,
     ) -> CheckpointReceipt:
@@ -4856,6 +4869,8 @@ class PostgresControlPlane:
             raise ValueError("artifact_key must not be empty")
         if isinstance(record_count, bool) or record_count < 0:
             raise ValueError("record_count must be non-negative")
+        if research_rows is not None and len(research_rows) != record_count:
+            raise ValueError("structure research rows must match the range record count")
 
         spec = self.structure_range_spec(lease.job_key)
         if range_digest != spec.range_digest:
@@ -4992,6 +5007,13 @@ class PostgresControlPlane:
                     receipt.committed_at,
                 ),
             )
+            for entity_id, payload in research_rows or ():
+                self._validate_nonempty(entity_id=entity_id)
+                cursor.execute(
+                    """INSERT INTO m1_business_structure_rows(generation_key, entity_id, payload)
+                       VALUES (%s, %s, %s) ON CONFLICT (generation_key, entity_id) DO NOTHING""",
+                    (spec.generation_key, entity_id, Jsonb(dict(payload))),
+                )
             cursor.execute(
                 """
                 INSERT INTO m1_structure_range_receipts (
@@ -8874,12 +8896,96 @@ class PostgresControlPlane:
         return {
             "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
             "eligibility": {"state": "paused", "reason_code": "not-yet-qualified"},
-            "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "component_counts": dict(structure.get("component_counts") or {})},
+            "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "record_count": _snapshot_int(structure["record_count"], "business_overview.structure.record_count"), "component_counts": dict(structure.get("component_counts") or {})},
             "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available" if str(quote["structure_generation_key"]) == str(structure["generation_key"]) else "lagging", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count")}),
             "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
             "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available" if quote is not None and str(opportunity["generation_key"]) == str(quote["generation_key"]) else "lagging", "quote_generation_key": str(opportunity["generation_key"]), "parent_structure_generation_key": str(opportunity["structure_generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
             "blockers": [],
         }
+
+    def stage_business_structure_rows(
+        self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]
+    ) -> None:
+        """Stage bounded normalized rows; publication remains pointer-gated."""
+        self._validate_nonempty(generation_key=generation_key)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            _set_structure_read_timeouts(cursor, read_only=False)
+            for entity_id, payload in rows:
+                self._validate_nonempty(entity_id=entity_id)
+                cursor.execute(
+                    """INSERT INTO m1_business_structure_rows(generation_key, entity_id, payload)
+                       VALUES (%s,%s,%s) ON CONFLICT (generation_key, entity_id) DO NOTHING""",
+                    (generation_key, entity_id, Jsonb(dict(payload))),
+                )
+
+    def business_structure_page(
+        self, *, generation_key: str | None, limit: int, after: str
+    ) -> dict[str, object]:
+        """Read one current, pointer-gated page of staged Structure research rows."""
+        if not 1 <= limit <= 200 or len(after) > 256:
+            raise ValueError("invalid-business-structure-page")
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers WHERE pointer_key='structure:current'"
+            )
+            pointer = cursor.fetchone()
+            if pointer is None:
+                return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "not-published", "reason_code": "structure-not-published", "items": [], "limit": limit, "next_after": None}
+            current = str(pointer["generation_key"])
+            if generation_key is not None and generation_key != current:
+                return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
+            cursor.execute(
+                """SELECT entity_id, payload FROM m1_business_structure_rows
+                   WHERE generation_key=%s AND entity_id > %s ORDER BY entity_id LIMIT %s""",
+                (current, after, limit + 1),
+            )
+            rows = cursor.fetchall()
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "available", "generation_key": current, "items": [{"entity_id": str(row["entity_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["entity_id"]) if has_more else None}
+
+    def stage_business_quote_rows(
+        self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]
+    ) -> None:
+        """Stage bounded normalized Quote rows; publication remains pointer-gated."""
+        self._validate_nonempty(generation_key=generation_key)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            _set_structure_read_timeouts(cursor, read_only=False)
+            for token_id, payload in rows:
+                self._validate_nonempty(token_id=token_id)
+                cursor.execute(
+                    """INSERT INTO m1_business_quote_rows(generation_key, token_id, payload)
+                       VALUES (%s,%s,%s) ON CONFLICT (generation_key, token_id) DO NOTHING""",
+                    (generation_key, token_id, Jsonb(dict(payload))),
+                )
+
+    def business_quote_page(
+        self, *, generation_key: str | None, limit: int, after: str
+    ) -> dict[str, object]:
+        """Read one current, pointer-gated page of staged Quote research rows."""
+        if not 1 <= limit <= 200 or len(after) > 256:
+            raise ValueError("invalid-business-quote-page")
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers WHERE pointer_key='quote:current'"
+            )
+            pointer = cursor.fetchone()
+            if pointer is None:
+                return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "not-published", "reason_code": "quote-not-published", "items": [], "limit": limit, "next_after": None}
+            current = str(pointer["generation_key"])
+            if generation_key is not None and generation_key != current:
+                return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
+            cursor.execute(
+                """SELECT token_id, payload FROM m1_business_quote_rows
+                   WHERE generation_key=%s AND token_id > %s ORDER BY token_id LIMIT %s""",
+                (current, after, limit + 1),
+            )
+            rows = cursor.fetchall()
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "generation_key": current, "items": [{"token_id": str(row["token_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["token_id"]) if has_more else None}
 
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:
         """Read one complete, atomically published opportunity projection."""

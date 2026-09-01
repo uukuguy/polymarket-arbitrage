@@ -14466,3 +14466,103 @@ def test_business_overview_reports_the_published_quote_and_real_zero_opportuniti
     lagging = control_plane.business_overview()
     assert lagging["structure"]["generation_key"] == newer_structure
     assert lagging["quote"]["status"] == "lagging"
+
+
+def test_business_structure_page_exposes_only_current_generation_rows(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    current = "structure:" + "1" * 64
+    other = "structure:" + "2" * 64
+    with control_plane._connection_factory() as connection:
+        for generation in (current, other):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'structure-certify',%s,'succeeded',%s,%s)",
+                (f"{generation}:certify", generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, f"{generation}:certify", "a" * 64, "b" * 64, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('structure:current',%s,NULL,1,%s)",
+            (current, now),
+        )
+    control_plane.stage_business_structure_rows(
+        generation_key=current,
+        rows=(("event:001", {"component": "events", "name": "Current"}),),
+    )
+    control_plane.stage_business_structure_rows(
+        generation_key=other,
+        rows=(("event:002", {"component": "events", "name": "Unpublished"}),),
+    )
+
+    page = control_plane.business_structure_page(generation_key=None, limit=10, after="")
+
+    assert page["status"] == "available"
+    assert page["generation_key"] == current
+    assert page["items"] == [{"entity_id": "event:001", "component": "events", "name": "Current"}]
+
+
+def test_business_quote_page_exposes_only_current_generation_rows(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure = "structure:" + "3" * 64
+    current = "quote:" + "4" * 64
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (current, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,%s,%s,'succeeded',%s,%s)",
+                (job_key, job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, job_key, "a" * 64, "b" * 64, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (current, structure, "c" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)",
+            (current, now),
+        )
+    control_plane.stage_business_quote_rows(
+        generation_key=current,
+        rows=(("token:001", {"market_id": "market:001", "best_ask": "0.49"}),),
+    )
+
+    page = control_plane.business_quote_page(generation_key=None, limit=10, after="")
+
+    assert page["status"] == "available"
+    assert page["generation_key"] == current
+    assert page["items"] == [{"token_id": "token:001", "market_id": "market:001", "best_ask": "0.49"}]
+
+
+def test_structure_range_receipt_atomically_stages_business_research_rows(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(), bundle=bundle, ranges=(("events", "", ""),), now=now
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="research-index-worker", job_types=("structure-normalize",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+
+    control_plane.complete_structure_range(
+        lease, range_digest=spec.range_digest, artifact_key="structure-ranges/test/rows.ndjson",
+        artifact_digest="f" * 64, record_count=1,
+        research_rows=(("events:event-001", {"component": "events", "source_cursor": "event-001"}),), now=now,
+    )
+
+    with control_plane._connection_factory() as connection:
+        row = connection.execute(
+            "SELECT payload FROM m1_business_structure_rows WHERE generation_key=%s AND entity_id=%s",
+            (spec.generation_key, "events:event-001"),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == {"component": "events", "source_cursor": "event-001"}
