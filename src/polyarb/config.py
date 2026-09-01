@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # Formal M1 collection stops before the Supabase Free-plan egress ceiling.
     # Override only through a reviewed deployment environment variable.
     m1_daily_egress_budget_bytes: int = Field(default=3_500_000_000, gt=0)
+    # Keep a material buffer below the 500 MB Supabase free-plan limit.  This
+    # is an explicit M1 operating budget, not an inferred provider quota.
+    m1_database_capacity_budget_bytes: int = Field(default=450_000_000, gt=0)
     clob_batch_rate_per_10s: int = 450
     clob_batch_size: int = 500
     # A full M1 quote universe has tens of thousands of tokens. CLOB accepts

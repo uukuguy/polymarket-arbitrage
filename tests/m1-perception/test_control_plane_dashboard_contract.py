@@ -52,6 +52,8 @@ def test_control_plane_decoder_exports_strict_operator_types() -> None:
     assert "raw_state: RecoveryActionRawState" in source
     assert 'resultCode === "disabled-action" ? "failed" : null' in source
     assert "CONTROL_PLANE_SAMPLE_LIMIT = 20" in source
+    assert "largest_relations" in source
+    assert "Top relations" in (CONTROL_COMPONENT_DIR / "RecoveryReadiness.tsx").read_text()
 
 
 def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
@@ -391,6 +393,7 @@ overBudget.database_capacity = {{
   budget_bytes: 1500,
   used_percent: 105,
   reason_code: "budget-exhausted",
+  largest_relations: [{{ relation: "m1_job_attempts", used_bytes: 900 }}],
 }};
 assert.equal(decodeControlPlaneRead(overBudget).status, "available");
 

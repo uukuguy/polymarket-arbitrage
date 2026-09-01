@@ -203,6 +203,7 @@ export type DatabaseCapacity =
       budget_bytes: number;
       used_percent: number;
       reason_code: string;
+      largest_relations: Array<{ relation: string; used_bytes: number }>;
     };
 
 export type AlertDeliveryBacklog = {
@@ -1064,12 +1065,26 @@ function validateDatabaseCapacity(value: unknown): DatabaseCapacity | null {
   ) {
     return null;
   }
+  if (!Array.isArray(value.largest_relations) || value.largest_relations.length > 10) return null;
+  const largestRelations: Array<{ relation: string; used_bytes: number }> = [];
+  for (const relation of value.largest_relations) {
+    if (
+      !isRecord(relation) ||
+      !isString(relation.relation) ||
+      !relation.relation ||
+      !isNonNegativeInteger(relation.used_bytes)
+    ) {
+      return null;
+    }
+    largestRelations.push({ relation: relation.relation, used_bytes: relation.used_bytes });
+  }
   return {
     state: value.state as DatabaseCapacity["state"],
     used_bytes: value.used_bytes,
     budget_bytes: value.budget_bytes,
     used_percent: value.used_percent,
     reason_code: value.reason_code,
+    largest_relations: largestRelations,
   };
 }
 

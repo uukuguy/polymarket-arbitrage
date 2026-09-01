@@ -55,4 +55,17 @@ async def control_plane_status(request: Request) -> JSONResponse:
             payload,
             status_code=503,
         )
+    capacity_reader = getattr(control_plane, "database_capacity", None)
+    if callable(capacity_reader):
+        try:
+            snapshot["database_capacity"] = await run_blocking_call_with_timeout(
+                capacity_reader,
+                timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+                thread_name="control-plane-api:capacity-read",
+            )
+        except (TimeoutError, OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
+            snapshot["database_capacity"] = {
+                "state": "unavailable",
+                "reason_code": "database-size-observation-unavailable",
+            }
     return JSONResponse({"status": "available", **snapshot})

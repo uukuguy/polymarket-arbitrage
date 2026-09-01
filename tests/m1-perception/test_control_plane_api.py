@@ -120,6 +120,24 @@ def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies()
     assert opportunities.json()["items"] == [{"group_id": "g-1", "gross_edge_bps": 120.0}]
 
 
+def test_control_plane_status_keeps_business_snapshot_when_capacity_probe_fails() -> None:
+    """A secondary capacity probe must not turn operator truth into a 503."""
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class CapacityProbeFails(_AvailableControlPlane):
+        def database_capacity(self) -> dict[str, object]:
+            raise RuntimeError("capacity probe timed out")
+
+    with TestClient(create_control_plane_app(control_plane=CapacityProbeFails())) as client:
+        response = client.get("/perception/control-plane")
+
+    assert response.status_code == 200
+    assert response.json()["database_capacity"] == {
+        "state": "unavailable",
+        "reason_code": "database-size-observation-unavailable",
+    }
+
+
 def test_business_overview_route_transports_one_authoritative_snapshot() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 

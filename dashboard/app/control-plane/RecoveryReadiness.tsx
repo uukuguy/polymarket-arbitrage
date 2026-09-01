@@ -56,6 +56,18 @@ export function RecoveryReadiness({
             {capacity.used_bytes.toLocaleString()} / {capacity.budget_bytes.toLocaleString()} bytes
           </p>
           <p style={{ color: "#aaa" }}>Reason: {capacity.reason_code}</p>
+          <h3>Top relations</h3>
+          {capacity.largest_relations.length === 0 ? (
+            <p style={{ color: "#aaa" }}>No relation-size rows returned.</p>
+          ) : (
+            <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+              {capacity.largest_relations.map((relation) => (
+                <li key={relation.relation}>
+                  <code>{relation.relation}</code> · {relation.used_bytes.toLocaleString()} bytes
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
         <div>
           <h3>Alert delivery</h3>

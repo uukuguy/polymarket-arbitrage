@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
+from .capacity import classify_database_capacity
 from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .models import (
     AlertDeliveryLease,
@@ -1273,9 +1274,60 @@ class PostgresControlPlane:
         connection_factory: ConnectionFactory,
         *,
         readiness_connection_factory: ConnectionFactory | None = None,
+        database_capacity_budget_bytes: int = 450_000_000,
     ) -> None:
+        if database_capacity_budget_bytes <= 0:
+            raise ValueError("database capacity budget must be positive")
         self._connection_factory = connection_factory
         self._readiness_connection_factory = readiness_connection_factory or connection_factory
+        self._database_capacity_budget_bytes = database_capacity_budget_bytes
+
+    def database_capacity(self) -> dict[str, object]:
+        """Read a bounded database-size diagnostic on an independent connection.
+
+        This intentionally sits outside ``operational_snapshot``: provider pressure
+        must not cancel the primary operator read just because a size function or
+        relation-size scan is slow or unavailable.
+        """
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SELECT pg_database_size(current_database()) AS used_bytes")
+            size_row = cursor.fetchone()
+            if size_row is None:
+                raise ControlPlaneError("database capacity probe returned no size")
+            used_bytes = int(size_row["used_bytes"])
+            cursor.execute(
+                """
+                SELECT relation, used_bytes
+                FROM (
+                    SELECT c.relname AS relation, pg_total_relation_size(c.oid) AS used_bytes
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'm', 'p')
+                ) relation_sizes
+                ORDER BY used_bytes DESC, relation ASC
+                LIMIT 10
+                """
+            )
+            largest_relations = [
+                {"relation": str(row["relation"]), "used_bytes": int(row["used_bytes"])}
+                for row in cursor.fetchall()
+            ]
+        verdict = classify_database_capacity(
+            used_bytes=used_bytes,
+            budget_bytes=self._database_capacity_budget_bytes,
+            provider_read_only=False,
+        )
+        return {
+            "state": verdict.state,
+            "used_bytes": verdict.used_bytes,
+            "budget_bytes": verdict.budget_bytes,
+            "used_percent": verdict.used_percent,
+            "reason_code": verdict.reason_code,
+            "largest_relations": largest_relations,
+        }
 
     @staticmethod
     def _pool_snapshot(factory: ConnectionFactory) -> dict[str, int] | None:

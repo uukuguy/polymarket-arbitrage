@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from polyarb.config import Settings
 from polyarb.http.control_plane import control_plane_status
 
 from .blocking_bridge import run_blocking_call_with_timeout
@@ -186,6 +187,7 @@ def _build_control_plane(dsn: str) -> PostgresControlPlane:
                 pool_max_size=CONTROL_PLANE_API_READINESS_POOL_MAX_SIZE,
             ),
         ),
+        database_capacity_budget_bytes=Settings().m1_database_capacity_budget_bytes,
     )
 
 
