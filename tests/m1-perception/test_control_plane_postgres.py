@@ -11033,6 +11033,8 @@ def test_operational_snapshot_keeps_capacity_observation_non_blocking_and_expose
         "oldest_pending_age_seconds": 180.0,
         "latest_delivery_at": None,
         "latest_delivery_state": None,
+        "latest_delivery_channel": None,
+        "latest_delivery_error_class": None,
     }
 
 

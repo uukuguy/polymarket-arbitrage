@@ -104,6 +104,8 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
             "oldest_pending_age_seconds": 180.0,
             "latest_delivery_at": "2026-08-25T11:58:00+00:00",
             "latest_delivery_state": "delivered",
+            "latest_delivery_channel": "dashboard",
+            "latest_delivery_error_class": None,
         },
         "quote": {
             "current_pointer": {

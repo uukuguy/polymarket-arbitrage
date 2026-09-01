@@ -490,6 +490,11 @@ SELECT
         )),
         'latest_delivery_at', (SELECT max(attempted_at) FROM m1_alert_deliveries),
         'latest_delivery_state', (SELECT state FROM m1_alert_deliveries
+            ORDER BY attempted_at DESC, delivery_id DESC LIMIT 1),
+        'latest_delivery_channel', (SELECT o.channel FROM m1_alert_deliveries d
+            JOIN m1_alert_outbox o ON o.outbox_id = d.outbox_id
+            ORDER BY d.attempted_at DESC, d.delivery_id DESC LIMIT 1),
+        'latest_delivery_error_class', (SELECT error_class FROM m1_alert_deliveries
             ORDER BY attempted_at DESC, delivery_id DESC LIMIT 1)
     ) FROM m1_alert_outbox) AS alert_delivery,
     (SELECT to_jsonb(soak_row) FROM (
@@ -8303,6 +8308,8 @@ class PostgresControlPlane:
         alert_delivery_raw = _snapshot_mapping(snapshot_row["alert_delivery"], "alert_delivery")
         latest_delivery_at = alert_delivery_raw["latest_delivery_at"]
         latest_delivery_state = alert_delivery_raw["latest_delivery_state"]
+        latest_delivery_channel = alert_delivery_raw["latest_delivery_channel"]
+        latest_delivery_error_class = alert_delivery_raw["latest_delivery_error_class"]
         alert_delivery = {
             "pending_count": _snapshot_int(
                 alert_delivery_raw["pending_count"], "alert_delivery.pending_count"
@@ -8324,6 +8331,17 @@ class PostgresControlPlane:
             ),
             "latest_delivery_state": (
                 None if latest_delivery_state is None else str(latest_delivery_state)
+            ),
+            "latest_delivery_channel": (
+                None if latest_delivery_channel is None else str(latest_delivery_channel)
+            ),
+            "latest_delivery_error_class": (
+                None
+                if latest_delivery_error_class is None
+                else _snapshot_text(
+                    latest_delivery_error_class,
+                    "alert_delivery.latest_delivery_error_class",
+                )
             ),
         }
         latest_soak_observation = _snapshot_optional_mapping(

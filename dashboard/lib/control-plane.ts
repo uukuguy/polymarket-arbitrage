@@ -211,6 +211,8 @@ export type AlertDeliveryBacklog = {
   oldest_pending_age_seconds: number | null;
   latest_delivery_at: string | null;
   latest_delivery_state: "delivered" | "retryable" | "failed" | null;
+  latest_delivery_channel: "dashboard" | "telegram" | null;
+  latest_delivery_error_class: string | null;
 };
 
 export type ControlPlaneRead =
@@ -1095,11 +1097,15 @@ function validateAlertDelivery(value: unknown): AlertDeliveryBacklog | null {
   if (!isRecord(value)) return null;
   const latestAt = value.latest_delivery_at;
   const latestState = value.latest_delivery_state;
+  const latestChannel = value.latest_delivery_channel;
+  const latestErrorClass = value.latest_delivery_error_class;
   if (
     !isNonNegativeInteger(value.pending_count) ||
     !(value.oldest_pending_age_seconds === null || isNonNegativeNumber(value.oldest_pending_age_seconds)) ||
     !(latestAt === null || isDateString(latestAt)) ||
-    !(latestState === null || ["delivered", "retryable", "failed"].includes(String(latestState)))
+    !(latestState === null || ["delivered", "retryable", "failed"].includes(String(latestState))) ||
+    !(latestChannel === null || ["dashboard", "telegram"].includes(String(latestChannel))) ||
+    !(latestErrorClass === null || (isString(latestErrorClass) && latestErrorClass.length > 0))
   ) {
     return null;
   }
@@ -1108,6 +1114,8 @@ function validateAlertDelivery(value: unknown): AlertDeliveryBacklog | null {
     oldest_pending_age_seconds: value.oldest_pending_age_seconds,
     latest_delivery_at: latestAt,
     latest_delivery_state: latestState as AlertDeliveryBacklog["latest_delivery_state"],
+    latest_delivery_channel: latestChannel as AlertDeliveryBacklog["latest_delivery_channel"],
+    latest_delivery_error_class: latestErrorClass as string | null,
   };
 }
 

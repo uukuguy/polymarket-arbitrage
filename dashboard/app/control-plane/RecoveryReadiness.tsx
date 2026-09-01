@@ -37,6 +37,11 @@ export function RecoveryReadiness({
   }
   const unhealthy = capacity.state === "critical" || capacity.state === "exhausted";
   const pending = alertDelivery.pending_count > 0;
+  const latestReceipt = alertDelivery.latest_delivery_state === "failed"
+    && alertDelivery.latest_delivery_channel === "telegram"
+    && alertDelivery.latest_delivery_error_class === "TelegramCredentialError"
+    ? "Telegram credential rejected; Telegram delivery is isolated until reconfigured. Dashboard delivery remains available."
+    : null;
   return (
     <section
       style={{
@@ -80,8 +85,11 @@ export function RecoveryReadiness({
               : `${Math.floor(alertDelivery.oldest_pending_age_seconds)}s`}
           </p>
           <p style={{ color: "#aaa" }}>
-            Latest receipt: {alertDelivery.latest_delivery_state ?? "none"} · {alertDelivery.latest_delivery_at ?? "not observed"}
+            Latest receipt: {alertDelivery.latest_delivery_state ?? "none"}
+            {alertDelivery.latest_delivery_channel ? ` / ${alertDelivery.latest_delivery_channel}` : ""}
+            {alertDelivery.latest_delivery_at ? ` · ${alertDelivery.latest_delivery_at}` : " · not observed"}
           </p>
+          {latestReceipt && <p style={{ color: "#fde68a" }}>{latestReceipt}</p>}
         </div>
       </div>
       {(unhealthy || pending) && <p style={{ color: "#fecaca", marginBottom: 0 }}>Recovery is blocked; this is not healthy or empty.</p>}
