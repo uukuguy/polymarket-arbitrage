@@ -8927,7 +8927,10 @@ class PostgresControlPlane:
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
-                "SELECT generation_key FROM m1_publication_pointers WHERE pointer_key='structure:current'"
+                """SELECT pointer.generation_key, manifest.record_count
+                   FROM m1_publication_pointers pointer
+                   JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key
+                   WHERE pointer.pointer_key='structure:current'"""
             )
             pointer = cursor.fetchone()
             if pointer is None:
@@ -8941,6 +8944,8 @@ class PostgresControlPlane:
                 (current, after, limit + 1),
             )
             rows = cursor.fetchall()
+            if not rows and int(pointer["record_count"]) > 0:
+                return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "research-index-not-materialized", "generation_key": current, "items": [], "limit": limit, "next_after": None}
             has_more = len(rows) > limit
             page = rows[:limit]
             return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "available", "generation_key": current, "items": [{"entity_id": str(row["entity_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["entity_id"]) if has_more else None}
@@ -8969,7 +8974,10 @@ class PostgresControlPlane:
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
-                "SELECT generation_key FROM m1_publication_pointers WHERE pointer_key='quote:current'"
+                """SELECT pointer.generation_key, manifest.record_count
+                   FROM m1_publication_pointers pointer
+                   JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key
+                   WHERE pointer.pointer_key='quote:current'"""
             )
             pointer = cursor.fetchone()
             if pointer is None:
@@ -8983,6 +8991,8 @@ class PostgresControlPlane:
                 (current, after, limit + 1),
             )
             rows = cursor.fetchall()
+            if not rows and int(pointer["record_count"]) > 0:
+                return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "unavailable", "reason_code": "research-index-not-materialized", "generation_key": current, "items": [], "limit": limit, "next_after": None}
             has_more = len(rows) > limit
             page = rows[:limit]
             return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "generation_key": current, "items": [{"token_id": str(row["token_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["token_id"]) if has_more else None}
