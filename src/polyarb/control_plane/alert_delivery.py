@@ -345,6 +345,19 @@ class TransactionalAlertDeliveryWorker:
                 raise ValueError("Telegram response lacks a numeric message_id")
         except AlertDeliveryStopRequested:
             raise
+        except httpx.HTTPStatusError as error:
+            status_code = error.response.status_code
+            if status_code in {401, 403}:
+                self._raise_if_stopped()
+                self._control_plane.finish_alert_delivery(
+                    lease,
+                    state="failed",
+                    error_class="TelegramCredentialError",
+                    error_detail={"channel": "telegram", "status_code": status_code},
+                    now=self._now(),
+                )
+                return AlertDeliveryResult(outbox_id=lease.outbox_id, outcome="failed")
+            return self._retry(lease, type(error).__name__)
         except Exception as error:  # noqa: BLE001 - sender boundary must retain intent
             return self._retry(lease, type(error).__name__)
         self._raise_if_stopped()

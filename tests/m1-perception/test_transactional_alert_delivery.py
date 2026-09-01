@@ -167,6 +167,43 @@ def test_telegram_http_failure_is_a_retryable_delivery_receipt() -> None:
     }
 
 
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_telegram_invalid_credentials_are_a_terminal_delivery_receipt(
+    status_code: int,
+) -> None:
+    control_plane = _ControlPlane()
+    control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
+        outbox_id="outbox-tg",
+        incident_event_id="event-tg",
+        channel="telegram",
+        payload={"incident_key": "incident-a", "kind": "attempt-failed"},
+        lease_owner="alert-a",
+        lease_epoch=1,
+        lease_expires_at=NOW,
+        attempt_number=1,
+    )
+    worker = TransactionalAlertDeliveryWorker(
+        control_plane=control_plane,
+        worker_id="alert-a",
+        now=lambda: NOW,
+        settings=Settings(telegram_bot_token=SecretStr("token"), telegram_chat_id="chat"),
+        telegram_client=_TelegramClient(
+            httpx.Response(
+                status_code,
+                request=httpx.Request("POST", "https://api.telegram.org"),
+            )
+        ),
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "failed"
+    assert control_plane.finished == {
+        "state": "failed",
+        "error_class": "TelegramCredentialError",
+        "error_detail": {"channel": "telegram", "status_code": status_code},
+        "now": NOW,
+    }
+
+
 def test_alert_stop_after_provider_response_forbids_starting_finish_sql() -> None:
     control_plane = _ControlPlane()
     control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
