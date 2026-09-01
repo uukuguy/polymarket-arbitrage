@@ -10871,6 +10871,38 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     ]
 
 
+def test_operational_snapshot_keeps_capacity_observation_non_blocking_and_exposes_alert_backlog(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A size probe must never cancel the durable runtime authority read."""
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control_plane.record_incident_event(
+        incident_key="runtime-watchdog-backlog",
+        dedupe_key="runtime-watchdog-backlog",
+        component="runtime-watchdog",
+        severity="critical",
+        summary="alert delivery backlog",
+        kind="detected",
+        detail={},
+        idempotency_key="runtime-watchdog-backlog:detected",
+        channels=("telegram",),
+        now=now - timedelta(minutes=3),
+    )
+
+    snapshot = control_plane.operational_snapshot(now=now)
+
+    assert snapshot["database_capacity"] == {
+        "state": "unavailable",
+        "reason_code": "database-size-observation-unavailable",
+    }
+    assert snapshot["alert_delivery"] == {
+        "pending_count": 1,
+        "oldest_pending_age_seconds": 180.0,
+        "latest_delivery_at": None,
+        "latest_delivery_state": None,
+    }
+
+
 def test_operational_snapshot_production_read_owns_database_snapshot_clock(
     control_plane: PostgresControlPlane,
 ) -> None:

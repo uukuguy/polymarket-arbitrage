@@ -343,6 +343,7 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--api-app", required=True)
     render_rollout.add_argument("--worker-app", required=True)
     render_rollout.add_argument("--alert-app", required=True)
+    render_rollout.add_argument("--alert-delivery-app")
     render_rollout.add_argument("--runtime-event-writer-app", required=True)
     render_rollout.add_argument("--runtime-controller-app")
     render_rollout.add_argument("--qualification-worker-app")
@@ -2033,6 +2034,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 api_app=args.api_app,
                 worker_app=args.worker_app,
                 alert_app=args.alert_app,
+                alert_delivery_app=args.alert_delivery_app,
                 runtime_event_writer_app=args.runtime_event_writer_app,
                 release_id=args.release_id,
                 runtime_controller_app=args.runtime_controller_app,

@@ -93,6 +93,16 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
                 "observed_at": "2026-08-25T11:58:00+00:00",
             },
         },
+        "database_capacity": {
+            "state": "unavailable",
+            "reason_code": "database-size-observation-unavailable",
+        },
+        "alert_delivery": {
+            "pending_count": 2,
+            "oldest_pending_age_seconds": 180.0,
+            "latest_delivery_at": "2026-08-25T11:58:00+00:00",
+            "latest_delivery_state": "delivered",
+        },
         "quote": {
             "current_pointer": {
                 "generation_key": "quote:current-generation",
@@ -371,6 +381,18 @@ assert.equal(
   "breaking",
 );
 assert.equal(decoded.qualification.policy_version, "m1-rolling-qualification-v1");
+assert.equal(decoded.database_capacity.state, "unavailable");
+assert.equal(decoded.alert_delivery.pending_count, 2);
+
+const overBudget = clone(fixture);
+overBudget.database_capacity = {{
+  state: "exhausted",
+  used_bytes: 1575,
+  budget_bytes: 1500,
+  used_percent: 105,
+  reason_code: "budget-exhausted",
+}};
+assert.equal(decodeControlPlaneRead(overBudget).status, "available");
 
 const missingController = clone(fixture);
 missingController.runtime_controller = {{
@@ -396,6 +418,10 @@ for (const mutate of [
   (body) => {{ body.runtime_controller.claimed_at = "2026-02-31T11:59:00+00:00"; }},
   (body) => {{ body.cloud_usage.budget_day = "2026-08-25T00:00:00+00:00"; }},
   (body) => {{ body.cloud_usage.budget_day = "2026-02-31"; }},
+  (body) => {{ body.database_capacity.state = "unknown"; }},
+  (body) => {{ body.database_capacity.reason_code = 1; }},
+  (body) => {{ body.alert_delivery.pending_count = -1; }},
+  (body) => {{ body.alert_delivery.latest_delivery_at = "not-a-date"; }},
   (body) => {{ delete body.quote.current_pointer.published_at; }},
   (body) => {{ body.quote.current_pointer.record_count = -1; }},
   (body) => {{ body.structure.latest_manifest.published_at = "2026-08-25T11:56:00"; }},
@@ -590,6 +616,13 @@ def test_control_plane_page_declares_four_operator_panels() -> None:
             "certificate-",
             "Digest",
         ],
+        "RecoveryReadiness.tsx": [
+            "Recovery readiness",
+            "Database capacity",
+            "Alert delivery",
+            "Oldest pending",
+            "not healthy or empty",
+        ],
     }
 
     for filename, literals in expected_components.items():
@@ -605,6 +638,7 @@ def test_control_plane_page_declares_four_operator_panels() -> None:
         "ActiveTasks",
         "IncidentTimeline",
         "QualificationPanel",
+        "RecoveryReadiness",
     ):
         assert f"import {{ {component} }}" in page_source
         assert f"<{component}" in page_source

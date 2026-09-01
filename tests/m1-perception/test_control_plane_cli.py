@@ -2600,6 +2600,8 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
                 "polyarb-control-worker-staging",
                 "--alert-app",
                 "polyarb-control-alert-staging",
+                "--alert-delivery-app",
+                "polyarb-control-alert-delivery-staging",
                 "--runtime-event-writer-app",
                 "polyarb-control-runtime-event-writer-staging",
                 "--runtime-controller-app",
@@ -2622,6 +2624,7 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "rendered-local-only"
     assert Path(result["checklist"]).exists()
+    assert Path(result["alert_delivery_config"]).exists()
     assert Path(result["runtime_controller_config"]).exists()
     assert Path(result["qualification_worker_config"]).exists()
 

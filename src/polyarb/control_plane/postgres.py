@@ -482,6 +482,15 @@ SELECT
         WHERE o.state = 'pending'
         ORDER BY o.created_at DESC, o.outbox_id DESC LIMIT {sample_limit}
     ) outbox_row), '[]'::jsonb) AS outbox,
+    (SELECT jsonb_build_object(
+        'pending_count', count(*) FILTER (WHERE state IN ('pending', 'retryable')),
+        'oldest_pending_age_seconds', extract(epoch FROM (
+            s.observed_at - min(created_at) FILTER (WHERE state IN ('pending', 'retryable'))
+        )),
+        'latest_delivery_at', (SELECT max(attempted_at) FROM m1_alert_deliveries),
+        'latest_delivery_state', (SELECT state FROM m1_alert_deliveries
+            ORDER BY attempted_at DESC, delivery_id DESC LIMIT 1)
+    ) FROM m1_alert_outbox) AS alert_delivery,
     (SELECT to_jsonb(soak_row) FROM (
         SELECT run_id, observed_at FROM m1_soak_observations
         ORDER BY observed_at DESC, run_id DESC LIMIT 1
@@ -8215,6 +8224,32 @@ class PostgresControlPlane:
             }
             for row in outbox_rows
         ]
+        alert_delivery_raw = _snapshot_mapping(snapshot_row["alert_delivery"], "alert_delivery")
+        latest_delivery_at = alert_delivery_raw["latest_delivery_at"]
+        latest_delivery_state = alert_delivery_raw["latest_delivery_state"]
+        alert_delivery = {
+            "pending_count": _snapshot_int(
+                alert_delivery_raw["pending_count"], "alert_delivery.pending_count"
+            ),
+            "oldest_pending_age_seconds": (
+                None
+                if alert_delivery_raw["oldest_pending_age_seconds"] is None
+                else _snapshot_seconds(
+                    alert_delivery_raw["oldest_pending_age_seconds"],
+                    "alert_delivery.oldest_pending_age_seconds",
+                )
+            ),
+            "latest_delivery_at": (
+                None
+                if latest_delivery_at is None
+                else _snapshot_aware(
+                    latest_delivery_at, "alert_delivery.latest_delivery_at"
+                ).isoformat()
+            ),
+            "latest_delivery_state": (
+                None if latest_delivery_state is None else str(latest_delivery_state)
+            ),
+        }
         latest_soak_observation = _snapshot_optional_mapping(
             snapshot_row["latest_soak_observation"], "latest_soak_observation"
         )
@@ -8275,6 +8310,13 @@ class PostgresControlPlane:
             now=now,
         )
         return {
+            # Database size must be collected by an independent bounded probe.
+            # pg_database_size() inside this statement can cancel the entire
+            # business/runtime read on a pressure-bound provider.
+            "database_capacity": {
+                "state": "unavailable",
+                "reason_code": "database-size-observation-unavailable",
+            },
             "job_counts": job_counts,
             "oldest_runnable_age_seconds": (
                 None if age is None else _snapshot_seconds(age, "oldest_runnable_age_seconds")
@@ -8327,6 +8369,7 @@ class PostgresControlPlane:
                 }
             ),
             "pending_alert_outbox": outbox,
+            "alert_delivery": alert_delivery,
             "cloud_usage": {
                 "budget_day": budget_day.isoformat(),
                 "used_bytes": _snapshot_int(cloud_usage["used_bytes"], "cloud_usage.used_bytes"),

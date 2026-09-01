@@ -2,6 +2,7 @@ import { readControlPlane } from "@/lib/control-plane";
 import { ActiveTasks } from "./ActiveTasks";
 import { IncidentTimeline } from "./IncidentTimeline";
 import { QualificationPanel } from "./QualificationPanel";
+import { RecoveryReadiness } from "./RecoveryReadiness";
 import { RuntimeOverview } from "./RuntimeOverview";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,10 @@ export default async function ControlPlanePage() {
       quotePointer={view.quote.current_pointer}
       structureManifest={view.structure.latest_manifest}
       jobCounts={view.job_counts}
+    />
+    <RecoveryReadiness
+      capacity={view.database_capacity}
+      alertDelivery={view.alert_delivery}
     />
     <ActiveTasks tasks={view.active_tasks.items} total={view.active_tasks.total} />
     <IncidentTimeline

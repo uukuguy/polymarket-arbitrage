@@ -192,6 +192,26 @@ type CloudUsage = {
   } | null;
 };
 
+export type DatabaseCapacity =
+  | {
+      state: "unavailable";
+      reason_code: string;
+    }
+  | {
+      state: "healthy" | "warning" | "critical" | "exhausted";
+      used_bytes: number;
+      budget_bytes: number;
+      used_percent: number;
+      reason_code: string;
+    };
+
+export type AlertDeliveryBacklog = {
+  pending_count: number;
+  oldest_pending_age_seconds: number | null;
+  latest_delivery_at: string | null;
+  latest_delivery_state: "delivered" | "retryable" | "failed" | null;
+};
+
 export type ControlPlaneRead =
   | { status: "unavailable"; reason: string }
   | {
@@ -212,6 +232,8 @@ export type ControlPlaneRead =
         latest_observed_at: string;
       } | null;
       cloud_usage: CloudUsage;
+      database_capacity: DatabaseCapacity;
+      alert_delivery: AlertDeliveryBacklog;
       runtime_controller: RuntimeControllerView;
       active_tasks: { items: ActiveTask[]; total: number };
       runtime_incidents: { items: RuntimeIncident[]; total: number };
@@ -1026,6 +1048,51 @@ function validateCloudUsage(value: unknown): CloudUsage | null {
   };
 }
 
+function validateDatabaseCapacity(value: unknown): DatabaseCapacity | null {
+  if (!isRecord(value)) return null;
+  if (value.state === "unavailable") {
+    return isString(value.reason_code)
+      ? { state: "unavailable", reason_code: value.reason_code }
+      : null;
+  }
+  if (
+    !["healthy", "warning", "critical", "exhausted"].includes(String(value.state)) ||
+    !isNonNegativeInteger(value.used_bytes) ||
+    !isPositiveInteger(value.budget_bytes) ||
+    !isNonNegativeInteger(value.used_percent) ||
+    !isString(value.reason_code)
+  ) {
+    return null;
+  }
+  return {
+    state: value.state as DatabaseCapacity["state"],
+    used_bytes: value.used_bytes,
+    budget_bytes: value.budget_bytes,
+    used_percent: value.used_percent,
+    reason_code: value.reason_code,
+  };
+}
+
+function validateAlertDelivery(value: unknown): AlertDeliveryBacklog | null {
+  if (!isRecord(value)) return null;
+  const latestAt = value.latest_delivery_at;
+  const latestState = value.latest_delivery_state;
+  if (
+    !isNonNegativeInteger(value.pending_count) ||
+    !(value.oldest_pending_age_seconds === null || isNonNegativeNumber(value.oldest_pending_age_seconds)) ||
+    !(latestAt === null || isDateString(latestAt)) ||
+    !(latestState === null || ["delivered", "retryable", "failed"].includes(String(latestState)))
+  ) {
+    return null;
+  }
+  return {
+    pending_count: value.pending_count,
+    oldest_pending_age_seconds: value.oldest_pending_age_seconds,
+    latest_delivery_at: latestAt,
+    latest_delivery_state: latestState as AlertDeliveryBacklog["latest_delivery_state"],
+  };
+}
+
 function validateCloudObservation(value: unknown):
   | {
       source: string;
@@ -1105,6 +1172,8 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
   const runtimeWatchdog = validateRuntimeWatchdog(payload.runtime_watchdog);
   const soakEvidence = validateSoakEvidence(payload.soak_evidence);
   const cloudUsage = validateCloudUsage(payload.cloud_usage);
+  const databaseCapacity = validateDatabaseCapacity(payload.database_capacity);
+  const alertDelivery = validateAlertDelivery(payload.alert_delivery);
   const runtimeController = validateRuntimeController(payload.runtime_controller);
   const activeTasks = validateCollection(payload.active_tasks, validateActiveTask);
   const runtimeIncidents = validateCollection(
@@ -1125,6 +1194,8 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
     runtimeWatchdog === null ||
     soakEvidence === undefined ||
     cloudUsage === null ||
+    databaseCapacity === null ||
+    alertDelivery === null ||
     runtimeController === null ||
     activeTasks === null ||
     runtimeIncidents === null ||
@@ -1143,6 +1214,8 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
     runtime_watchdog: runtimeWatchdog,
     soak_evidence: soakEvidence,
     cloud_usage: cloudUsage,
+    database_capacity: databaseCapacity,
+    alert_delivery: alertDelivery,
     runtime_controller: runtimeController,
     active_tasks: activeTasks,
     runtime_incidents: runtimeIncidents,
