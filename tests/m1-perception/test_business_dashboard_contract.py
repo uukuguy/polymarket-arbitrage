@@ -31,5 +31,9 @@ def test_business_research_routes_are_separated_by_truth_layer() -> None:
     assert (root / "quotes/page.tsx").is_file()
     assert (root / "analysis/page.tsx").is_file()
     assert (root / "opportunities/page.tsx").is_file()
-    assert "not yet persisted" in (root / "analysis/page.tsx").read_text()
+    analysis_page = (root / "analysis/page.tsx").read_text()
+    assert "not yet persisted" in analysis_page
+    assert "structure_records" in analysis_page
+    assert "quote_records" in analysis_page
+    assert "certified_opportunities" in analysis_page
     assert "real current zero" in (root / "opportunities/page.tsx").read_text()

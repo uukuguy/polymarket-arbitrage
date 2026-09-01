@@ -9018,12 +9018,41 @@ class PostgresControlPlane:
                 "opportunities": {"status": "not-published", "reason_code": "structure-not-published"},
                 "blockers": [{"scope": "structure", "code": "structure-not-published", "impact": "blocking"}],
             }
+        analysis: dict[str, object]
+        if quote is None:
+            analysis = {"status": "not-published", "reason_code": "quote-not-published"}
+        else:
+            quote_current = str(quote["structure_generation_key"]) == str(structure["generation_key"])
+            component_counts = {
+                "structure_records": _snapshot_int(
+                    structure["record_count"], "business_overview.analysis.structure_records"
+                ),
+                "quote_records": _snapshot_int(
+                    quote["record_count"], "business_overview.analysis.quote_records"
+                ),
+            }
+            if opportunity is not None and str(opportunity["generation_key"]) == str(quote["generation_key"]):
+                component_counts["certified_opportunities"] = _snapshot_int(
+                    opportunity["record_count"],
+                    "business_overview.analysis.certified_opportunities",
+                )
+            analysis = {
+                "status": "available" if quote_current else "lagging",
+                "generation_key": str(quote["generation_key"]),
+                "parent_structure_generation_key": str(quote["structure_generation_key"]),
+                "component_counts": component_counts,
+                "reason_code": (
+                    "candidate-reject-detail-not-published"
+                    if quote_current
+                    else "quote-lineage-lagging"
+                ),
+            }
         return {
             "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
             "eligibility": {"state": "paused", "reason_code": "not-yet-qualified"},
             "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "record_count": _snapshot_int(structure["record_count"], "business_overview.structure.record_count"), "indexed_record_count": _snapshot_int(structure["indexed_record_count"], "business_overview.structure.indexed_record_count"), "component_counts": dict(structure.get("component_counts") or {})},
             "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available" if str(quote["structure_generation_key"]) == str(structure["generation_key"]) else "lagging", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count"), "indexed_record_count": _snapshot_int(quote["indexed_record_count"], "business_overview.quote.indexed_record_count")}),
-            "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
+            "analysis": analysis,
             "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available" if quote is not None and str(opportunity["generation_key"]) == str(quote["generation_key"]) else "lagging", "quote_generation_key": str(opportunity["generation_key"]), "parent_structure_generation_key": str(opportunity["structure_generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
             "blockers": [],
         }

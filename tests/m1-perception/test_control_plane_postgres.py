@@ -14653,6 +14653,16 @@ def test_business_overview_reports_the_published_quote_and_real_zero_opportuniti
     overview = control_plane.business_overview()
     assert overview["structure"]["generation_key"] == structure
     assert overview["quote"]["parent_structure_generation_key"] == structure
+    assert overview["analysis"] == {
+        "status": "available",
+        "generation_key": quote,
+        "parent_structure_generation_key": structure,
+        "component_counts": {
+            "structure_records": 1,
+            "quote_records": 1,
+        },
+        "reason_code": "candidate-reject-detail-not-published",
+    }
     assert overview["opportunities"] == {"status": "not-published", "reason_code": "opportunity-not-published"}
     newer_structure = "structure:" + "f" * 64
     with control_plane._connection_factory() as connection:
