@@ -9061,7 +9061,10 @@ class PostgresControlPlane:
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
-                """SELECT manifest.generation_key, manifest.record_count
+                """SELECT manifest.generation_key, manifest.record_count,
+                          (SELECT count(*) FROM m1_business_structure_rows AS research
+                           WHERE research.generation_key = manifest.generation_key)
+                              AS materialized_record_count
                    FROM m1_generation_manifests AS manifest
                    WHERE manifest.generation_key LIKE 'structure:' || chr(37)
                    ORDER BY manifest.published_at DESC, manifest.generation_key DESC
@@ -9073,14 +9076,27 @@ class PostgresControlPlane:
             current = str(pointer["generation_key"])
             if generation_key is not None and generation_key != current:
                 return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
+            expected_record_count = int(pointer["record_count"])
+            materialized_record_count = int(pointer["materialized_record_count"])
+            if materialized_record_count != expected_record_count:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "structure",
+                    "status": "unavailable",
+                    "reason_code": "research-index-incomplete",
+                    "generation_key": current,
+                    "expected_record_count": expected_record_count,
+                    "materialized_record_count": materialized_record_count,
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
             cursor.execute(
                 """SELECT entity_id, payload FROM m1_business_structure_rows
                    WHERE generation_key=%s AND entity_id > %s ORDER BY entity_id LIMIT %s""",
                 (current, after, limit + 1),
             )
             rows = cursor.fetchall()
-            if not rows and int(pointer["record_count"]) > 0:
-                return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "research-index-not-materialized", "generation_key": current, "items": [], "limit": limit, "next_after": None}
             has_more = len(rows) > limit
             page = rows[:limit]
             return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "available", "generation_key": current, "items": [{"entity_id": str(row["entity_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["entity_id"]) if has_more else None}
@@ -9109,7 +9125,10 @@ class PostgresControlPlane:
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
-                """SELECT pointer.generation_key, manifest.record_count
+                """SELECT pointer.generation_key, manifest.record_count,
+                          (SELECT count(*) FROM m1_business_quote_rows AS research
+                           WHERE research.generation_key = pointer.generation_key)
+                              AS materialized_record_count
                    FROM m1_publication_pointers pointer
                    JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key
                    WHERE pointer.pointer_key='quote:current'"""
@@ -9120,14 +9139,27 @@ class PostgresControlPlane:
             current = str(pointer["generation_key"])
             if generation_key is not None and generation_key != current:
                 return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
+            expected_record_count = int(pointer["record_count"])
+            materialized_record_count = int(pointer["materialized_record_count"])
+            if materialized_record_count != expected_record_count:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "quote",
+                    "status": "unavailable",
+                    "reason_code": "research-index-incomplete",
+                    "generation_key": current,
+                    "expected_record_count": expected_record_count,
+                    "materialized_record_count": materialized_record_count,
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
             cursor.execute(
                 """SELECT token_id, payload FROM m1_business_quote_rows
                    WHERE generation_key=%s AND token_id > %s ORDER BY token_id LIMIT %s""",
                 (current, after, limit + 1),
             )
             rows = cursor.fetchall()
-            if not rows and int(pointer["record_count"]) > 0:
-                return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "unavailable", "reason_code": "research-index-not-materialized", "generation_key": current, "items": [], "limit": limit, "next_after": None}
             has_more = len(rows) > limit
             page = rows[:limit]
             return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "generation_key": current, "items": [{"token_id": str(row["token_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["token_id"]) if has_more else None}
