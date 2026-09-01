@@ -266,7 +266,10 @@ def upgrade() -> None:
                 continuous_since = CASE WHEN EXCLUDED.max_gap_seconds > 90 THEN EXCLUDED.last_completed_at ELSE m1_runtime_observe_status.continuous_since END,
                 last_completed_at = EXCLUDED.last_completed_at,
                 max_gap_seconds = CASE
-                    WHEN EXCLUDED.max_gap_seconds > 90 THEN EXCLUDED.max_gap_seconds
+                    WHEN EXCLUDED.max_gap_seconds > 90
+                         OR m1_runtime_observe_status.continuous_since
+                            = m1_runtime_observe_status.last_completed_at
+                    THEN EXCLUDED.max_gap_seconds
                     ELSE greatest(m1_runtime_observe_status.max_gap_seconds, EXCLUDED.max_gap_seconds)
                 END,
                 candidate_count = EXCLUDED.candidate_count, actionable_count = EXCLUDED.actionable_count,
