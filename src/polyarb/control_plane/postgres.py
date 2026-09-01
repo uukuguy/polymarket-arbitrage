@@ -5324,6 +5324,11 @@ class PostgresControlPlane:
                 or int(persisted["record_count"]) != record_count
             ):
                 raise CheckpointConflictError("Structure generation manifest conflicts")
+            self._prune_superseded_business_research_rows_cursor(
+                cursor,
+                product="structure",
+                current_generation_key=generation_key,
+            )
             quote_generation_key = f"quote:{bundle_digest}"
             quote_admit_job_key = f"{generation_key}:quote-admit"
             quote_admit_identity = f"{generation_key}:{bundle_key}:{bundle_digest}"
@@ -5557,6 +5562,11 @@ class PostgresControlPlane:
                 )
                 if cursor.rowcount != 1:
                     raise StaleLeaseError("Quote pointer changed during certification")
+            self._prune_superseded_business_research_rows_cursor(
+                cursor,
+                product="quote",
+                current_generation_key=generation_key,
+            )
             self._enqueue_job_cursor(
                 cursor,
                 job_key=f"{generation_key}:opportunity-certify",
@@ -8997,6 +9007,35 @@ class PostgresControlPlane:
             "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available" if quote is not None and str(opportunity["generation_key"]) == str(quote["generation_key"]) else "lagging", "quote_generation_key": str(opportunity["generation_key"]), "parent_structure_generation_key": str(opportunity["structure_generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
             "blockers": [],
         }
+
+    @staticmethod
+    def _prune_superseded_business_research_rows_cursor(
+        cursor: psycopg.Cursor[Any], *, product: str, current_generation_key: str
+    ) -> None:
+        """Retain the current published research index and any unpublished candidate rows.
+
+        Immutable range/batch artifacts remain the historical source of truth in
+        R2.  PostgreSQL only serves the current dashboard generation, so an
+        older row becomes disposable only after its generation has a manifest.
+        This deliberately preserves rows for a candidate still being staged.
+        """
+        table = {
+            "structure": "m1_business_structure_rows",
+            "quote": "m1_business_quote_rows",
+        }[product]
+        cursor.execute(
+            sql.SQL(
+                "DELETE FROM {table} AS research "
+                "USING m1_generation_manifests AS manifest "
+                "WHERE manifest.generation_key = research.generation_key "
+                "AND manifest.generation_key LIKE {prefix} "
+                "AND research.generation_key <> {current_generation_key}"
+            ).format(
+                table=sql.Identifier(table),
+                prefix=sql.Literal(f"{product}:%"),
+                current_generation_key=sql.Literal(current_generation_key),
+            )
+        )
 
     def stage_business_structure_rows(
         self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]

@@ -4930,6 +4930,99 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
         connection.close()
 
 
+def test_quote_publication_prunes_only_superseded_published_business_research_rows(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    old_structure_digest = "1" * 64
+    old_quote_digest = "2" * 64
+    _seed_structure_parent(control_plane, structure_digest=old_structure_digest, now=now)
+    old_generation = f"quote:{old_quote_digest}"
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) "
+            "VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)",
+            (f"{old_generation}:certify", old_generation, now, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs("
+            "generation_key,structure_generation_key,universe_hash,cadence_seconds,"
+            "cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (old_generation, f"structure:{old_structure_digest}", "3" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_generation_manifests("
+            "generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,"
+            "record_count,published_at) VALUES (%s,%s,%s,'old',%s,1,%s)",
+            (old_generation, f"{old_generation}:certify", "3" * 64, "4" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers("
+            "pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) "
+            "VALUES ('quote:current',%s,NULL,1,%s)",
+            (old_generation, now),
+        )
+    control_plane.stage_business_quote_rows(
+        generation_key=old_generation,
+        rows=(("old-token", {"market_id": "old-market"}),),
+    )
+    staged_generation = f"quote:{'5' * 64}"
+    control_plane.stage_business_quote_rows(
+        generation_key=staged_generation,
+        rows=(("staged-token", {"market_id": "staged-market"}),),
+    )
+
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("current-token",),
+        batch_size=1,
+        now=now + timedelta(seconds=1),
+    )[0]
+    batch_lease = control_plane.claim_job(
+        worker_id="quote-worker",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert batch_lease is not None
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/current/batch.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now + timedelta(seconds=2),
+        research_rows=(("current-token", {"market_id": "current-market"}),),
+        now=now + timedelta(seconds=2),
+    )
+    control_plane.finish(batch_lease, state=JobState.SUCCEEDED, now=now + timedelta(seconds=3))
+    certifier = control_plane.claim_job(
+        worker_id="quote-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=4),
+    )
+    assert certifier is not None
+
+    control_plane.certify_quote_generation(
+        certifier,
+        generation_key=batch.generation_key,
+        now=now + timedelta(seconds=5),
+    )
+
+    with control_plane._connection_factory() as connection:
+        rows = connection.execute(
+            "SELECT generation_key, token_id FROM m1_business_quote_rows ORDER BY token_id"
+        ).fetchall()
+    assert rows == [
+        (batch.generation_key, "current-token"),
+        (staged_generation, "staged-token"),
+    ]
+
+
 def test_quote_pointer_lineage_rejects_late_older_certifier(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -14594,3 +14687,84 @@ def test_structure_range_receipt_atomically_stages_business_research_rows(
         ).fetchone()
     assert row is not None
     assert row[0] == {"component": "events", "source_cursor": "event-001"}
+
+
+def test_structure_publication_prunes_only_superseded_published_business_research_rows(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    old_generation = f"structure:{'1' * 64}"
+    _seed_structure_parent(control_plane, structure_digest="1" * 64, now=now)
+    control_plane.stage_business_structure_rows(
+        generation_key=old_generation,
+        rows=(("old:event", {"component": "events"}),),
+    )
+    staged_generation = f"structure:{'2' * 64}"
+    control_plane.stage_business_structure_rows(
+        generation_key=staged_generation,
+        rows=(("staged:event", {"component": "events"}),),
+    )
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"retention-structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now + timedelta(seconds=1),
+    )[0]
+    range_lease = control_plane.claim_job(
+        worker_id="structure-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert range_lease is not None
+    control_plane.complete_structure_range(
+        range_lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/current/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        research_rows=(("current:event", {"component": "events"}),),
+        now=now + timedelta(seconds=2),
+    )
+    certifier = control_plane.claim_job(
+        worker_id="structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=3),
+    )
+    assert certifier is not None
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": "structure-ranges/current/rows.ndjson",
+                    "artifact_digest": "a" * 64,
+                    "record_count": 1,
+                },
+            ),
+        )
+    ).hexdigest()
+
+    control_plane.certify_structure_generation(
+        certifier,
+        generation_key=spec.generation_key,
+        artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+        artifact_digest=manifest_digest,
+        now=now + timedelta(seconds=4),
+    )
+
+    with control_plane._connection_factory() as connection:
+        rows = connection.execute(
+            "SELECT generation_key, entity_id FROM m1_business_structure_rows ORDER BY entity_id"
+        ).fetchall()
+    assert rows == [
+        (spec.generation_key, "current:event"),
+        (staged_generation, "staged:event"),
+    ]
