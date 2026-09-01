@@ -14751,6 +14751,72 @@ def test_business_quote_page_rejects_an_incomplete_current_research_index(
     }
 
 
+def test_business_quote_page_uses_admitted_leg_count_for_research_index_integrity(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure = "structure:" + "7" * 64
+    current = "quote:" + "8" * 64
+    batch_job_key = f"{current}:batch:0"
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (current, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) "
+                "VALUES (%s,%s,%s,'succeeded',%s,%s)",
+                (job_key, job_key, generation, now, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_generation_manifests("
+            "generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,"
+            "record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+            (structure, "structure-certify", "a" * 64, "b" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_generation_manifests("
+            "generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,"
+            "record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+            (current, "quote-certify", "a" * 64, "b" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs("
+            "generation_key,structure_generation_key,universe_hash,cadence_seconds,"
+            "cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (current, structure, "c" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers("
+            "pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) "
+            "VALUES ('quote:current',%s,NULL,1,%s)",
+            (current, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) "
+            "VALUES (%s,'quote-batch','fixture','succeeded',%s,%s)",
+            (batch_job_key, now, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_quote_batch_inputs("
+            "job_key,structure_receipt_digest,universe_hash,token_range_digest,leg_count) "
+            "VALUES (%s,%s,%s,%s,2)",
+            (batch_job_key, "7" * 64, "c" * 64, "d" * 64),
+        )
+    control_plane.stage_business_quote_rows(
+        generation_key=current,
+        rows=(
+            ("token:001", {"terminal_state": "executable"}),
+            ("token:002", {"terminal_state": "missing-book"}),
+        ),
+    )
+
+    page = control_plane.business_quote_page(generation_key=None, limit=10, after="")
+
+    assert page["status"] == "available"
+    assert page["items"] == [
+        {"token_id": "token:001", "terminal_state": "executable"},
+        {"token_id": "token:002", "terminal_state": "missing-book"},
+    ]
+
+
 def test_structure_range_receipt_atomically_stages_business_research_rows(
     control_plane: PostgresControlPlane,
 ) -> None:

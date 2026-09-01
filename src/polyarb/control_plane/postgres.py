@@ -9126,6 +9126,11 @@ class PostgresControlPlane:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """SELECT pointer.generation_key, manifest.record_count,
+                          COALESCE((
+                              SELECT sum(input.leg_count)
+                              FROM m1_quote_batch_inputs AS input
+                              WHERE input.job_key LIKE pointer.generation_key || ':batch:%'
+                          ), manifest.record_count) AS expected_research_record_count,
                           (SELECT count(*) FROM m1_business_quote_rows AS research
                            WHERE research.generation_key = pointer.generation_key)
                               AS materialized_record_count
@@ -9139,7 +9144,7 @@ class PostgresControlPlane:
             current = str(pointer["generation_key"])
             if generation_key is not None and generation_key != current:
                 return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
-            expected_record_count = int(pointer["record_count"])
+            expected_record_count = int(pointer["expected_research_record_count"])
             materialized_record_count = int(pointer["materialized_record_count"])
             if materialized_record_count != expected_record_count:
                 return {
