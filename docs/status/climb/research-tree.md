@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 71
-- Next action: rank next pending hypothesis
+- Next action: execute H-065 receipt-coupled business research index
 
 ## In flight
 
@@ -72,6 +72,7 @@
 - **H-062** [confirmed]: A recurring Quote certifier whose direct wake is skipped by a busy successor row can recover solely from durable batch receipts keyed by the independent Quote generation, publish without operator SQL, and hand an expired executable generation to the normal stale-isolation plus next-cadence continuation policy.
 - **H-063** [confirmed]: A production Structure successor can restore the exact dependent Quote and Opportunity lineage and resume rolling qualification on the same epoch without operator mutation, an all-window restart, or freshness-SLO relaxation.
 - **H-064** [confirmed]: A versioned M1 BusinessOverview snapshot assembled in one bounded read-only database transaction can make the CLI and Dashboard present the same lineage-consistent business truth without treating unavailable, not-published, stale, or paused products as zero opportunities.
+- **H-065** [pending]: A receipt-coupled, generation-scoped research index whose rows remain invisible until the matching certified pointer is published can expose dense Structure and Quote business pages without browser R2 scans, mixed lineage, partial publication, or pressure on the runtime control-plane reader.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

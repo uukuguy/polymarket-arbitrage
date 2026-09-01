@@ -1,4 +1,18 @@
 hypotheses:
+- id: H-065
+  description: A receipt-coupled, generation-scoped research index whose rows remain
+    invisible until the matching certified pointer is published can expose dense Structure
+    and Quote business pages without browser R2 scans, mixed lineage, partial publication,
+    or pressure on the runtime control-plane reader.
+  parent_paradigm: receipt-coupled-business-research-index
+  expected_lift: Turn M1's immutable collected artifacts into bounded, pageable, operator-safe
+    business research facts so users can inspect the market and quote universe before final
+    opportunities appear.
+  cost_h: 6.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-09-01T09:00:00+08:00'
+  results: []
 - id: H-064
   description: A versioned M1 BusinessOverview snapshot assembled in one bounded read-only
     database transaction can make the CLI and Dashboard present the same lineage-consistent
