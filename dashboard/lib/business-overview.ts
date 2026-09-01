@@ -9,6 +9,7 @@ export type Product = {
   parent_structure_generation_key?: string;
   quote_generation_key?: string;
   record_count?: number;
+  indexed_record_count?: number;
   count?: number;
   component_counts?: Record<string, number>;
 };
@@ -48,7 +49,7 @@ function validProduct(value: unknown): value is Product {
   for (const key of ["reason_code", "generation_key", "parent_structure_generation_key", "quote_generation_key"] as const) {
     if (value[key] !== undefined && typeof value[key] !== "string") return false;
   }
-  for (const key of ["record_count", "count"] as const) if (value[key] !== undefined && !isNonNegativeInteger(value[key])) return false;
+  for (const key of ["record_count", "indexed_record_count", "count"] as const) if (value[key] !== undefined && !isNonNegativeInteger(value[key])) return false;
   if (value.component_counts !== undefined && (!record(value.component_counts) || !Object.values(value.component_counts).every(isNonNegativeInteger))) return false;
   return true;
 }

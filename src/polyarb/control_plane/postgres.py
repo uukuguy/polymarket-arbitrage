@@ -8973,6 +8973,9 @@ class PostgresControlPlane:
                 "(SELECT to_jsonb(manifest) FROM ("
                 " SELECT manifest.generation_key, manifest.published_at, manifest.record_count, "
                 "        inputs.identity->'component_counts' AS component_counts"
+                "      ,(SELECT count(*) FROM m1_business_structure_rows AS research"
+                "         WHERE research.generation_key = manifest.generation_key)"
+                "         AS indexed_record_count"
                 " FROM m1_generation_manifests manifest"
                 " LEFT JOIN m1_structure_generation_inputs inputs"
                 "   ON inputs.generation_key = manifest.generation_key"
@@ -8982,6 +8985,9 @@ class PostgresControlPlane:
                 "(SELECT to_jsonb(quote) FROM ("
                 " SELECT pointer.generation_key, pointer.published_at, manifest.record_count, "
                 "        lineage.structure_generation_key"
+                "      ,(SELECT count(*) FROM m1_business_quote_rows AS research"
+                "         WHERE research.generation_key = pointer.generation_key)"
+                "         AS indexed_record_count"
                 " FROM m1_publication_pointers pointer"
                 " JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key"
                 " JOIN m1_quote_generation_inputs lineage ON lineage.generation_key = pointer.generation_key"
@@ -9015,8 +9021,8 @@ class PostgresControlPlane:
         return {
             "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
             "eligibility": {"state": "paused", "reason_code": "not-yet-qualified"},
-            "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "record_count": _snapshot_int(structure["record_count"], "business_overview.structure.record_count"), "component_counts": dict(structure.get("component_counts") or {})},
-            "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available" if str(quote["structure_generation_key"]) == str(structure["generation_key"]) else "lagging", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count")}),
+            "structure": {"status": "available", "generation_key": str(structure["generation_key"]), "published_at": _snapshot_aware(structure["published_at"], "business_overview.structure.published_at").isoformat(), "record_count": _snapshot_int(structure["record_count"], "business_overview.structure.record_count"), "indexed_record_count": _snapshot_int(structure["indexed_record_count"], "business_overview.structure.indexed_record_count"), "component_counts": dict(structure.get("component_counts") or {})},
+            "quote": ({"status": "not-published", "reason_code": "quote-not-published"} if quote is None else {"status": "available" if str(quote["structure_generation_key"]) == str(structure["generation_key"]) else "lagging", "generation_key": str(quote["generation_key"]), "parent_structure_generation_key": str(quote["structure_generation_key"]), "published_at": _snapshot_aware(quote["published_at"], "business_overview.quote.published_at").isoformat(), "record_count": _snapshot_int(quote["record_count"], "business_overview.quote.record_count"), "indexed_record_count": _snapshot_int(quote["indexed_record_count"], "business_overview.quote.indexed_record_count")}),
             "analysis": {"status": "not-published", "reason_code": "not-yet-projected"},
             "opportunities": ({"status": "not-published", "reason_code": "opportunity-not-published"} if opportunity is None else {"status": "available" if quote is not None and str(opportunity["generation_key"]) == str(quote["generation_key"]) else "lagging", "quote_generation_key": str(opportunity["generation_key"]), "parent_structure_generation_key": str(opportunity["structure_generation_key"]), "count": _snapshot_int(opportunity["record_count"], "business_overview.opportunity.record_count")}),
             "blockers": [],
@@ -9110,6 +9116,19 @@ class PostgresControlPlane:
                 return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
             source_record_count = int(pointer["record_count"])
             indexed_record_count = int(pointer["indexed_record_count"])
+            if source_record_count > 0 and indexed_record_count == 0:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "structure",
+                    "status": "unavailable",
+                    "reason_code": "research-index-incomplete",
+                    "generation_key": current,
+                    "source_record_count": source_record_count,
+                    "indexed_record_count": indexed_record_count,
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
             cursor.execute(
                 """SELECT entity_id, payload FROM m1_business_structure_rows
                    WHERE generation_key=%s AND entity_id > %s ORDER BY entity_id LIMIT %s""",
