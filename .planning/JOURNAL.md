@@ -13018,3 +13018,19 @@ then `make control-plane-business-brief`; use the raw status/opportunity readers
 only for audit drill-down. Route only a fresh supported finding to a bounded M1
 objective, thread, or backlog; do not deploy, migrate, reset qualification, or
 trade from this observation path.
+
+### SESSION 396 — 2026-09-01 (receipt-coupled dense business research)
+
+- [DELIVERY] Bounded Structure and Quote detail pages now use append-only
+  research indexes. A range/batch receipt writes its rows in the same database
+  transaction; only a certified `*:current` pointer can expose them.
+- [UI] Component density, lineage and scan-friendly bounded tables are now
+  present. A pre-index historical generation is explicitly
+  `research-index-not-materialized`, never a fabricated zero-result.
+- [LOCAL GATES] Migration, DB-role contract, receipt/page/API, both workers,
+  Dashboard typecheck/build and a Playwright Structure-page inspection passed.
+  No production migration, rollout, or historical R2 materialization occurred.
+
+[NEXT] Produce scoped revision-040 migration and six-app rollout proof, then
+observe a newly certified Structure→Quote successor generation through the
+research pages.

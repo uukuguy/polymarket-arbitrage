@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: objective_selection
-stopped_at: H-064 atomic business research read model confirmed and deployed
-last_updated: "2026-08-31T14:35:00+08:00"
+stopped_at: H-065 receipt-coupled business research index integrated locally; rollout and current-generation materialization pending
+last_updated: "2026-09-01T17:25:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -75,10 +75,10 @@ progress:
 
 ## Next Action
 
-1. H-064 is confirmed (all five focused local gates passed). The next bounded
-   objective is a durable analysis-funnel projection: candidate, invalid-input,
-   no-edge, and certified counts must be written with the Opportunity generation
-   before the business Analysis page reports them.
+1. H-065 is integrated locally. Before production mutation, produce the scoped
+   rollout/migration proof for revision 040 and then observe a newly certified
+   Structure→Quote successor generation through the research pages. Until that
+   proof, historical detail must remain unavailable rather than zero.
 2. Obtain fresh, read-only business evidence in order: `make
    smoke-control-plane-prod`, then `make control-plane-business-brief`. Use
    `format=json` only for automation of the same summary; audit a result through
