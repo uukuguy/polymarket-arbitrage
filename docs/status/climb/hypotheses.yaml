@@ -6,13 +6,26 @@ hypotheses:
     or pressure on the runtime control-plane reader.
   parent_paradigm: receipt-coupled-business-research-index
   expected_lift: Turn M1's immutable collected artifacts into bounded, pageable, operator-safe
-    business research facts so users can inspect the market and quote universe before final
-    opportunities appear.
+    business research facts so users can inspect the market and quote universe before
+    final opportunities appear.
   cost_h: 6.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-09-01T09:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 72
+    run: 20260901-103145-h-065
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-064
   description: A versioned M1 BusinessOverview snapshot assembled in one bounded read-only
     database transaction can make the CLI and Dashboard present the same lineage-consistent
