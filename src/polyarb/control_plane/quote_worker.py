@@ -372,7 +372,7 @@ class TransactionalQuoteBatchWorker:
                     current=len(batch.token_ids),
                     total=len(batch.token_ids),
                 )
-                artifact, successful_count = await _to_thread(
+                artifact, successful_count, research_rows = await _to_thread(
                     self._build_artifact,
                     batch,
                     books,
@@ -404,6 +404,7 @@ class TransactionalQuoteBatchWorker:
                     quoted_at=self._now(),
                     now=self._now(),
                     terminal=terminal,
+                    research_rows=research_rows,
                 )
                 if not terminal:
                     await _terminal_to_thread(
@@ -509,7 +510,7 @@ class TransactionalQuoteBatchWorker:
         self,
         batch: QuoteBatchSpec,
         books: Any,
-    ) -> tuple[QuoteBatchArtifact, int]:
+    ) -> tuple[QuoteBatchArtifact, int, tuple[tuple[str, Mapping[str, object]], ...]]:
         legs = tuple(
             UniverseLeg(
                 neg_risk_market_id=leg.neg_risk_market_id,
@@ -530,7 +531,9 @@ class TransactionalQuoteBatchWorker:
             quotes=tuple({"token_id": quote.yes_token_id, **asdict(quote)} for quote in quotes),
         )
         artifact = QuoteBatchArtifact.from_bytes(payload)
-        return artifact, successful_count
+        return artifact, successful_count, tuple(
+            (quote.yes_token_id, asdict(quote)) for quote in quotes
+        )
 
 
 class TransactionalQuoteCertifier:

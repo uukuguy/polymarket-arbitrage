@@ -53,6 +53,8 @@ TEMPORARY_POSTURE = "allowed"
 SUPABASE_CREATOR_MEMBERSHIP = ("postgres", True, False, False)
 
 RUNTIME_ALLOWED = {
+    "m1_business_structure_rows": frozenset({"SELECT", "INSERT"}),
+    "m1_business_quote_rows": frozenset({"SELECT", "INSERT"}),
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "m1_runtime_observe_decisions": frozenset({"SELECT", "INSERT"}),
     "m1_job_runtime_state": frozenset({"SELECT", "UPDATE"}),
