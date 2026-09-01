@@ -1646,13 +1646,21 @@ def _runtime_reconcile_once(
         lease_seconds=args.lease_seconds,
         now=now,
     )
+    read_limit = (
+        args.limit + 1
+        if recovery_mode == "observe-only" and target_id is None
+        else args.limit
+    )
     candidates = read_runtime_reconcile_states(
         connection_factory,
         controller_id=selected_controller.controller_id,
         now=now,
-        sample_limit=args.limit,
+        sample_limit=read_limit,
         target_id=target_id,
     )
+    coverage_truncated = recovery_mode == "observe-only" and len(candidates) > args.limit
+    if coverage_truncated:
+        candidates = candidates[: args.limit]
     if target_id is not None:
         candidates = tuple(
             candidate
@@ -1712,6 +1720,7 @@ def _runtime_reconcile_once(
             insert_runtime_observe_decisions(
                 connection_factory,
                 observe_records,
+                coverage_truncated=coverage_truncated,
                 stop_requested=stop_requested,
             )
             observed_decision_count = len(observe_records)

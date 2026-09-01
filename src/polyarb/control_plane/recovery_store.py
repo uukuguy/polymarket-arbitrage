@@ -623,8 +623,8 @@ def read_runtime_reconcile_states(
     if target_id is not None:
         _require_nonempty(target_id=target_id)
     _require_aware(now, "now")
-    if not 1 <= sample_limit <= 100:
-        raise ValueError("sample_limit must be in 1..100")
+    if not 1 <= sample_limit <= 101:
+        raise ValueError("sample_limit must be in 1..101")
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
         _set_recovery_timeouts(cursor)

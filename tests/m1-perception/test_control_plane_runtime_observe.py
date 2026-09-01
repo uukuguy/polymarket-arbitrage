@@ -175,13 +175,25 @@ def test_insert_decision_is_idempotent_and_never_writes_recovery_actions() -> No
 
     assert inserted == record
     sql = "\n".join(connection.sql)
-    assert "SELECT owner_id, lease_epoch, lease_expires_at" in sql
-    assert "FOR SHARE" in sql
-    assert "INSERT INTO public.m1_runtime_observe_decisions" in sql
-    assert "ON CONFLICT (idempotency_key) DO NOTHING" in sql
+    assert "SELECT public.m1_runtime_observe_apply_turn" in sql
+    assert "m1_runtime_observe_decisions" not in sql
     assert "m1_recovery_actions" not in sql
     assert any(query == "SET TRANSACTION READ WRITE" for query in connection.sql)
     assert connection.committed
+    rpc_params = connection.params[-1]
+    assert isinstance(rpc_params, tuple)
+    turn = getattr(rpc_params[0], "obj", rpc_params[0])
+    assert turn["candidates"][0]["payload"] == {
+        "schema": "m1-runtime-observe-current-v1",
+        "target": {"target_type": "job", "target_id": "quote-batch:active"},
+        "decision": {
+            "action_type": record.action_type,
+            "reason_code": record.reason_code,
+            "incident_severity": record.incident_severity,
+            "qualification_breaking": record.qualification_breaking,
+        },
+        "runtime_state_digest": record.runtime_state_digest,
+    }
 
     replay = insert_runtime_observe_decision(_fake_factory(connection), record)
     assert replay == record
@@ -191,7 +203,6 @@ def test_insert_rejects_stale_controller_identity_or_conflicting_idempotency() -
     from polyarb.control_plane.runtime_observe import (
         RuntimeObserveError,
         build_runtime_observe_idle_record,
-        canonical_observe_record_bytes,
         insert_runtime_observe_decision,
     )
 
@@ -210,26 +221,8 @@ def test_insert_rejects_stale_controller_identity_or_conflicting_idempotency() -
         lease_epoch=CONTROLLER_EPOCH + 1,
         lease_expires_at=now + timedelta(seconds=60),
     )
-    with pytest.raises(RuntimeObserveError, match="lease identity"):
+    with pytest.raises(RuntimeObserveError, match="was rejected"):
         insert_runtime_observe_decision(_fake_factory(stale_connection), record)
-
-    payload = dict(record.payload)
-    payload["observed_by"] = "runtime-controller-observe-conflict"
-    digest = sha256(canonical_observe_record_bytes(payload)).hexdigest()
-    conflicting = replace(
-        record,
-        decision_id=f"runtime-observe:{digest}",
-        payload=payload,
-        payload_sha256=digest,
-        decision_digest=digest,
-    )
-    conflict_connection = FakeConnection(
-        rows=[],
-        existing_row=_existing_tuple(record),
-        lease_expires_at=now + timedelta(seconds=60),
-    )
-    with pytest.raises(RuntimeObserveError, match="idempotency"):
-        insert_runtime_observe_decision(_fake_factory(conflict_connection), conflicting)
 
 
 def test_verifier_requires_read_only_window_zero_actions_and_candidate_parity() -> None:
@@ -275,13 +268,15 @@ def test_verifier_requires_read_only_window_zero_actions_and_candidate_parity() 
     assert result.controller_owner_id == CONTROLLER_OWNER_ID
     assert result.controller_epoch == CONTROLLER_EPOCH
     assert result.started_at == anchor_at
-    assert result.decision_count == 3
+    # The bounded status is a current semantic snapshot, not an append-only
+    # sample ledger.  Candidate count describes the latest completed turn.
+    assert result.decision_count == 1
     assert result.recovery_action_count == 0
     assert result.current_candidate_count == 1
-    assert result.latest_decision_digest == records[-1].decision_digest
+    assert result.latest_decision_digest == "bounded-runtime-observe-status"
     sql = "\n".join(connection.sql)
     assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in sql
-    assert "controller_owner_id = %s" in sql
+    assert "m1_runtime_observe_status" in sql
     assert "m1_job_runtime_state" in sql
     assert "COUNT(*)" in sql and "m1_recovery_actions" in sql
     action_queries = [
@@ -373,7 +368,10 @@ def test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismat
 
     with pytest.raises(
         RuntimeObserveVerificationError,
-        match=r"boundary anchor \(available_seconds=0, required_seconds=1800\)",
+        match=(
+            r"window is shorter than minimum duration "
+            r"\(available_seconds=0, required_seconds=1800\)"
+        ),
     ):
         verify_runtime_observe_window(
             _fake_factory(FakeConnection(rows=[_row(record)], recovery_action_count=0)),
@@ -406,7 +404,7 @@ def test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismat
         next_check_at=now + timedelta(seconds=30),
         observed_by=CONTROLLER_OWNER_ID,
     )
-    with pytest.raises(RuntimeObserveVerificationError, match="observe decision is stale"):
+    with pytest.raises(RuntimeObserveVerificationError, match="candidate parity mismatch"):
         verify_runtime_observe_window(
             _fake_factory(
                 FakeConnection(
@@ -452,12 +450,22 @@ def test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismat
         payload_sha256=stale_digest,
         decision_digest=stale_digest,
     )
-    with pytest.raises(RuntimeObserveVerificationError, match="replay"):
+    with pytest.raises(RuntimeObserveVerificationError, match="candidate parity mismatch"):
         verify_runtime_observe_window(
             _fake_factory(
                 FakeConnection(
                     rows=[_row(stale_decision), _row(record)],
                     recovery_action_count=0,
+                    status_override={
+                        "controller_owner_id": CONTROLLER_OWNER_ID,
+                        "controller_epoch": CONTROLLER_EPOCH,
+                        "continuous_since": now - timedelta(seconds=1),
+                        "last_completed_at": now,
+                        "max_gap_seconds": 1,
+                        "candidate_count": 2,
+                        "coverage_truncated": False,
+                        "storage_limited": False,
+                    },
                 )
             ),
             controller_id=CONTROLLER_ID,
@@ -480,7 +488,6 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
         RuntimeObserveError,
         RuntimeObserveVerificationError,
         build_runtime_observe_idle_record,
-        canonical_observe_record_bytes,
         insert_runtime_observe_decision,
         insert_runtime_observe_decisions,
         verify_runtime_observe_window,
@@ -510,6 +517,14 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
                 controller_id=CONTROLLER_ID,
                 controller_owner_id=CONTROLLER_OWNER_ID,
                 controller_epoch=CONTROLLER_EPOCH,
+                observed_at=_now() - timedelta(seconds=75),
+                next_check_at=_now() - timedelta(seconds=45),
+                observed_by=CONTROLLER_OWNER_ID,
+            ),
+            build_runtime_observe_idle_record(
+                controller_id=CONTROLLER_ID,
+                controller_owner_id=CONTROLLER_OWNER_ID,
+                controller_epoch=CONTROLLER_EPOCH,
                 observed_at=_now(),
                 next_check_at=_now() + timedelta(seconds=30),
                 observed_by=CONTROLLER_OWNER_ID,
@@ -523,22 +538,9 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
             return psycopg.connect(dsn)
 
         assert insert_runtime_observe_decisions(counted_connection, records) == tuple(records)
-        assert connection_count == 1
+        assert connection_count == 3
         assert insert_runtime_observe_decisions(counted_connection, records) == tuple(records)
-        assert connection_count == 2
-
-        payload = dict(records[-1].payload)
-        payload["observed_by"] = "runtime-controller-observe-conflict"
-        digest = sha256(canonical_observe_record_bytes(payload)).hexdigest()
-        conflicting = replace(
-            records[-1],
-            decision_id=f"runtime-observe:{digest}",
-            payload=payload,
-            payload_sha256=digest,
-            decision_digest=digest,
-        )
-        with pytest.raises(RuntimeObserveError, match="idempotency"):
-            insert_runtime_observe_decision(lambda: psycopg.connect(dsn), conflicting)
+        assert connection_count == 6
 
         result = verify_runtime_observe_window(
             lambda: psycopg.connect(dsn),
@@ -553,7 +555,7 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
 
         assert result.status == "pass"
         assert result.recovery_action_count == 0
-        assert _observe_row_count(dsn) == 2
+        assert _observe_status_count(dsn) == 1
         assert _recovery_action_count(dsn, controller_id=CONTROLLER_ID) == 0
 
         _insert_job_attempt(dsn, attempt_id="attempt-before")
@@ -603,8 +605,8 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
             owner_id="runtime-controller-next",
             lease_epoch=CONTROLLER_EPOCH + 1,
         )
-        assert _observe_row_count(dsn) == 2
-        with pytest.raises(RuntimeObserveError, match="lease identity"):
+        assert _observe_status_count(dsn) == 1
+        with pytest.raises(RuntimeObserveError, match="was rejected"):
             insert_runtime_observe_decision(
                 lambda: psycopg.connect(dsn),
                 build_runtime_observe_idle_record(
@@ -709,6 +711,20 @@ class FakeCursor:
                 inserted[17],
                 inserted[15],
             )
+        if normalized.startswith("SELECT public.m1_runtime_observe_apply_turn"):
+            assert isinstance(params, tuple)
+            turn = getattr(params[0], "obj", params[0])
+            assert isinstance(turn, dict)
+            if (
+                self.connection.lease_owner_id != turn["controller_owner_id"]
+                or self.connection.lease_epoch != turn["controller_epoch"]
+            ):
+                raise ValueError("runtime observe controller lease identity is stale")
+            self.connection.pending_return = {
+                "candidate_count": len(cast(list[object], turn["candidates"])),
+                "coverage_truncated": False,
+                "storage_limited": False,
+            }
 
     def fetchall(self) -> list[dict[str, Any]]:
         if self.connection.sql[-1].find("FROM public.m1_job_runtime_state") >= 0:
@@ -717,6 +733,31 @@ class FakeCursor:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         last_sql = self.connection.sql[-1]
+        if "m1_runtime_observe_apply_turn" in last_sql:
+            result = self.connection.pending_return
+            self.connection.pending_return = None
+            return {"result": result}  # type: ignore[return-value]
+        if "FROM public.m1_runtime_observe_status" in last_sql:
+            if self.connection.status_override is not None:
+                return self.connection.status_override  # type: ignore[return-value]
+            if not self.connection.rows:
+                return None
+            rows = sorted(self.connection.rows, key=lambda row: row["observed_at"])
+            first, latest = rows[0], rows[-1]
+            gaps = [
+                int((right["observed_at"] - left["observed_at"]).total_seconds())
+                for left, right in zip(rows, rows[1:])
+            ]
+            return {
+                "controller_owner_id": latest["controller_owner_id"],
+                "controller_epoch": latest["controller_epoch"],
+                "continuous_since": first["observed_at"],
+                "last_completed_at": latest["observed_at"],
+                "max_gap_seconds": max(gaps, default=0),
+                "candidate_count": int(latest["decision_kind"] == "decision"),
+                "coverage_truncated": False,
+                "storage_limited": False,
+            }  # type: ignore[return-value]
         if "FROM public.m1_runtime_observe_decisions" in last_sql:
             if self.connection.pending_return is not None:
                 row = self.connection.pending_return
@@ -748,15 +789,17 @@ class FakeConnection:
         lease_epoch: int = CONTROLLER_EPOCH,
         lease_expires_at: datetime | None = None,
         current_candidate_rows: list[dict[str, Any]] | None = None,
+        status_override: dict[str, Any] | None = None,
     ) -> None:
         self.rows = rows
         self.recovery_action_count = recovery_action_count
         self.existing_row = existing_row
-        self.pending_return: tuple[Any, ...] | None = None
+        self.pending_return: object | None = None
         self.lease_owner_id = lease_owner_id
         self.lease_epoch = lease_epoch
         self.lease_expires_at = lease_expires_at or (_now() + timedelta(seconds=60))
         self.current_candidate_rows = current_candidate_rows or []
+        self.status_override = status_override
         self.sql: list[str] = []
         self.params: list[object | None] = []
         self.committed = False
@@ -927,9 +970,9 @@ def _advance_controller_lease(
         connection.commit()
 
 
-def _observe_row_count(dsn: str) -> int:
+def _observe_status_count(dsn: str) -> int:
     with psycopg.connect(dsn) as connection, connection.cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM m1_runtime_observe_decisions")
+        cursor.execute("SELECT COUNT(*) FROM m1_runtime_observe_status")
         row = cursor.fetchone()
         assert row is not None
         return int(row[0])

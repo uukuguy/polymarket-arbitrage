@@ -34,17 +34,6 @@ from .recovery_store import (
 from .runtime_models import RuntimeDeadlineProfile
 
 _MAX_CANONICAL_PAYLOAD_BYTES = 8192
-_EXISTING_ROW_COLUMNS = (
-    "decision_id",
-    "controller_id",
-    "controller_owner_id",
-    "controller_epoch",
-    "payload",
-    "payload_sha256",
-    "decision_digest",
-)
-
-
 class RuntimeObserveError(ValueError):
     """Base class for observe-only runtime evidence errors."""
 
@@ -272,68 +261,120 @@ def build_runtime_observe_idle_record(
     )
 
 
+def _semantic_digest(record: RuntimeObserveDecisionRecord) -> str:
+    """Identify an operational state without volatile observation timestamps."""
+    payload = {
+        "target_type": record.target_type,
+        "target_id": record.target_id,
+        "action_type": record.action_type,
+        "reason_code": record.reason_code,
+        "incident_severity": record.incident_severity,
+        "qualification_breaking": record.qualification_breaking,
+        "decision_kind": record.decision_kind,
+    }
+    return sha256(canonical_observe_record_bytes(payload)).hexdigest()
+
+
+def _turn_from_records(
+    records: Sequence[RuntimeObserveDecisionRecord],
+    *,
+    coverage_truncated: bool = False,
+) -> dict[str, object]:
+    """Translate one same-clock legacy observation batch into the bounded RPC wire form."""
+    batch = tuple(records)
+    if not batch:
+        raise ValueError("runtime observe turn must not be empty")
+    first = batch[0]
+    identity = (first.controller_id, first.controller_owner_id, first.controller_epoch)
+    if any(
+        (record.controller_id, record.controller_owner_id, record.controller_epoch) != identity
+        or record.observed_at != first.observed_at
+        for record in batch[1:]
+    ):
+        raise ValueError("runtime observe turn must share identity and observation clock")
+    candidates: list[dict[str, object]] = []
+    for record in batch:
+        if record.decision_kind == "idle":
+            continue
+        assert record.target_type is not None
+        assert record.target_id is not None
+        payload = {
+            "schema": "m1-runtime-observe-current-v1",
+            "target": {
+                "target_type": record.target_type,
+                "target_id": record.target_id,
+            },
+            "decision": {
+                "action_type": record.action_type,
+                "reason_code": record.reason_code,
+                "incident_severity": record.incident_severity,
+                "qualification_breaking": record.qualification_breaking,
+            },
+            "runtime_state_digest": record.runtime_state_digest,
+        }
+        if len(canonical_observe_record_bytes(payload)) > 2_048:
+            raise RuntimeObserveError("bounded runtime observe candidate payload is too large")
+        candidates.append(
+            {
+                "target_type": record.target_type,
+                "target_id": record.target_id,
+                "semantic_digest": _semantic_digest(record),
+                "action_type": record.action_type,
+                "reason_code": record.reason_code,
+                "severity": record.incident_severity,
+                "qualification_breaking": record.qualification_breaking,
+                "payload": payload,
+            }
+        )
+    return {
+        "controller_id": first.controller_id,
+        "controller_owner_id": first.controller_owner_id,
+        "controller_epoch": first.controller_epoch,
+        "observed_at": first.observed_at.isoformat(),
+        "coverage_truncated": coverage_truncated,
+        "candidates": candidates,
+    }
+
+
+def apply_runtime_observe_turn(
+    connection_factory: ConnectionFactory,
+    records: Sequence[RuntimeObserveDecisionRecord],
+    *,
+    coverage_truncated: bool = False,
+    stop_requested: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Apply one complete bounded semantic turn through the lease-fenced RPC."""
+    turn = _turn_from_records(records, coverage_truncated=coverage_truncated)
+    _raise_if_observe_stopped(stop_requested)
+    with (
+        connection_factory() as connection,
+        connection.cursor(row_factory=dict_row) as cursor,
+    ):
+        cursor.execute("SET TRANSACTION READ WRITE")
+        _set_recovery_timeouts(cursor)
+        _raise_if_observe_stopped(stop_requested)
+        try:
+            cursor.execute(
+                "SELECT public.m1_runtime_observe_apply_turn(%s) AS result",
+                (Jsonb(turn),),
+            )
+        except Exception as error:
+            raise RuntimeObserveError("bounded runtime observe turn was rejected") from error
+        row = cursor.fetchone()
+        if row is None or not isinstance(row["result"], Mapping):
+            raise RuntimeObserveError("bounded runtime observe turn returned no result")
+        _raise_if_observe_stopped(stop_requested)
+        connection.commit()
+        return dict(cast(Mapping[str, object], row["result"]))
+
+
 def insert_runtime_observe_decision(
     connection_factory: ConnectionFactory,
     record: RuntimeObserveDecisionRecord,
 ) -> RuntimeObserveDecisionRecord:
     if type(record) is not RuntimeObserveDecisionRecord:
         raise TypeError("record must be RuntimeObserveDecisionRecord")
-    with connection_factory() as connection, connection.cursor() as cursor:
-        cursor.execute("SET TRANSACTION READ WRITE")
-        if _compare_existing_observe_row(cursor, record):
-            connection.commit()
-            return record
-        _require_current_controller_lease(
-            cursor,
-            controller_id=record.controller_id,
-            controller_owner_id=record.controller_owner_id,
-            controller_epoch=record.controller_epoch,
-            observed_at=record.observed_at,
-            lock=True,
-        )
-        cursor.execute(
-            """
-            INSERT INTO public.m1_runtime_observe_decisions (
-                decision_id, idempotency_key, controller_id, controller_owner_id,
-                controller_epoch, observed_at, decision_kind, target_type, target_id,
-                action_type, reason_code, incident_severity, qualification_breaking,
-                next_check_at, runtime_state_digest, decision_digest, payload,
-                payload_sha256
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s
-            )
-            ON CONFLICT (idempotency_key) DO NOTHING
-            RETURNING decision_id, controller_id, controller_owner_id, controller_epoch,
-                      payload, payload_sha256, decision_digest
-            """,
-            (
-                record.decision_id,
-                record.idempotency_key,
-                record.controller_id,
-                record.controller_owner_id,
-                record.controller_epoch,
-                record.observed_at,
-                record.decision_kind,
-                record.target_type,
-                record.target_id,
-                record.action_type,
-                record.reason_code,
-                record.incident_severity,
-                record.qualification_breaking,
-                record.next_check_at,
-                record.runtime_state_digest,
-                record.decision_digest,
-                Jsonb(record.payload),
-                record.payload_sha256,
-            ),
-        )
-        inserted = cursor.fetchone()
-        if inserted is None and not _compare_existing_observe_row(cursor, record):
-            raise RuntimeObserveError("runtime observe idempotency raced without a row")
-        if inserted is not None:
-            _compare_existing_row(record, _existing_row_mapping(inserted))
-        connection.commit()
+    apply_runtime_observe_turn(connection_factory, (record,))
     return record
 
 
@@ -341,6 +382,7 @@ def insert_runtime_observe_decisions(
     connection_factory: ConnectionFactory,
     records: Sequence[RuntimeObserveDecisionRecord],
     *,
+    coverage_truncated: bool = False,
     stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[RuntimeObserveDecisionRecord, ...]:
     """Persist one bounded observation turn in fixed database round trips."""
@@ -365,91 +407,16 @@ def insert_runtime_observe_decisions(
         for record in batch[1:]
     ):
         raise ValueError("runtime observe batch must share one controller turn identity")
-    keys = [record.idempotency_key for record in batch]
-    if len(set(keys)) != len(keys):
-        raise ValueError("runtime observe batch contains duplicate idempotency keys")
-    rows = [
-        {
-            "decision_id": record.decision_id,
-            "idempotency_key": record.idempotency_key,
-            "controller_id": record.controller_id,
-            "controller_owner_id": record.controller_owner_id,
-            "controller_epoch": record.controller_epoch,
-            "observed_at": record.observed_at.isoformat(),
-            "decision_kind": record.decision_kind,
-            "target_type": record.target_type,
-            "target_id": record.target_id,
-            "action_type": record.action_type,
-            "reason_code": record.reason_code,
-            "incident_severity": record.incident_severity,
-            "qualification_breaking": record.qualification_breaking,
-            "next_check_at": record.next_check_at.isoformat(),
-            "runtime_state_digest": record.runtime_state_digest,
-            "decision_digest": record.decision_digest,
-            "payload": record.payload,
-            "payload_sha256": record.payload_sha256,
-        }
-        for record in batch
-    ]
-    with (
-        connection_factory() as connection,
-        connection.cursor(row_factory=dict_row) as cursor,
-    ):
-        cursor.execute("SET TRANSACTION READ WRITE")
-        _set_recovery_timeouts(cursor)
-        _raise_if_observe_stopped(stop_requested)
-        _require_current_controller_lease(
-            cursor,
-            controller_id=identity[0],
-            controller_owner_id=identity[1],
-            controller_epoch=identity[2],
-            observed_at=max(record.observed_at for record in batch),
-            lock=True,
+    grouped: dict[datetime, list[RuntimeObserveDecisionRecord]] = {}
+    for record in batch:
+        grouped.setdefault(record.observed_at, []).append(record)
+    for same_clock in grouped.values():
+        apply_runtime_observe_turn(
+            connection_factory,
+            same_clock,
+            coverage_truncated=coverage_truncated,
+            stop_requested=stop_requested,
         )
-        _raise_if_observe_stopped(stop_requested)
-        cursor.execute(
-            """
-            INSERT INTO public.m1_runtime_observe_decisions (
-                decision_id, idempotency_key, controller_id, controller_owner_id,
-                controller_epoch, observed_at, decision_kind, target_type, target_id,
-                action_type, reason_code, incident_severity, qualification_breaking,
-                next_check_at, runtime_state_digest, decision_digest, payload,
-                payload_sha256
-            )
-            SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
-                   controller_epoch, observed_at, decision_kind, target_type, target_id,
-                   action_type, reason_code, incident_severity, qualification_breaking,
-                   next_check_at, runtime_state_digest, decision_digest, payload,
-                   payload_sha256
-            FROM jsonb_to_recordset(%s::jsonb) AS item(
-                decision_id text, idempotency_key text, controller_id text,
-                controller_owner_id text, controller_epoch bigint,
-                observed_at timestamptz, decision_kind text, target_type text,
-                target_id text, action_type text, reason_code text,
-                incident_severity text, qualification_breaking boolean,
-                next_check_at timestamptz, runtime_state_digest text,
-                decision_digest text, payload jsonb, payload_sha256 text
-            )
-            ON CONFLICT (idempotency_key) DO NOTHING
-            """,
-            (Jsonb(rows),),
-        )
-        _raise_if_observe_stopped(stop_requested)
-        cursor.execute(
-            """
-            SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
-                   controller_epoch, payload, payload_sha256, decision_digest
-            FROM public.m1_runtime_observe_decisions
-            WHERE idempotency_key = ANY(%s)
-            """,
-            (keys,),
-        )
-        persisted = {str(row["idempotency_key"]): row for row in cursor.fetchall()}
-        if set(persisted) != set(keys):
-            raise RuntimeObserveError("runtime observe batch insert returned incomplete rows")
-        for record in batch:
-            _compare_existing_row(record, persisted[record.idempotency_key])
-        connection.commit()
     return batch
 
 
@@ -481,7 +448,6 @@ def verify_runtime_observe_window(
         ("sample_limit", sample_limit),
     ):
         _require_positive_int(name, value)
-    start_at = now - timedelta(seconds=minimum_seconds)
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         _set_recovery_timeouts(cursor)
@@ -498,30 +464,15 @@ def verify_runtime_observe_window(
             raise RuntimeObserveVerificationError(str(exc)) from exc
         cursor.execute(
             """
-            SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
-                   controller_epoch, observed_at, decision_kind, target_type, target_id,
-                   action_type, reason_code, incident_severity, qualification_breaking,
-                   next_check_at, runtime_state_digest, decision_digest, payload,
-                   payload_sha256
-            FROM (
-                SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
-                       controller_epoch, observed_at, decision_kind, target_type, target_id,
-                       action_type, reason_code, incident_severity,
-                       qualification_breaking, next_check_at, runtime_state_digest,
-                       decision_digest, payload, payload_sha256
-                FROM public.m1_runtime_observe_decisions
-                WHERE controller_id = %s
-                  AND controller_owner_id = %s
-                  AND controller_epoch = %s
-                  AND observed_at <= %s
-                ORDER BY observed_at DESC, decision_id DESC
-                LIMIT %s
-            ) AS bounded_observe_decisions
-            ORDER BY observed_at ASC, decision_id ASC
+            SELECT controller_owner_id, controller_epoch, continuous_since,
+                   last_completed_at, max_gap_seconds, candidate_count,
+                   coverage_truncated, storage_limited
+            FROM public.m1_runtime_observe_status
+            WHERE controller_id = %s
             """,
-            (controller_id, controller_owner_id, controller_epoch, now, sample_limit),
+            (controller_id,),
         )
-        rows = cursor.fetchall()
+        status_row = cursor.fetchone()
         cursor.execute(
             """
             SELECT COUNT(*)
@@ -539,14 +490,14 @@ def verify_runtime_observe_window(
             """,
             (
                 controller_id,
-                start_at,
+                now - timedelta(seconds=minimum_seconds),
                 now,
-                start_at,
+                now - timedelta(seconds=minimum_seconds),
                 now,
-                start_at,
+                now - timedelta(seconds=minimum_seconds),
                 now,
-                start_at,
-                start_at,
+                now - timedelta(seconds=minimum_seconds),
+                now - timedelta(seconds=minimum_seconds),
             ),
         )
         action_row = cursor.fetchone()
@@ -559,78 +510,49 @@ def verify_runtime_observe_window(
     recovery_action_count = _count_from_row(action_row)
     if recovery_action_count != 0:
         raise RuntimeObserveVerificationError("observe-only window contains recovery actions")
-    records = tuple(_record_from_row(row) for row in rows)
-    if not records:
-        raise RuntimeObserveVerificationError("observe-only window has no decisions")
-    for record in records:
-        if (
-            record.controller_id != controller_id
-            or record.controller_owner_id != controller_owner_id
-            or record.controller_epoch != controller_epoch
-        ):
-            raise RuntimeObserveVerificationError("observe-only evidence mixes controller identity")
-    latest = records[-1]
-    earliest = records[0]
-    duration = int((latest.observed_at - earliest.observed_at).total_seconds())
-    if earliest.observed_at > start_at:
-        raise RuntimeObserveVerificationError(
-            "observe-only window lacks boundary anchor "
-            f"(available_seconds={duration}, required_seconds={minimum_seconds})"
-        )
+    if status_row is None:
+        raise RuntimeObserveVerificationError("observe-only status is unavailable")
+    status = _mapping(status_row, "runtime observe status")
+    if (
+        str(status["controller_owner_id"]) != controller_owner_id
+        or _object_to_int(status["controller_epoch"]) != controller_epoch
+    ):
+        raise RuntimeObserveVerificationError("observe-only status mixes controller identity")
+    continuous_since = _aware(status["continuous_since"], "continuous_since")
+    latest_observed_at = _aware(status["last_completed_at"], "last_completed_at")
+    duration = int((latest_observed_at - continuous_since).total_seconds())
     if duration < minimum_seconds:
         raise RuntimeObserveVerificationError(
             "observe-only window is shorter than minimum duration "
             f"(available_seconds={duration}, required_seconds={minimum_seconds})"
         )
-    freshness = int((now - latest.observed_at).total_seconds())
+    freshness = int((now - latest_observed_at).total_seconds())
     if freshness > max_freshness_seconds:
-        raise RuntimeObserveVerificationError("observe-only window latest decision is stale")
-    observed_gaps = [
-        int((right.observed_at - left.observed_at).total_seconds())
-        for left, right in zip(records, records[1:])
-    ]
-    largest_gap = max(observed_gaps, default=0)
+        raise RuntimeObserveVerificationError("observe-only window latest completion is stale")
+    largest_gap = _object_to_int(status["max_gap_seconds"])
     if largest_gap > max_gap_seconds:
-        raise RuntimeObserveVerificationError("observe-only decision gap exceeded maximum")
-    _verify_historical_replay(records)
-    _verify_current_candidate_parity(
-        records,
-        current_candidates,
-        now=now,
-        max_age_seconds=max_freshness_seconds,
-    )
+        raise RuntimeObserveVerificationError("observe-only completion gap exceeded maximum")
+    if bool(status["coverage_truncated"]):
+        raise RuntimeObserveVerificationError("observe-only candidate coverage is truncated")
+    if bool(status["storage_limited"]):
+        raise RuntimeObserveVerificationError("observe-only storage limit is active")
+    if _object_to_int(status["candidate_count"]) != len(current_candidates):
+        raise RuntimeObserveVerificationError("observe-only current candidate parity mismatch")
     return RuntimeObserveVerification(
         status="pass",
         controller_id=controller_id,
         controller_owner_id=controller_owner_id,
         controller_epoch=controller_epoch,
-        started_at=earliest.observed_at,
-        latest_observed_at=latest.observed_at,
+        started_at=continuous_since,
+        latest_observed_at=latest_observed_at,
         duration_seconds=duration,
-        decision_count=len(records),
-        idle_count=sum(1 for record in records if record.decision_kind == "idle"),
+        decision_count=_object_to_int(status["candidate_count"]),
+        idle_count=int(_object_to_int(status["candidate_count"]) == 0),
         recovery_action_count=recovery_action_count,
         current_candidate_count=len(current_candidates),
         max_gap_seconds=largest_gap,
-        latest_decision_digest=latest.decision_digest,
+        latest_decision_digest="bounded-runtime-observe-status",
     )
-
-
-def _compare_existing_observe_row(cursor: Any, record: RuntimeObserveDecisionRecord) -> bool:
-    cursor.execute(
-        """
-        SELECT decision_id, controller_id, controller_owner_id, controller_epoch,
-               payload, payload_sha256, decision_digest
-        FROM public.m1_runtime_observe_decisions
-        WHERE idempotency_key = %s
-        """,
-        (record.idempotency_key,),
-    )
-    row = cursor.fetchone()
-    if row is None:
-        return False
-    _compare_existing_row(record, _existing_row_mapping(row))
-    return True
 
 
 def _require_current_controller_lease(
@@ -664,88 +586,6 @@ def _require_current_controller_lease(
         raise RuntimeObserveError("runtime observe controller lease identity is stale")
     if _aware(lease_expires_at, "lease_expires_at") < observed_at:
         raise RuntimeObserveError("runtime observe controller lease is expired")
-
-
-def _compare_existing_row(
-    record: RuntimeObserveDecisionRecord,
-    existing: Mapping[str, object],
-) -> None:
-    existing_payload = _mapping(existing["payload"], "payload")
-    existing_canonical = canonical_observe_record_bytes(existing_payload)
-    if (
-        existing["decision_id"] != record.decision_id
-        or existing["controller_id"] != record.controller_id
-        or existing["controller_owner_id"] != record.controller_owner_id
-        or _object_to_int(existing["controller_epoch"]) != record.controller_epoch
-        or existing["payload_sha256"] != record.payload_sha256
-        or existing["decision_digest"] != record.decision_digest
-        or sha256(existing_canonical).hexdigest() != record.payload_sha256
-        or existing_canonical != canonical_observe_record_bytes(record.payload)
-    ):
-        raise RuntimeObserveError("runtime observe idempotency key conflicts")
-
-
-def _existing_row_mapping(row: object) -> Mapping[str, object]:
-    if isinstance(row, Mapping):
-        return cast(Mapping[str, object], row)
-    if isinstance(row, Sequence):
-        return dict(zip(_EXISTING_ROW_COLUMNS, row, strict=True))
-    raise RuntimeObserveError("existing observe row has unsupported shape")
-
-
-def _verify_historical_replay(records: tuple[RuntimeObserveDecisionRecord, ...]) -> None:
-    for record in records:
-        _verify_record_columns_match_payload(record)
-        if record.decision_kind == "idle":
-            continue
-        state_payload = _mapping(record.payload.get("runtime_state"), "runtime_state")
-        replay = RuntimeReconciler().evaluate(
-            _runtime_state_from_payload(state_payload),
-            now=record.observed_at,
-        )
-        if (
-            (None if replay.action is None else replay.action.value) != record.action_type
-            or replay.reason_code != record.reason_code
-            or replay.incident_severity != record.incident_severity
-            or replay.qualification_breaking != record.qualification_breaking
-            or replay.next_check_at != record.next_check_at
-        ):
-            raise RuntimeObserveVerificationError("RuntimeReconciler replay mismatch")
-
-
-def _verify_current_candidate_parity(
-    records: tuple[RuntimeObserveDecisionRecord, ...],
-    candidates: tuple[RuntimeReconcileCandidate, ...],
-    *,
-    now: datetime,
-    max_age_seconds: int,
-) -> None:
-    latest_by_target: dict[tuple[str, str], RuntimeObserveDecisionRecord] = {}
-    for record in records:
-        if record.target_type is not None and record.target_id is not None:
-            latest_by_target[(record.target_type, record.target_id)] = record
-    if not candidates:
-        if records[-1].decision_kind != "idle":
-            raise RuntimeObserveVerificationError("current candidate parity requires idle record")
-        return
-    for candidate in candidates:
-        key = (candidate.target_type, candidate.target_id)
-        observed = latest_by_target.get(key)
-        if observed is None:
-            raise RuntimeObserveVerificationError(
-                "current candidate parity missing observe decision"
-            )
-        age_seconds = int((now - observed.observed_at).total_seconds())
-        if age_seconds > max_age_seconds:
-            raise RuntimeObserveVerificationError("current candidate observe decision is stale")
-        replay = RuntimeReconciler().evaluate(candidate.runtime_state, now=now)
-        if (
-            (None if replay.action is None else replay.action.value) != observed.action_type
-            or replay.reason_code != observed.reason_code
-            or replay.incident_severity != observed.incident_severity
-            or replay.qualification_breaking != observed.qualification_breaking
-        ):
-            raise RuntimeObserveVerificationError("current candidate parity mismatch")
 
 
 def _read_runtime_reconcile_states_in_snapshot(
@@ -856,72 +696,6 @@ def _read_runtime_reconcile_states_in_snapshot(
             )
         )
     return tuple(candidates)
-
-
-def _record_from_row(row: Mapping[str, object]) -> RuntimeObserveDecisionRecord:
-    return RuntimeObserveDecisionRecord(
-        decision_id=str(row["decision_id"]),
-        idempotency_key=str(row["idempotency_key"]),
-        controller_id=str(row["controller_id"]),
-        controller_owner_id=str(row["controller_owner_id"]),
-        controller_epoch=_object_to_int(row["controller_epoch"]),
-        observed_at=cast(datetime, row["observed_at"]),
-        decision_kind=cast(Literal["decision", "idle"], row["decision_kind"]),
-        target_type=cast(Literal["job", "circuit"] | None, row["target_type"]),
-        target_id=cast(str | None, row["target_id"]),
-        action_type=cast(str | None, row["action_type"]),
-        reason_code=str(row["reason_code"]),
-        incident_severity=cast(Literal["warning", "critical"], row["incident_severity"]),
-        qualification_breaking=bool(row["qualification_breaking"]),
-        next_check_at=cast(datetime, row["next_check_at"]),
-        runtime_state_digest=cast(str | None, row["runtime_state_digest"]),
-        decision_digest=str(row["decision_digest"]),
-        payload=cast(Mapping[str, object], row["payload"]),
-        payload_sha256=str(row["payload_sha256"]),
-    )
-
-
-def _verify_record_columns_match_payload(record: RuntimeObserveDecisionRecord) -> None:
-    decision = _mapping(record.payload.get("decision"), "decision")
-    target = record.payload.get("target")
-    if record.payload.get("controller_id") != record.controller_id:
-        raise RuntimeObserveVerificationError("controller_id column does not match payload")
-    if record.payload.get("controller_owner_id") != record.controller_owner_id:
-        raise RuntimeObserveVerificationError("controller_owner_id column does not match payload")
-    if _object_to_int(record.payload.get("controller_epoch", 0)) != record.controller_epoch:
-        raise RuntimeObserveVerificationError("controller_epoch column does not match payload")
-    if record.payload.get("decision_kind") != record.decision_kind:
-        raise RuntimeObserveVerificationError("decision kind column does not match payload")
-    if _parse_dt(str(record.payload.get("observed_at"))) != record.observed_at:
-        raise RuntimeObserveVerificationError("observed_at column does not match payload")
-    action = decision.get("action_type")
-    if action != record.action_type:
-        raise RuntimeObserveVerificationError("decision action column does not match payload")
-    if decision.get("reason_code") != record.reason_code:
-        raise RuntimeObserveVerificationError("decision reason column does not match payload")
-    if decision.get("incident_severity") != record.incident_severity:
-        raise RuntimeObserveVerificationError("decision severity column does not match payload")
-    if decision.get("qualification_breaking") != record.qualification_breaking:
-        raise RuntimeObserveVerificationError(
-            "decision qualification column does not match payload"
-        )
-    if _parse_dt(str(decision.get("next_check_at"))) != record.next_check_at:
-        raise RuntimeObserveVerificationError(
-            "decision next_check_at column does not match payload"
-        )
-    if record.decision_kind == "idle":
-        if target is not None:
-            raise RuntimeObserveVerificationError("idle record target payload must be null")
-        return
-    target_payload = _mapping(target, "target")
-    if (
-        target_payload.get("target_type") != record.target_type
-        or target_payload.get("target_id") != record.target_id
-    ):
-        raise RuntimeObserveVerificationError("target columns do not match payload")
-    state_payload = _mapping(record.payload.get("runtime_state"), "runtime_state")
-    if _digest(state_payload) != record.runtime_state_digest:
-        raise RuntimeObserveVerificationError("runtime state digest mismatch")
 
 
 def _runtime_state_payload(state: RecoveryRuntimeState) -> dict[str, object]:

@@ -160,6 +160,7 @@ class FakeRoleFactory:
                     "public.m1_project_incident_qualification_ingress()",
                     "public.m1_project_recovery_qualification_ingress()",
                     "public.m1_project_runtime_qualification_ingress()",
+                    "public.m1_runtime_observe_apply_turn(jsonb)",
                     "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)",
                     "public.m1_record_qualification_ingress(text,text,text,timestamptz,jsonb)",
                     "public.m1_verify_qualification_certificate_insert()",
@@ -393,6 +394,8 @@ def _allowed_table_names(profile: str) -> Iterable[str]:
 
 
 def _allowed_functions(profile: str) -> Iterable[str]:
+    if profile == "runtime-controller":
+        return ("public.m1_runtime_observe_apply_turn(jsonb)",)
     if profile != "qualification-worker":
         return ()
     return (

@@ -56,7 +56,10 @@ RUNTIME_ALLOWED = {
     "m1_business_structure_rows": frozenset({"SELECT", "INSERT"}),
     "m1_business_quote_rows": frozenset({"SELECT", "INSERT"}),
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
-    "m1_runtime_observe_decisions": frozenset({"SELECT", "INSERT"}),
+    # Bounded runtime observation is mutated only through its security-definer
+    # turn function.  The controller reads the one-row status for its
+    # observe-only verification window.
+    "m1_runtime_observe_status": frozenset({"SELECT"}),
     "m1_job_runtime_state": frozenset({"SELECT", "UPDATE"}),
     "m1_jobs": frozenset({"SELECT", "UPDATE"}),
     "m1_job_circuits": frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -104,6 +107,7 @@ HARDENED_TRIGGER_FUNCTIONS = (
     "public.m1_project_recovery_qualification_ingress()",
     "public.m1_verify_qualification_certificate_insert()",
 )
+RUNTIME_OBSERVE_TURN_FUNCTION = "public.m1_runtime_observe_apply_turn(jsonb)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +343,7 @@ ROLE_CONTRACTS = {
         capability_role="m1_runtime_controller_capability",
         required_table_privileges=_RUNTIME_REQUIRED,
         forbidden_table_privileges=_RUNTIME_FORBIDDEN,
+        required_function_privileges=(RUNTIME_OBSERVE_TURN_FUNCTION,),
         forbidden_function_privileges=(
             GENERAL_INGRESS_FUNCTION,
             FRESHNESS_FUNCTION,
