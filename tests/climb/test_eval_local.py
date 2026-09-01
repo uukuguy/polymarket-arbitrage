@@ -65,6 +65,26 @@ def test_atomic_business_research_profile_selects_business_contract_gates() -> N
     assert ["make", "docs-m1-check"] in commands.values()
 
 
+def test_receipt_coupled_business_research_index_profile_selects_chain_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "receipt-coupled-business-research-index"}
+    )
+
+    assert tuple(commands) == ("planning", "unit", "integration", "cli", "restart")
+    flattened = [argument for command in commands.values() for argument in command]
+    for required in (
+        "tests/alembic/test_040.py",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "tests/m1-perception/test_control_plane_api.py",
+        "tests/m1-perception/test_transactional_structure_worker.py",
+        "tests/m1-perception/test_transactional_quote_worker.py",
+    ):
+        assert required in flattened
+    assert commands["planning"] == ["make", "planning-status"]
+    assert commands["cli"] == ["make", "dashboard-typecheck"]
+    assert commands["restart"] == ["make", "docs-m1-check"]
+
+
 def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
     commands = eval_local.gate_commands_for({"paradigm": "opportunity-feed-chain-truth"})
 
