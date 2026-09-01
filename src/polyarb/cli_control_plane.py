@@ -2692,6 +2692,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(result, as_json=args.json)
             return 0
         snapshot = control_plane.operational_snapshot(sample_limit=args.limit)
+        capacity_reader = getattr(control_plane, "database_capacity", None)
+        if callable(capacity_reader):
+            try:
+                snapshot["database_capacity"] = capacity_reader()
+            except (OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
+                snapshot["database_capacity"] = {
+                    "state": "unavailable",
+                    "reason_code": "database-size-observation-unavailable",
+                }
         _write({"status": "ok", **snapshot}, as_json=args.json)
         return 0
     except RuntimeObserveVerificationError as error:

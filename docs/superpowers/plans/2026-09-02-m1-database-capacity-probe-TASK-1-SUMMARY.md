@@ -8,9 +8,10 @@ snapshot succeeds; a timeout or provider failure remains a typed
 `database-size-observation-unavailable` value rather than cancelling operator
 truth.
 
-**Operator surface:** `/perception/control-plane` and `/control-plane` now
-show the verdict and the largest relations when available. The business pages
-remain independent of this runtime diagnostic.
+**Operator surface:** `/perception/control-plane`, `/control-plane`, and
+`make control-plane-status` now show the verdict and the largest relations
+when available. The business pages remain independent of this runtime
+diagnostic.
 
 **Verification:** focused Python capacity/API/Dashboard-contract tests,
 Dashboard TypeScript typecheck, and a read-only live probe against the new M1

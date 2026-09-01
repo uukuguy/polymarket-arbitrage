@@ -95,6 +95,40 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
     assert bootstrap_params == ("pg_catalog,public", "5000ms", "1000ms")
 
 
+def test_status_merges_the_independent_capacity_probe(monkeypatch, capsys) -> None:
+    """The daily Make path must expose the same capacity fact as the API."""
+    from polyarb import cli_control_plane
+
+    class ControlPlane:
+        def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
+            assert sample_limit == 20
+            return {
+                "database_capacity": {
+                    "state": "unavailable",
+                    "reason_code": "database-size-observation-unavailable",
+                }
+            }
+
+        def database_capacity(self) -> dict[str, object]:
+            return {
+                "state": "healthy",
+                "used_bytes": 10,
+                "budget_bytes": 100,
+                "used_percent": 10,
+                "reason_code": "within-budget",
+                "largest_relations": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+
+    assert cli_control_plane.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["database_capacity"]["state"] == "healthy"
+
+
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
