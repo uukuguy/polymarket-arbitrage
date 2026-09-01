@@ -2323,6 +2323,10 @@ def test_quote_factory_disables_hidden_r2_retries(monkeypatch, settings_for_test
         def __init__(self, **_kwargs) -> None:
             pass
 
+    class Certifier:
+        def __init__(self, **kwargs) -> None:
+            captured["certifier"] = kwargs
+
     def build_client(*_args, **kwargs):
         captured.update(kwargs)
         return object()
@@ -2331,7 +2335,7 @@ def test_quote_factory_disables_hidden_r2_retries(monkeypatch, settings_for_test
     monkeypatch.setattr(cli_control_plane, "_build_client", build_client)
     monkeypatch.setattr(cli_control_plane, "ClobReaderClient", lambda _settings: object())
     monkeypatch.setattr(cli_control_plane, "TransactionalQuoteBatchWorker", Worker)
-    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteCertifier", Worker)
+    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteCertifier", Certifier)
 
     cli_control_plane._transactional_quote_workers(
         cast(PostgresControlPlane, object()), worker_id="quote-worker"
@@ -2343,6 +2347,7 @@ def test_quote_factory_disables_hidden_r2_retries(monkeypatch, settings_for_test
         captured["config"].connect_timeout + captured["config"].read_timeout
         <= policy.provider_timeout_seconds
     )
+    assert captured["certifier"]["lease_seconds"] == 120
 
 
 def test_quote_factory_builds_distinct_lanes_from_the_existing_clob_bound(

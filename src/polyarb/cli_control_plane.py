@@ -1212,6 +1212,9 @@ def _transactional_quote_workers(
             control_plane=control_plane,
             worker_id=f"{worker_id}:certifier",
             now=lambda: datetime.now(UTC),
+            # Publication prunes a completed generation in the same fenced
+            # transaction. It can legitimately outlast a single batch lease.
+            lease_seconds=120,
         ),
     )
 
