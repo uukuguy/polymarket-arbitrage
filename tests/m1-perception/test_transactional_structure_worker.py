@@ -59,7 +59,16 @@ def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> Non
     assert event_rows == (
         (
             "events:event-a",
-            {"component": "events", "source_cursor": "event-a", "row": {"id": "event-a"}},
+            {
+                "component": "events",
+                "source_cursor": "event-a",
+                "event_id": "event-a",
+                "title": None,
+                "slug": None,
+                "active": None,
+                "closed": None,
+                "end_date": None,
+            },
         ),
     )
     assert market_rows == ()
@@ -69,7 +78,11 @@ def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> Non
             {
                 "component": "group_truth",
                 "source_cursor": "group-a",
-                "row": {"neg_risk_market_id": "group-a"},
+                "neg_risk_market_id": "group-a",
+                "event_id": None,
+                "complete": None,
+                "supported": None,
+                "reason": None,
             },
         ),
     )

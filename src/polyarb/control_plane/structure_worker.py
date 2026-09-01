@@ -1107,14 +1107,43 @@ def _business_structure_research_rows(
     """Keep a compact, browseable Structure index; R2 remains the full artifact."""
     if component not in _BUSINESS_STRUCTURE_INDEX_COMPONENTS:
         return ()
-    return tuple(
-        (
-            f"{component}:{_row_cursor(component, row)}",
-            {
+    def compact(row: Mapping[str, object]) -> Mapping[str, object]:
+        cursor = _row_cursor(component, row)
+        if component == "events":
+            return {
                 "component": component,
-                "source_cursor": _row_cursor(component, row),
-                "row": row,
-            },
-        )
-        for row in rows
-    )
+                "source_cursor": cursor,
+                "event_id": str(row["id"]),
+                "title": _compact_text(row, "title", "question"),
+                "slug": _compact_text(row, "slug"),
+                "active": _compact_bool(row, "active"),
+                "closed": _compact_bool(row, "closed"),
+                "end_date": _compact_text(row, "end_date", "endDate"),
+            }
+        return {
+            "component": component,
+            "source_cursor": cursor,
+            "neg_risk_market_id": str(row["neg_risk_market_id"]),
+            "event_id": _compact_text(row, "event_id"),
+            "complete": _compact_bool(row, "complete", "is_complete"),
+            "supported": _compact_bool(row, "supported", "is_supported"),
+            "reason": _compact_text(row, "reason", "reason_code"),
+        }
+
+    return tuple((f"{component}:{_row_cursor(component, row)}", compact(row)) for row in rows)
+
+
+def _compact_text(row: Mapping[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str):
+            return value[:256]
+    return None
+
+
+def _compact_bool(row: Mapping[str, object], *keys: str) -> bool | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool):
+            return value
+    return None

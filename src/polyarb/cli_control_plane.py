@@ -104,6 +104,7 @@ from polyarb.control_plane.soak_evidence import (
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     canonical_structure_bundle_bytes,
+    parse_structure_range_bytes,
     upload_structure_bundle_artifact,
 )
 from polyarb.control_plane.structure_shadow import (
@@ -121,6 +122,7 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
     TransactionalStructureRangePool,
     TransactionalStructureWorker,
+    _business_structure_research_rows,
 )
 from polyarb.control_plane.watchdog import (
     CloudUsageGate,
@@ -230,6 +232,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     structure_once.add_argument("--worker-id", default="structure-operator-once")
     structure_once.add_argument("--json", action="store_true")
+    structure_index_backfill = subcommands.add_parser(
+        "structure-index-backfill",
+        help="rebuild the compact Structure research index from published authenticated R2 ranges",
+    )
+    structure_index_backfill.add_argument("--enable", action="store_true")
+    structure_index_backfill.add_argument("--generation-key", required=True)
+    structure_index_backfill.add_argument("--json", action="store_true")
     structure_source_once = subcommands.add_parser(
         "structure-source-once",
         help=(
@@ -1436,6 +1445,48 @@ def _structure_object_client() -> tuple[Any, str]:
     )
 
 
+def _backfill_published_structure_index(
+    control_plane: PostgresControlPlane, *, generation_key: str
+) -> dict[str, object]:
+    """Reconstruct compact research rows from immutable current-generation artifacts."""
+    artifacts = control_plane.published_structure_range_artifacts(generation_key=generation_key)
+    if not artifacts:
+        raise RuntimeError("published-structure-range-artifacts-unavailable")
+    object_client, bucket = _structure_object_client()
+    retired_rows = control_plane.retire_superseded_structure_research_rows(
+        generation_key=generation_key
+    )
+    staged_rows = 0
+    for expected_component, artifact_key, artifact_digest in artifacts:
+        response = object_client.get_object(Bucket=bucket, Key=artifact_key)
+        body = response.get("Body")
+        if body is None or not hasattr(body, "read"):
+            raise RuntimeError("published-structure-range-body-unavailable")
+        payload = body.read()
+        if not isinstance(payload, bytes):
+            raise RuntimeError("published-structure-range-body-invalid")
+        (_bundle_digest, component, _range_digest), rows = parse_structure_range_bytes(
+            payload, expected_sha256=artifact_digest
+        )
+        if component != expected_component:
+            raise RuntimeError("published-structure-range-component-mismatch")
+        research_rows = _business_structure_research_rows(component, rows)
+        if research_rows:
+            control_plane.stage_business_structure_rows(
+                generation_key=generation_key, rows=research_rows
+            )
+            staged_rows += len(research_rows)
+    page = control_plane.business_structure_page(generation_key=generation_key, limit=1, after="")
+    return {
+        "status": "ok",
+        "generation_key": generation_key,
+        "artifact_count": len(artifacts),
+        "staged_rows": staged_rows,
+        "retired_unpublished_rows": retired_rows,
+        "indexed_record_count": page.get("indexed_record_count"),
+    }
+
+
 async def _run_scheduler_service(
     scheduler: TransactionalControlPlaneScheduler | TransactionalWorkerLoop,
     *,
@@ -2446,6 +2497,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "control_plane": database,
                     "r2": {"bucket": bucket, "reachable": True},
                 },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-index-backfill":
+            _write(
+                _backfill_published_structure_index(
+                    control_plane, generation_key=args.generation_key
+                ),
                 as_json=args.json,
             )
             return 0

@@ -9137,6 +9137,44 @@ class PostgresControlPlane:
                     (generation_key, entity_id, Jsonb(dict(payload))),
                 )
 
+    def published_structure_range_artifacts(
+        self, *, generation_key: str
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return authenticated range artifacts for one published Structure generation."""
+        self._validate_nonempty(generation_key=generation_key)
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT receipt.component, receipt.artifact_key, receipt.artifact_digest
+                   FROM m1_generation_manifests AS manifest
+                   JOIN m1_structure_range_receipts AS receipt
+                     ON receipt.job_key LIKE manifest.generation_key || ':normalize:%%'
+                   WHERE manifest.generation_key = %s
+                     AND receipt.component IN ('events', 'group_truth')
+                   ORDER BY receipt.component, receipt.artifact_key""",
+                (generation_key,),
+            )
+            return tuple(
+                (str(row["component"]), str(row["artifact_key"]), str(row["artifact_digest"]))
+                for row in cursor.fetchall()
+            )
+
+    def retire_superseded_structure_research_rows(self, *, generation_key: str) -> int:
+        """Remove only unpublished Structure index rows before a safe backfill."""
+        self._validate_nonempty(generation_key=generation_key)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                """DELETE FROM m1_business_structure_rows AS research
+                   WHERE research.generation_key <> %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM m1_generation_manifests AS manifest
+                         WHERE manifest.generation_key = research.generation_key
+                     )""",
+                (generation_key,),
+            )
+            return cursor.rowcount
+
     def business_structure_page(
         self, *, generation_key: str | None, limit: int, after: str
     ) -> dict[str, object]:
@@ -9149,7 +9187,12 @@ class PostgresControlPlane:
                 """SELECT manifest.generation_key, manifest.record_count,
                           (SELECT count(*) FROM m1_business_structure_rows AS research
                            WHERE research.generation_key = manifest.generation_key)
-                              AS indexed_record_count
+                              AS indexed_record_count,
+                          (SELECT COALESCE(sum(receipt.record_count), 0)
+                           FROM m1_structure_range_receipts AS receipt
+                           WHERE receipt.job_key LIKE manifest.generation_key || ':normalize:%%'
+                             AND receipt.component IN ('events', 'group_truth'))
+                              AS expected_indexed_record_count
                    FROM m1_generation_manifests AS manifest
                    WHERE manifest.generation_key LIKE 'structure:' || chr(37)
                    ORDER BY manifest.published_at DESC, manifest.generation_key DESC
@@ -9163,7 +9206,8 @@ class PostgresControlPlane:
                 return {"schema_version": "m1.business-research-page.v1", "product": "structure", "status": "unavailable", "reason_code": "generation-not-current", "items": [], "limit": limit, "next_after": None}
             source_record_count = int(pointer["record_count"])
             indexed_record_count = int(pointer["indexed_record_count"])
-            if source_record_count > 0 and indexed_record_count == 0:
+            expected_indexed_record_count = int(pointer["expected_indexed_record_count"])
+            if indexed_record_count < expected_indexed_record_count:
                 return {
                     "schema_version": "m1.business-research-page.v1",
                     "product": "structure",
@@ -9172,6 +9216,7 @@ class PostgresControlPlane:
                     "generation_key": current,
                     "source_record_count": source_record_count,
                     "indexed_record_count": indexed_record_count,
+                    "expected_indexed_record_count": expected_indexed_record_count,
                     "items": [],
                     "limit": limit,
                     "next_after": None,
