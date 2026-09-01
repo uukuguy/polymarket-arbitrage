@@ -13034,3 +13034,29 @@ trade from this observation path.
 [NEXT] Produce scoped revision-040 migration and six-app rollout proof, then
 observe a newly certified Structure→Quote successor generation through the
 research pages.
+
+### SESSION 397 — 2026-09-02 (H-066 recovery closure evidence)
+
+- [LIVE BLOCKER] Supabase project `polyarb` remains read-only: the provider UI
+  reports `Database is no longer accepting write requests`, Disk 95%, and the
+  Free organization grace period is over. Infrastructure controls are disabled
+  and require a Pro-plan upgrade. No billing change, destructive reset, or
+  unauthorised provider action was taken.
+- [LIVE FACTS] The bounded control-plane read remains available after removing
+  a failed inline database-size probe. It reports 13,766 pending alert outbox
+  rows, oldest age about 8.5 days, no delivery receipt, and two tasks with
+  heartbeat/progress stalled about 35 hours. This is an incident, never an
+  empty or healthy business conclusion.
+- [DELIVERY] H-066 now renders a seven-app rollout artifact including a
+  separate alert-delivery process. The control-plane and Dashboard expose
+  alert-delivery backlog plus a fail-closed capacity-measurement state. The
+  database-size probe is deliberately decoupled: `pg_database_size()` caused a
+  `QueryCanceled` that hid the operator snapshot under provider pressure.
+- [TEST] Focused Postgres, CLI, rollout, Dashboard decoder/panel tests and
+  Dashboard TypeScript check pass. Full ruff/pyright remain blocked by existing
+  unrelated `business_brief` and legacy connection-protocol failures.
+
+[NEXT] Provider write access must be restored through the Supabase billing or
+support path before any retention cleanup, migration 040, role provisioning,
+alert-delivery deployment, or worker restart. First command after restoration:
+`make control-plane-preflight expected_database=postgres`.
