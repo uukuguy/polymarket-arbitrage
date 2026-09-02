@@ -47,7 +47,7 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> None:
     event_rows = structure_worker_module._business_structure_research_rows(
-        "events", ({"id": "event-a"},)
+        "events", ({"id": "event-a", "end_time_ms": 1_800_000_000_000},)
     )
     market_rows = structure_worker_module._business_structure_research_rows(
         "markets", ({"market_id": "market-a"},)
@@ -67,7 +67,7 @@ def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> Non
                 "slug": None,
                 "active": None,
                 "closed": None,
-                "end_date": None,
+                "end_time_ms": 1_800_000_000_000,
             },
         ),
     )
@@ -80,8 +80,10 @@ def test_business_structure_index_keeps_only_event_and_group_truth_rows() -> Non
                 "source_cursor": "group-a",
                 "neg_risk_market_id": "group-a",
                 "event_id": None,
-                "complete": None,
-                "supported": None,
+                "neg_risk_type": None,
+                "expected_member_count": None,
+                "active_named_count": None,
+                "quality": None,
                 "reason": None,
             },
         ),

@@ -1118,15 +1118,17 @@ def _business_structure_research_rows(
                 "slug": _compact_text(row, "slug"),
                 "active": _compact_bool(row, "active"),
                 "closed": _compact_bool(row, "closed"),
-                "end_date": _compact_text(row, "end_date", "endDate"),
+                "end_time_ms": _compact_int(row, "end_time_ms"),
             }
         return {
             "component": component,
             "source_cursor": cursor,
             "neg_risk_market_id": str(row["neg_risk_market_id"]),
             "event_id": _compact_text(row, "event_id"),
-            "complete": _compact_bool(row, "complete", "is_complete"),
-            "supported": _compact_bool(row, "supported", "is_supported"),
+            "neg_risk_type": _compact_text(row, "neg_risk_type"),
+            "expected_member_count": _compact_int(row, "expected_member_count"),
+            "active_named_count": _compact_int(row, "active_named_count"),
+            "quality": _compact_text(row, "quality"),
             "reason": _compact_text(row, "reason", "reason_code"),
         }
 
@@ -1145,5 +1147,13 @@ def _compact_bool(row: Mapping[str, object], *keys: str) -> bool | None:
     for key in keys:
         value = row.get(key)
         if isinstance(value, bool):
+            return value
+    return None
+
+
+def _compact_int(row: Mapping[str, object], *keys: str) -> int | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
     return None
