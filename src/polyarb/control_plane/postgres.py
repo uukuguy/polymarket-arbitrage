@@ -9336,6 +9336,34 @@ class PostgresControlPlane:
                 for row in cursor.fetchall()
             )
 
+    def published_structure_intelligence_artifacts(
+        self, *, generation_key: str
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return just the authenticated R2 ranges needed for business research.
+
+        Memberships and issues remain in R2: neither contributes to the current
+        event overview or neg-risk queue, so fetching them would add cost and
+        memory without improving the operator view.
+        """
+        self._validate_nonempty(generation_key=generation_key)
+        components = ("events", "event_tags", "markets", "group_truth")
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT receipt.component, receipt.artifact_key, receipt.artifact_digest
+                   FROM m1_generation_manifests AS manifest
+                   JOIN m1_structure_range_receipts AS receipt
+                     ON receipt.job_key LIKE manifest.generation_key || ':normalize:%%'
+                   WHERE manifest.generation_key = %s
+                     AND receipt.component = ANY(%s)
+                   ORDER BY receipt.component, receipt.artifact_key""",
+                (generation_key, components),
+            )
+            return tuple(
+                (str(row["component"]), str(row["artifact_key"]), str(row["artifact_digest"]))
+                for row in cursor.fetchall()
+            )
+
     def retire_superseded_structure_research_rows(self, *, generation_key: str) -> int:
         """Remove only unpublished Structure index rows before a safe backfill."""
         self._validate_nonempty(generation_key=generation_key)
@@ -9465,6 +9493,21 @@ class PostgresControlPlane:
         summary_octets = _bounded_json_octets(summary, maximum=4096)
         with self._connection_factory() as connection, connection.cursor() as cursor:
             _set_structure_read_timeouts(cursor, read_only=False)
+            # A generation is observable only when its replacement projection
+            # and summary commit together.  Clearing it inside this transaction
+            # also removes entities that disappeared from the next rebuild.
+            cursor.execute(
+                "DELETE FROM m1_structure_intelligence_events WHERE generation_key=%s",
+                (generation_key,),
+            )
+            cursor.execute(
+                "DELETE FROM m1_structure_intelligence_groups WHERE generation_key=%s",
+                (generation_key,),
+            )
+            cursor.execute(
+                "DELETE FROM m1_structure_intelligence_summaries WHERE generation_key=%s",
+                (generation_key,),
+            )
             if prepared_events:
                 cursor.executemany(
                     """INSERT INTO m1_structure_intelligence_events(

@@ -63,9 +63,12 @@ def build_structure_intelligence(
         payload = _event_payload(row, tags_by_event[event_id], market_rows, group_rows)
         events.append(StructureIntelligenceEvent(event_id=event_id, payload=payload))
 
+    all_groups = [
+        row for grouped_rows in groups_by_event.values() for row in grouped_rows
+    ] + detached_groups
     groups = tuple(
         StructureIntelligenceGroup(group_id=group_id, payload=_group_payload(row))
-        for row in detached_groups
+        for row in all_groups
         if (group_id := _text(row.get("neg_risk_market_id"))) is not None
     )
     events.sort(key=lambda event: event.event_id)

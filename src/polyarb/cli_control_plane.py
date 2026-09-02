@@ -108,6 +108,7 @@ from polyarb.control_plane.structure_artifact import (
     parse_structure_range_bytes,
     upload_structure_bundle_artifact,
 )
+from polyarb.control_plane.structure_intelligence import build_structure_intelligence
 from polyarb.control_plane.structure_shadow import (
     plan_structure_ranges,
     read_legacy_structure_bundle,
@@ -240,6 +241,13 @@ def _parser() -> argparse.ArgumentParser:
     structure_index_backfill.add_argument("--enable", action="store_true")
     structure_index_backfill.add_argument("--generation-key", required=True)
     structure_index_backfill.add_argument("--json", action="store_true")
+    structure_intelligence_backfill = subcommands.add_parser(
+        "structure-intelligence-backfill",
+        help="build bounded event and structural-risk research from authenticated R2 ranges",
+    )
+    structure_intelligence_backfill.add_argument("--enable", action="store_true")
+    structure_intelligence_backfill.add_argument("--generation-key", required=True)
+    structure_intelligence_backfill.add_argument("--json", action="store_true")
     structure_source_once = subcommands.add_parser(
         "structure-source-once",
         help=(
@@ -1508,6 +1516,85 @@ def _backfill_published_structure_index(
     }
 
 
+def _backfill_structure_intelligence(
+    control_plane: PostgresControlPlane, *, generation_key: str
+) -> dict[str, object]:
+    """Materialize a small business projection from authenticated R2 ranges.
+
+    This intentionally reads only events, tags, markets, and group truth.  Full
+    market/member payloads remain in immutable R2 rather than becoming a second
+    Postgres mirror merely for dashboard convenience.
+    """
+    capacity = control_plane.database_capacity()
+    if capacity["state"] in {"critical", "exhausted"}:
+        raise RuntimeError("structure-intelligence-capacity-not-admitted")
+    artifacts = control_plane.published_structure_intelligence_artifacts(
+        generation_key=generation_key
+    )
+    expected_components = {"events", "event_tags", "markets", "group_truth"}
+    if {component for component, _key, _digest in artifacts} != expected_components:
+        raise RuntimeError("structure-intelligence-artifacts-incomplete")
+    object_client, bucket = _structure_object_client()
+
+    def read_rows(artifact: tuple[str, str, str]) -> tuple[str, tuple[Mapping[str, object], ...]]:
+        expected_component, artifact_key, artifact_digest = artifact
+        response = object_client.get_object(Bucket=bucket, Key=artifact_key)
+        body = response.get("Body")
+        if body is None or not hasattr(body, "read"):
+            raise RuntimeError("structure-intelligence-range-body-unavailable")
+        payload = body.read()
+        if not isinstance(payload, bytes):
+            raise RuntimeError("structure-intelligence-range-body-invalid")
+        (_bundle_digest, component, _range_digest), rows = parse_structure_range_bytes(
+            payload, expected_sha256=artifact_digest
+        )
+        if component != expected_component:
+            raise RuntimeError("structure-intelligence-range-component-mismatch")
+        return component, rows
+
+    rows_by_component: dict[str, list[Mapping[str, object]]] = {
+        component: [] for component in expected_components
+    }
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="structure-intelligence") as executor:
+        for component, rows in executor.map(read_rows, artifacts):
+            rows_by_component[component].extend(rows)
+    bundle = build_structure_intelligence(
+        generation_key=generation_key, rows_by_component=rows_by_component
+    )
+    event_rows = tuple((item.event_id, item.payload) for item in bundle.events)
+    group_rows = tuple((item.group_id, item.payload) for item in bundle.groups)
+    projection_octets = sum(
+        len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        for _identifier, payload in (*event_rows, *group_rows)
+    )
+    if projection_octets > 45_000_000:
+        raise RuntimeError("structure-intelligence-projection-over-budget")
+    projected_used = int(capacity["used_bytes"]) + projection_octets
+    if projected_used * 100 >= int(capacity["budget_bytes"]) * 75:
+        raise RuntimeError("structure-intelligence-capacity-not-admitted")
+    control_plane.stage_structure_intelligence(
+        generation_key=generation_key,
+        events=event_rows,
+        groups=group_rows,
+        summary={
+            **bundle.summary,
+            "source_components": {
+                component: len(rows_by_component[component]) for component in sorted(expected_components)
+            },
+            "projection_octets": projection_octets,
+        },
+    )
+    return {
+        "status": "ok",
+        "generation_key": generation_key,
+        "artifact_count": len(artifacts),
+        "event_count": len(event_rows),
+        "group_count": len(group_rows),
+        "projection_octets": projection_octets,
+        "capacity_before": capacity,
+    }
+
+
 async def _run_scheduler_service(
     scheduler: TransactionalControlPlaneScheduler | TransactionalWorkerLoop,
     *,
@@ -2112,6 +2199,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtime-reconcile-serve",
         "runtime-reconcile-until",
         "qualification-serve",
+        "structure-index-backfill",
+        "structure-intelligence-backfill",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
@@ -2524,6 +2613,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "structure-index-backfill":
             _write(
                 _backfill_published_structure_index(
+                    control_plane, generation_key=args.generation_key
+                ),
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-intelligence-backfill":
+            _write(
+                _backfill_structure_intelligence(
                     control_plane, generation_key=args.generation_key
                 ),
                 as_json=args.json,

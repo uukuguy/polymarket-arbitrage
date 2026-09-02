@@ -2377,6 +2377,58 @@ def test_structure_index_backfill_reads_published_artifacts_with_bounded_paralle
     assert max_active_reads == 4
 
 
+def test_structure_intelligence_backfill_reads_only_business_components(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    generation_key = "structure:" + "b" * 64
+
+    class Body:
+        def __init__(self, component: str) -> None:
+            self.component = component
+
+        def read(self) -> bytes:
+            return self.component.encode()
+
+    class ObjectClient:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": Body(Key)}
+
+    captured: dict[str, object] = {}
+
+    class ControlPlane:
+        def database_capacity(self) -> dict[str, object]:
+            return {"state": "healthy", "used_bytes": 10, "budget_bytes": 450_000_000}
+
+        def published_structure_intelligence_artifacts(self, *, generation_key: str):
+            assert generation_key == generation_key
+            return tuple((component, component, "digest") for component in ("events", "event_tags", "markets", "group_truth"))
+
+        def stage_structure_intelligence(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli_control_plane, "_structure_object_client", lambda: (ObjectClient(), "research"))
+    monkeypatch.setattr(
+        cli_control_plane,
+        "parse_structure_range_bytes",
+        lambda payload, *, expected_sha256: (("bundle", payload.decode(), "range"), {
+            "events": ({"id": "event-a", "active": True, "closed": False},),
+            "event_tags": ({"event_id": "event-a", "tag_label": "Weather"},),
+            "markets": ({"event_id": "event-a", "active": True, "closed": False},),
+            "group_truth": ({"neg_risk_market_id": "group-a", "event_id": "event-a", "quality": "complete"},),
+        }[payload.decode()]),
+    )
+
+    result = cli_control_plane._backfill_structure_intelligence(
+        cast(object, ControlPlane()), generation_key=generation_key
+    )
+
+    assert result["event_count"] == 1
+    assert result["group_count"] == 1
+    assert captured["generation_key"] == generation_key
+    assert captured["events"]
+    assert captured["groups"]
+
+
 def test_structure_source_factory_disables_hidden_gamma_retries(monkeypatch) -> None:
     from polyarb import cli_control_plane
     from polyarb.control_plane.postgres import PostgresControlPlane

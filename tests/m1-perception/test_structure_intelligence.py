@@ -47,6 +47,8 @@ def test_bundle_aggregates_event_market_tag_and_group_truth() -> None:
     assert event.payload["closed_market_count"] == 1
     assert event.payload["neg_risk_quality"] == "complete-supported"
     assert event.payload["missing_fields"] == []
+    assert bundle.groups[0].group_id == "group-a"
+    assert bundle.groups[0].payload["event_id"] == "event-a"
 
 
 def test_bundle_marks_absent_business_fields_as_missing_not_zero() -> None:
