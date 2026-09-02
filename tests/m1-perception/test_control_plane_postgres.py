@@ -5006,12 +5006,6 @@ def test_quote_publication_prunes_only_superseded_published_business_research_ro
         generation_key=old_generation,
         rows=(("old-token", {"market_id": "old-market"}),),
     )
-    staged_generation = f"quote:{'5' * 64}"
-    control_plane.stage_business_quote_rows(
-        generation_key=staged_generation,
-        rows=(("staged-token", {"market_id": "staged-market"}),),
-    )
-
     _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
     batch = control_plane.enqueue_quote_generation(
         structure_receipt_digest="a" * 64,
@@ -5057,10 +5051,51 @@ def test_quote_publication_prunes_only_superseded_published_business_research_ro
         rows = connection.execute(
             "SELECT generation_key, token_id FROM m1_business_quote_rows ORDER BY token_id"
         ).fetchall()
-    assert rows == [
-        (batch.generation_key, "current-token"),
-        (staged_generation, "staged-token"),
-    ]
+        staged_rows = connection.execute(
+            "SELECT generation_key, token_id FROM m1_business_quote_staging_rows"
+        ).fetchall()
+    assert rows == [(batch.generation_key, "current-token")]
+    assert staged_rows == []
+
+
+def test_quote_batch_research_rows_stay_staged_until_fenced_certification(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_structure_parent(control_plane, structure_digest="a" * 64, now=now)
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("candidate-token",),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="quote-worker", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/candidate/batch.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        research_rows=(("candidate-token", {"market_id": "candidate-market"}),),
+        now=now,
+    )
+    with control_plane._connection_factory() as connection:
+        staged = connection.execute(
+            "SELECT generation_key, token_id FROM m1_business_quote_staging_rows"
+        ).fetchall()
+        active = connection.execute(
+            "SELECT generation_key, token_id FROM m1_business_quote_rows"
+        ).fetchall()
+    assert staged == [(batch.generation_key, "candidate-token")]
+    assert active == []
+    with control_plane._connection_factory() as connection:
+        connection.execute("TRUNCATE public.m1_business_quote_staging_rows")
 
 
 def test_quote_pointer_lineage_rejects_late_older_certifier(

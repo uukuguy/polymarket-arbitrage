@@ -4700,7 +4700,7 @@ class PostgresControlPlane:
             for token_id, payload in research_rows or ():
                 self._validate_nonempty(token_id=token_id)
                 cursor.execute(
-                    """INSERT INTO m1_business_quote_rows(generation_key, token_id, payload)
+                    """INSERT INTO m1_business_quote_staging_rows(generation_key, token_id, payload)
                        VALUES (%s, %s, %s) ON CONFLICT (generation_key, token_id) DO NOTHING""",
                     (f"quote:{_quote_generation}", token_id, Jsonb(dict(payload))),
                 )
@@ -5585,6 +5585,9 @@ class PostgresControlPlane:
                 cursor,
                 product="quote",
                 current_generation_key=generation_key,
+            )
+            self._promote_staged_business_quote_rows_cursor(
+                cursor, generation_key=generation_key
             )
             self._enqueue_job_cursor(
                 cursor,
@@ -9183,6 +9186,28 @@ class PostgresControlPlane:
                 current_generation_key=sql.Literal(current_generation_key),
             )
         )
+
+    @staticmethod
+    def _promote_staged_business_quote_rows_cursor(
+        cursor: psycopg.Cursor[Any], *, generation_key: str
+    ) -> None:
+        """Atomically replace the dashboard index from one fenced candidate."""
+        cursor.execute(
+            "SELECT DISTINCT generation_key FROM m1_business_quote_staging_rows "
+            "WHERE generation_key <> %s LIMIT 1",
+            (generation_key,),
+        )
+        if cursor.fetchone() is not None:
+            raise ControlPlaneError("quote staging contains another generation")
+        cursor.execute("DELETE FROM m1_business_quote_rows")
+        cursor.execute(
+            """INSERT INTO m1_business_quote_rows(generation_key, token_id, payload)
+               SELECT generation_key, token_id, payload
+               FROM m1_business_quote_staging_rows
+               WHERE generation_key = %s ORDER BY token_id""",
+            (generation_key,),
+        )
+        cursor.execute("TRUNCATE public.m1_business_quote_staging_rows")
 
     def reuse_quote_research_space(self) -> None:
         """Make pages from a retired Quote generation reusable by the next one.

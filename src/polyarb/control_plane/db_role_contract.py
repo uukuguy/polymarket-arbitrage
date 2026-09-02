@@ -55,6 +55,7 @@ SUPABASE_CREATOR_MEMBERSHIP = ("postgres", True, False, False)
 RUNTIME_ALLOWED = {
     "m1_business_structure_rows": frozenset({"SELECT", "INSERT"}),
     "m1_business_quote_rows": frozenset({"SELECT", "INSERT"}),
+    "m1_business_quote_staging_rows": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
     # Bounded runtime observation is mutated only through its security-definer
     # turn function.  The controller reads the one-row status for its
