@@ -5058,6 +5058,29 @@ def test_quote_publication_prunes_only_superseded_published_business_research_ro
     assert staged_rows == []
 
 
+def test_quote_promotion_truncates_retired_active_pages_before_copying_candidate() -> None:
+    """A certified replacement must reclaim the old active relation physically."""
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement: str, params: object = None) -> None:
+            del params
+            self.statements.append(statement)
+
+        def fetchone(self) -> None:
+            return None
+
+    cursor = Cursor()
+    PostgresControlPlane._promote_staged_business_quote_rows_cursor(
+        cursor, generation_key="quote:candidate"
+    )
+
+    assert "TRUNCATE public.m1_business_quote_rows" in cursor.statements
+    assert "DELETE FROM m1_business_quote_rows" not in cursor.statements
+
+
 def test_quote_batch_research_rows_stay_staged_until_fenced_certification(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -5093,7 +5116,7 @@ def test_quote_batch_research_rows_stay_staged_until_fenced_certification(
             "SELECT generation_key, token_id FROM m1_business_quote_rows"
         ).fetchall()
     assert staged == [(batch.generation_key, "candidate-token")]
-    assert active == []
+    assert (batch.generation_key, "candidate-token") not in active
     with control_plane._connection_factory() as connection:
         connection.execute("TRUNCATE public.m1_business_quote_staging_rows")
 

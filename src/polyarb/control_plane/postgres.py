@@ -9199,7 +9199,10 @@ class PostgresControlPlane:
         )
         if cursor.fetchone() is not None:
             raise ControlPlaneError("quote staging contains another generation")
-        cursor.execute("DELETE FROM m1_business_quote_rows")
+        # ``DELETE`` leaves the retired generation's heap pages allocated.  This
+        # relation is a single-reader publication index, so certification can
+        # transactionally truncate it before copying the fenced candidate.
+        cursor.execute("TRUNCATE public.m1_business_quote_rows")
         cursor.execute(
             """INSERT INTO m1_business_quote_rows(generation_key, token_id, payload)
                SELECT generation_key, token_id, payload
