@@ -1,4 +1,5 @@
 const BASE_URL = process.env.POLYARB_CONTROL_API_URL ?? "https://polyarb-control-api.fly.dev";
+const BUSINESS_OVERVIEW_READ_ATTEMPTS = 2;
 
 export type ProductStatus = "available" | "lagging" | "not-published" | "stale" | "unavailable";
 
@@ -62,10 +63,13 @@ export function decodeBusinessOverview(value: unknown): BusinessOverview | null 
 }
 
 export async function readBusinessOverview(): Promise<BusinessOverviewRead> {
-  try {
-    const response = await fetch(`${BASE_URL}/perception/business-overview`, { cache: "no-store" });
-    const body: unknown = await response.json();
-    const data = decodeBusinessOverview(body);
-    return response.ok && data ? { status: "available", data } : { status: "unavailable", reason: "business-overview-unavailable" };
-  } catch { return { status: "unavailable", reason: "business-overview-unavailable" }; }
+  for (let attempt = 0; attempt < BUSINESS_OVERVIEW_READ_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${BASE_URL}/perception/business-overview`, { cache: "no-store" });
+      const body: unknown = await response.json();
+      const data = decodeBusinessOverview(body);
+      if (response.ok && data) return { status: "available", data };
+    } catch { /* one bounded retry handles transient cross-cloud reads */ }
+  }
+  return { status: "unavailable", reason: "business-overview-unavailable" };
 }

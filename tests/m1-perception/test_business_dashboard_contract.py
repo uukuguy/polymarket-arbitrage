@@ -16,6 +16,14 @@ def test_business_page_uses_only_the_atomic_business_overview_reader() -> None:
     assert "business-overview-unavailable" in reader
 
 
+def test_business_overview_reader_retries_one_transient_authority_read() -> None:
+    reader = Path("dashboard/lib/business-overview.ts").read_text()
+
+    assert "const BUSINESS_OVERVIEW_READ_ATTEMPTS = 2;" in reader
+    assert "for (let attempt = 0; attempt < BUSINESS_OVERVIEW_READ_ATTEMPTS; attempt += 1)" in reader
+    assert "if (response.ok && data) return { status: \"available\", data };" in reader
+
+
 def test_business_page_exposes_quote_and_opportunity_lineage() -> None:
     quote_page = Path("dashboard/app/business/quotes/page.tsx").read_text()
     opportunity_page = Path("dashboard/app/business/opportunities/page.tsx").read_text()
