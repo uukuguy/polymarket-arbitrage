@@ -211,6 +211,42 @@ def test_business_research_page_routes_transport_generation_bound_rows() -> None
     assert quote.json()["next_after"] == "market:001"
 
 
+def test_structure_intelligence_routes_expose_summary_events_and_risk_groups() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class StructureIntelligenceControlPlane:
+        def structure_intelligence_summary(self, *, generation_key: str | None) -> dict[str, object]:
+            assert generation_key is None
+            return {"status": "available", "event_count": 10}
+
+        def structure_intelligence_events(self, **kwargs) -> dict[str, object]:
+            assert kwargs == {
+                "generation_key": "structure:current",
+                "limit": 2,
+                "after": "event:001",
+                "open_only": True,
+            }
+            return {"status": "available", "items": [{"event_id": "event:002"}]}
+
+        def structure_intelligence_groups(self, **kwargs) -> dict[str, object]:
+            assert kwargs == {
+                "generation_key": None,
+                "limit": 1,
+                "after": "",
+                "quality": "incomplete",
+            }
+            return {"status": "available", "items": [{"group_id": "group:002"}]}
+
+    with TestClient(create_control_plane_app(control_plane=StructureIntelligenceControlPlane())) as client:
+        summary = client.get("/perception/business/structure/summary")
+        events = client.get("/perception/business/structure/events?generation_key=structure%3Acurrent&limit=2&after=event%3A001&open_only=true")
+        groups = client.get("/perception/business/structure/groups?limit=1&quality=incomplete")
+
+    assert summary.json()["event_count"] == 10
+    assert events.json()["items"] == [{"event_id": "event:002"}]
+    assert groups.json()["items"] == [{"group_id": "group:002"}]
+
+
 def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 

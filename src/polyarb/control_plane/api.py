@@ -126,6 +126,69 @@ async def business_research_page(request: Request) -> JSONResponse:
             {"status": "unavailable", "reason": "business-research-unavailable"},
             status_code=503,
         )
+
+
+async def structure_intelligence(request: Request) -> JSONResponse:
+    """Serve a bounded business view, never the raw Structure recovery index."""
+    view = request.path_params["view"]
+    method_name = f"structure_intelligence_{view}"
+    control_plane = getattr(request.app.state, "control_plane", None)
+    reader = None if control_plane is None else getattr(control_plane, method_name, None)
+    if not callable(reader):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "structure-intelligence-unavailable"},
+            status_code=503,
+        )
+    try:
+        generation_key = request.query_params.get("generation_key")
+        if generation_key is not None and (not generation_key or len(generation_key) > 256 or "\x00" in generation_key):
+            raise ValueError("invalid-structure-intelligence-page")
+        if view == "summary":
+            result = await run_blocking_call_with_timeout(
+                reader,
+                generation_key=generation_key,
+                timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+                thread_name="control-plane-api:structure-intelligence-summary",
+            )
+        else:
+            limit = int(request.query_params.get("limit", "50"))
+            after = request.query_params.get("after", "")
+            if not 1 <= limit <= 200 or len(after) > 256 or "\x00" in after:
+                raise ValueError("invalid-structure-intelligence-page")
+            if view == "events":
+                raw_open_only = request.query_params.get("open_only")
+                if raw_open_only not in (None, "true", "false"):
+                    raise ValueError("invalid-structure-intelligence-page")
+                result = await run_blocking_call_with_timeout(
+                    reader,
+                    generation_key=generation_key,
+                    limit=limit,
+                    after=after,
+                    open_only=None if raw_open_only is None else raw_open_only == "true",
+                    timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+                    thread_name="control-plane-api:structure-intelligence-events",
+                )
+            else:
+                quality = request.query_params.get("quality")
+                if quality is not None and (not quality or len(quality) > 128 or "\x00" in quality):
+                    raise ValueError("invalid-structure-intelligence-page")
+                result = await run_blocking_call_with_timeout(
+                    reader,
+                    generation_key=generation_key,
+                    limit=limit,
+                    after=after,
+                    quality=quality,
+                    timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+                    thread_name="control-plane-api:structure-intelligence-groups",
+                )
+        return JSONResponse(result)
+    except ValueError:
+        return JSONResponse({"error": "invalid structure intelligence page"}, status_code=400)
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "structure-intelligence-unavailable"},
+            status_code=503,
+        )
     try:
         raw_limit = request.query_params.get("limit", "50")
         limit = int(raw_limit)
@@ -162,6 +225,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
             Route("/perception/control-plane", control_plane_status, methods=["GET"]),
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
             Route("/perception/business-overview", business_overview, methods=["GET"]),
+            Route("/perception/business/structure/{view:str}", structure_intelligence, methods=["GET"]),
             Route("/perception/business/{product:str}", business_research_page, methods=["GET"]),
         ]
     )
