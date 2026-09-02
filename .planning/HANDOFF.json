@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-02T11:12:49.571Z",
+  "phase": "05.6",
+  "phase_name": "self-healing-structure-production",
+  "phase_dir": ".planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production",
+  "plan": 0,
+  "task": 0,
+  "total_tasks": 0,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Structure business intelligence", "status": "done", "commit": "f3d97919"},
+    {"id": 2, "name": "Quote business evidence view", "status": "done", "commit": "5446f60b"},
+    {"id": 3, "name": "Analysis and opportunity production audit", "status": "done"}
+  ],
+  "remaining_tasks": [
+    {"id": 1, "name": "Add capacity admission and physical-space reuse before cadence restart", "status": "not_started"},
+    {"id": 2, "name": "Persist bounded analysis funnel and rejection evidence", "status": "not_started"},
+    {"id": 3, "name": "Publish current-lineage certified opportunities and detailed Dashboard research", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "Coordinator is intentionally stopped until capacity admission and automatic space reuse are implemented and verified.", "type": "technical", "workaround": "Read-only research remains available; do not restart it as part of observation."},
+    {"description": "Analysis candidate/reject detail is not published, and the opportunity pointer is stale relative to the current Quote generation.", "type": "technical", "workaround": "Treat neither as a current market conclusion; implement the missing bounded facts and lineage contract."}
+  ],
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "Use R2 for complete immutable artifacts and Postgres only for bounded research projections.", "rationale": "Full detail mirroring exhausted the Free database budget.", "phase": "05.6"},
+    {"decision": "Require current Structure-to-Quote-to-opportunity lineage for a verified zero conclusion.", "rationale": "Historical zero opportunity data was stale after Quote advanced.", "phase": "05.6"}
+  ],
+  "uncommitted_files": [".planning/JOURNAL.md", ".wrangler/", "output/"],
+  "next_action": "Resume M1, collect read-only health/brief evidence, then create a bounded design for capacity admission before any coordinator restart.",
+  "context_notes": "Structure and Quote business pages are production-useful. The remaining mainline is capacity-safe continuous collection plus truthful Analysis and current certified-opportunity data products."
+}
