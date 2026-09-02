@@ -9346,7 +9346,9 @@ class PostgresControlPlane:
         memory without improving the operator view.
         """
         self._validate_nonempty(generation_key=generation_key)
-        components = ("events", "event_tags", "markets", "group_truth")
+        # psycopg adapts a tuple as a PostgreSQL record, not a text array;
+        # ``ANY`` needs a list so the database receives ``text[]``.
+        components = ["events", "event_tags", "markets", "group_truth"]
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
