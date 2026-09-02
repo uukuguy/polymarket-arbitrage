@@ -47,3 +47,59 @@ export async function readBusinessResearchPage(product: ResearchProduct, after =
     return response.ok && page ? page : null;
   } catch { return null; }
 }
+
+export type StructureIntelligenceStatus = "available" | "unavailable";
+export type StructureIntelligenceSummary = {
+  schema_version: "m1.structure-intelligence.v1";
+  status: StructureIntelligenceStatus;
+  generation_key?: string;
+  reason_code?: string;
+  event_count?: number;
+  market_count?: number;
+  open_event_count?: number;
+  detached_group_count?: number;
+  projection_octets?: number;
+  source_components?: Record<string, number>;
+};
+export type StructureIntelligenceItem = Record<string, unknown> & { event_id?: string; group_id?: string };
+export type StructureIntelligencePage = {
+  schema_version: "m1.structure-intelligence.v1";
+  status: StructureIntelligenceStatus;
+  generation_key?: string;
+  reason_code?: string;
+  product?: "events" | "groups";
+  items: StructureIntelligenceItem[];
+  limit: number;
+  next_after: string | null;
+};
+
+export function decodeStructureIntelligenceSummary(value: unknown): StructureIntelligenceSummary | null {
+  if (!record(value) || value.schema_version !== "m1.structure-intelligence.v1" || (value.status !== "available" && value.status !== "unavailable")) return null;
+  for (const key of ["event_count", "market_count", "open_event_count", "detached_group_count", "projection_octets"] as const) if (value[key] !== undefined && !nonNegativeInteger(value[key])) return null;
+  if (value.generation_key !== undefined && typeof value.generation_key !== "string") return null;
+  if (value.reason_code !== undefined && typeof value.reason_code !== "string") return null;
+  if (value.source_components !== undefined && (!record(value.source_components) || !Object.values(value.source_components).every(nonNegativeInteger))) return null;
+  return value as StructureIntelligenceSummary;
+}
+
+export function decodeStructureIntelligencePage(value: unknown, product: "events" | "groups"): StructureIntelligencePage | null {
+  if (!record(value) || value.schema_version !== "m1.structure-intelligence.v1" || (value.status !== "available" && value.status !== "unavailable") || !Array.isArray(value.items) || !nonNegativeInteger(value.limit) || value.limit < 1 || value.limit > 200 || !(value.next_after === null || typeof value.next_after === "string")) return null;
+  if (value.product !== product || !value.items.every((item) => record(item) && typeof item[product === "events" ? "event_id" : "group_id"] === "string")) return null;
+  return value as StructureIntelligencePage;
+}
+
+export async function readStructureIntelligenceSummary(): Promise<StructureIntelligenceSummary | null> {
+  try {
+    const response = await fetch(`${BASE_URL}/perception/business/structure/summary`, { cache: "no-store" });
+    const result = decodeStructureIntelligenceSummary(await response.json());
+    return response.ok && result ? result : null;
+  } catch { return null; }
+}
+
+export async function readStructureIntelligencePage(product: "events" | "groups"): Promise<StructureIntelligencePage | null> {
+  try {
+    const response = await fetch(`${BASE_URL}/perception/business/structure/${product}?limit=100`, { cache: "no-store" });
+    const result = decodeStructureIntelligencePage(await response.json(), product);
+    return response.ok && result ? result : null;
+  } catch { return null; }
+}
