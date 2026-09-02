@@ -110,6 +110,59 @@ _POINTER_LINEAGE_NONE = "none"
 _POINTER_LINEAGE_UNSET = object()
 
 
+def _bounded_json_octets(payload: Mapping[str, object], *, maximum: int) -> int:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    octets = len(encoded)
+    if octets < 2 or octets > maximum:
+        raise ValueError("structure-intelligence-payload-out-of-bounds")
+    return octets
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _structure_intelligence_unavailable(
+    generation_key: str | None, reason_code: str
+) -> dict[str, object]:
+    response: dict[str, object] = {
+        "schema_version": "m1.structure-intelligence.v1",
+        "status": "unavailable",
+        "reason_code": reason_code,
+    }
+    if generation_key is not None:
+        response["generation_key"] = generation_key
+    return response
+
+
+def _structure_intelligence_page(
+    generation_key: str,
+    product: str,
+    rows: Sequence[Mapping[str, Any]],
+    identifier: str,
+    limit: int,
+) -> dict[str, object]:
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    return {
+        "schema_version": "m1.structure-intelligence.v1",
+        "status": "available",
+        "generation_key": generation_key,
+        "items": [{identifier: str(row[identifier]), **dict(row["payload"])} for row in page],
+        "limit": limit,
+        "next_after": str(page[-1][identifier]) if has_more else None,
+        "product": product,
+    }
+
+
 def _quote_certification_identity(
     generation_key: str,
     universe_hash: str,
@@ -9367,6 +9420,162 @@ class PostgresControlPlane:
                 "limit": limit,
                 "next_after": str(page[-1]["entity_id"]) if has_more else None,
             }
+
+    def stage_structure_intelligence(
+        self,
+        *,
+        generation_key: str,
+        events: Sequence[tuple[str, Mapping[str, object]]],
+        groups: Sequence[tuple[str, Mapping[str, object]]],
+        summary: Mapping[str, object],
+    ) -> None:
+        """Write a bounded Structure business projection for one immutable generation.
+
+        This is deliberately separate from ``m1_business_structure_rows``.  That
+        table is a recovery-oriented source index; these relations are the
+        operator-facing event and structural-risk projections.
+        """
+        self._validate_nonempty(generation_key=generation_key)
+        prepared_events = [
+            (
+                generation_key,
+                event_id,
+                _optional_int(payload.get("end_time_ms")),
+                _optional_bool(payload.get("is_open")),
+                Jsonb(dict(payload)),
+                _bounded_json_octets(payload, maximum=4096),
+            )
+            for event_id, payload in events
+        ]
+        prepared_groups = [
+            (
+                generation_key,
+                group_id,
+                _optional_text(payload.get("event_id")),
+                _optional_text(payload.get("quality")),
+                Jsonb(dict(payload)),
+                _bounded_json_octets(payload, maximum=4096),
+            )
+            for group_id, payload in groups
+        ]
+        for event_id, _payload in events:
+            self._validate_nonempty(event_id=event_id)
+        for group_id, _payload in groups:
+            self._validate_nonempty(group_id=group_id)
+        summary_octets = _bounded_json_octets(summary, maximum=4096)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            _set_structure_read_timeouts(cursor, read_only=False)
+            if prepared_events:
+                cursor.executemany(
+                    """INSERT INTO m1_structure_intelligence_events(
+                           generation_key,event_id,sort_end_time_ms,is_open,payload,payload_octets)
+                       VALUES (%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (generation_key,event_id) DO UPDATE
+                       SET sort_end_time_ms=EXCLUDED.sort_end_time_ms,
+                           is_open=EXCLUDED.is_open, payload=EXCLUDED.payload,
+                           payload_octets=EXCLUDED.payload_octets""",
+                    prepared_events,
+                )
+            if prepared_groups:
+                cursor.executemany(
+                    """INSERT INTO m1_structure_intelligence_groups(
+                           generation_key,group_id,event_id,quality,payload,payload_octets)
+                       VALUES (%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (generation_key,group_id) DO UPDATE
+                       SET event_id=EXCLUDED.event_id, quality=EXCLUDED.quality,
+                           payload=EXCLUDED.payload, payload_octets=EXCLUDED.payload_octets""",
+                    prepared_groups,
+                )
+            cursor.execute(
+                """INSERT INTO m1_structure_intelligence_summaries(
+                       generation_key,payload,payload_octets)
+                   VALUES (%s,%s,%s)
+                   ON CONFLICT (generation_key) DO UPDATE
+                   SET payload=EXCLUDED.payload, payload_octets=EXCLUDED.payload_octets""",
+                (generation_key, Jsonb(dict(summary)), summary_octets),
+            )
+
+    def structure_intelligence_summary(self, *, generation_key: str | None) -> dict[str, object]:
+        """Return the current, fully materialized Structure business summary."""
+        current = self._current_structure_generation(generation_key=generation_key)
+        if isinstance(current, dict):
+            return current
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                "SELECT payload FROM m1_structure_intelligence_summaries WHERE generation_key=%s",
+                (current,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return _structure_intelligence_unavailable(current, "structure-intelligence-incomplete")
+        return {"schema_version": "m1.structure-intelligence.v1", "status": "available", "generation_key": current, **dict(row["payload"])}
+
+    def structure_intelligence_events(
+        self, *, generation_key: str | None, limit: int, after: str, open_only: bool | None
+    ) -> dict[str, object]:
+        if not 1 <= limit <= 200 or len(after) > 256:
+            raise ValueError("invalid-structure-intelligence-page")
+        current = self._current_structure_generation(generation_key=generation_key)
+        if isinstance(current, dict):
+            return current
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                "SELECT 1 FROM m1_structure_intelligence_summaries WHERE generation_key=%s", (current,)
+            )
+            if cursor.fetchone() is None:
+                return _structure_intelligence_unavailable(current, "structure-intelligence-incomplete")
+            cursor.execute(
+                """SELECT event_id, payload FROM m1_structure_intelligence_events
+                   WHERE generation_key=%s AND event_id > %s
+                     AND (%s::boolean IS NULL OR is_open=%s)
+                   ORDER BY event_id LIMIT %s""",
+                (current, after, open_only, open_only, limit + 1),
+            )
+            rows = cursor.fetchall()
+        return _structure_intelligence_page(current, "events", rows, "event_id", limit)
+
+    def structure_intelligence_groups(
+        self, *, generation_key: str | None, limit: int, after: str, quality: str | None
+    ) -> dict[str, object]:
+        if not 1 <= limit <= 200 or len(after) > 256 or (quality is not None and len(quality) > 128):
+            raise ValueError("invalid-structure-intelligence-page")
+        current = self._current_structure_generation(generation_key=generation_key)
+        if isinstance(current, dict):
+            return current
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                "SELECT 1 FROM m1_structure_intelligence_summaries WHERE generation_key=%s", (current,)
+            )
+            if cursor.fetchone() is None:
+                return _structure_intelligence_unavailable(current, "structure-intelligence-incomplete")
+            cursor.execute(
+                """SELECT group_id, payload FROM m1_structure_intelligence_groups
+                   WHERE generation_key=%s AND group_id > %s
+                     AND (%s::text IS NULL OR quality=%s)
+                   ORDER BY group_id LIMIT %s""",
+                (current, after, quality, quality, limit + 1),
+            )
+            rows = cursor.fetchall()
+        return _structure_intelligence_page(current, "groups", rows, "group_id", limit)
+
+    def _current_structure_generation(self, *, generation_key: str | None) -> str | dict[str, object]:
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT generation_key FROM m1_generation_manifests
+                   WHERE generation_key LIKE 'structure:' || chr(37)
+                   ORDER BY published_at DESC, generation_key DESC LIMIT 1"""
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return _structure_intelligence_unavailable(None, "structure-not-published")
+        current = str(row["generation_key"])
+        if generation_key is not None and generation_key != current:
+            return _structure_intelligence_unavailable(current, "generation-not-current")
+        return current
 
     def stage_business_quote_rows(
         self, *, generation_key: str, rows: Sequence[tuple[str, Mapping[str, object]]]

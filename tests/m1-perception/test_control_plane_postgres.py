@@ -14857,6 +14857,49 @@ def test_business_structure_page_exposes_a_bounded_index_without_claiming_full_m
     }
 
 
+def test_structure_intelligence_reads_current_generation_only(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    current = "structure:" + "9" * 64
+    older = "structure:" + "8" * 64
+    with control_plane._connection_factory() as connection:
+        for generation, published_at in ((current, now + timedelta(seconds=1)), (older, now)):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'structure-certify',%s,'succeeded',%s,%s)",
+                (f"{generation}:certify", generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, f"{generation}:certify", "a" * 64, "b" * 64, published_at),
+            )
+    control_plane.stage_structure_intelligence(
+        generation_key=current,
+        events=(("event:current", {"title": "Current", "is_open": True, "end_time_ms": 100}),),
+        groups=(("group:current", {"event_id": "event:current", "quality": "complete-supported"}),),
+        summary={"event_count": 1, "market_count": 2},
+    )
+    control_plane.stage_structure_intelligence(
+        generation_key=older,
+        events=(("event:older", {"title": "Older", "is_open": False, "end_time_ms": 200}),),
+        groups=(),
+        summary={"event_count": 1, "market_count": 1},
+    )
+
+    summary = control_plane.structure_intelligence_summary(generation_key=None)
+    events = control_plane.structure_intelligence_events(
+        generation_key=None, limit=10, after="", open_only=None
+    )
+    groups = control_plane.structure_intelligence_groups(
+        generation_key=None, limit=10, after="", quality=None
+    )
+
+    assert summary["generation_key"] == current
+    assert summary["event_count"] == 1
+    assert events["items"] == [{"event_id": "event:current", "title": "Current", "is_open": True, "end_time_ms": 100}]
+    assert groups["items"] == [{"group_id": "group:current", "event_id": "event:current", "quality": "complete-supported"}]
+
+
 def test_business_quote_page_exposes_only_current_generation_rows(
     control_plane: PostgresControlPlane,
 ) -> None:
