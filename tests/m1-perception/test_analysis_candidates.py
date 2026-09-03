@@ -74,3 +74,10 @@ def test_candidate_source_page_does_not_bind_a_duplicate_generation_filter() -> 
     candidate_query = source[start : source.index("rows = cursor.fetchall()", start)]
 
     assert "WHERE groups.generation_key = %s" not in candidate_query
+
+
+def test_candidate_projection_uses_a_batched_database_write() -> None:
+    source = Path("src/polyarb/control_plane/postgres.py").read_text()
+    stage = source[source.index("def stage_analysis_candidates") : source.index("def business_analysis_page")]
+
+    assert "cursor.executemany(" in stage

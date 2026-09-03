@@ -9820,13 +9820,22 @@ class PostgresControlPlane:
                     now,
                 ),
             )
-            for group_id, candidate_state, gross_edge_bps, payload, payload_octets in normalized:
-                cursor.execute(
-                    """INSERT INTO m1_analysis_candidate_rows
-                       (generation_key, group_id, candidate_state, gross_edge_bps, payload, payload_octets)
-                       VALUES (%s,%s,%s,%s,%s,%s)""",
-                    (generation_key, group_id, candidate_state, gross_edge_bps, Jsonb(dict(payload)), payload_octets),
-                )
+            cursor.executemany(
+                """INSERT INTO m1_analysis_candidate_rows
+                   (generation_key, group_id, candidate_state, gross_edge_bps, payload, payload_octets)
+                   VALUES (%s,%s,%s,%s,%s,%s)""",
+                [
+                    (
+                        generation_key,
+                        group_id,
+                        candidate_state,
+                        gross_edge_bps,
+                        Jsonb(dict(payload)),
+                        payload_octets,
+                    )
+                    for group_id, candidate_state, gross_edge_bps, payload, payload_octets in normalized
+                ],
+            )
 
     def business_analysis_page(
         self, *, generation_key: str | None, limit: int, after: str
