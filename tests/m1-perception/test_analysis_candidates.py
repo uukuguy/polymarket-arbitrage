@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from polyarb.control_plane.analysis_candidates import build_group_candidate, candidate_payload
 
 
@@ -64,3 +66,11 @@ def test_candidate_payload_is_compact_group_level_fact() -> None:
         "gross_edge_bps": 1000.0,
         "max_bundle_size": 15.0,
     }
+
+
+def test_candidate_source_page_does_not_bind_a_duplicate_generation_filter() -> None:
+    source = Path("src/polyarb/control_plane/postgres.py").read_text()
+    start = source.index("WITH selected_groups AS")
+    candidate_query = source[start : source.index("rows = cursor.fetchall()", start)]
+
+    assert "WHERE groups.generation_key = %s" not in candidate_query

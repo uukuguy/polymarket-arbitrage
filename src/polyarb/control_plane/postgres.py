@@ -9733,7 +9733,6 @@ class PostgresControlPlane:
                      LEFT JOIN m1_business_quote_rows AS quotes
                        ON quotes.generation_key = %s
                       AND quotes.payload->>'neg_risk_market_id' = groups.group_id
-                    WHERE groups.generation_key = %s
                     GROUP BY groups.group_id, groups.payload, events.payload
                     ORDER BY groups.group_id ASC""",
                 (structure_generation_key, after_group_id, limit + 1, quote_generation_key),
