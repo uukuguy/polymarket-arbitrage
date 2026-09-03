@@ -199,6 +199,59 @@ def _structure_intelligence_page(
     }
 
 
+def _quote_coverage_unavailable(
+    status: str, reason_code: str, limit: int, generation_key: str | None = None
+) -> dict[str, object]:
+    page: dict[str, object] = {
+        "schema_version": "m1.quote-coverage-page.v1",
+        "status": status,
+        "reason_code": reason_code,
+        "items": [],
+        "limit": limit,
+        "next_after": None,
+    }
+    if generation_key is not None:
+        page["generation_key"] = generation_key
+    return page
+
+
+def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) -> dict[str, object]:
+    """Expose only group coverage health and the next operational action."""
+    expected = _optional_int(payload.get("expected_member_count")) or 0
+    quoted = _optional_int(payload.get("quoted_member_count")) or 0
+    missing = max(expected - quoted, 0)
+    if candidate_state == "incomplete-coverage":
+        coverage_state, action = "coverage-gap", "complete required quote legs"
+    elif candidate_state == "positive-edge":
+        coverage_state, action = "analysis-ready", "review the group in Analysis funnel"
+    elif candidate_state == "no-edge":
+        coverage_state, action = "healthy", "coverage complete; no positive group edge"
+    else:
+        coverage_state, action = "needs-context", "restore current structure context"
+    return {
+        "group_id": payload.get("group_id"),
+        "coverage_state": coverage_state,
+        "candidate_state": candidate_state,
+        "expected_member_count": expected,
+        "quoted_member_count": quoted,
+        "missing_member_count": missing,
+        "quality": payload.get("quality"),
+        "event": payload.get("event", {}),
+        "action": action,
+    }
+
+
+def _candidate_executable_economic_value(payload: dict[str, object]) -> None:
+    """Backfill a display field for a pre-existing bounded candidate generation."""
+    if payload.get("candidate_state") != "positive-edge":
+        return
+    operands = (payload.get("gross_edge_bps"), payload.get("bundle_cost"), payload.get("max_bundle_size"))
+    if not all(_finite_number(value) and float(value) > 0 for value in operands):
+        return
+    edge, cost, size = (float(value) for value in operands)
+    payload["executable_economic_value"] = round(edge * cost * size / 10_000, 8)
+
+
 def _quote_certification_identity(
     generation_key: str,
     universe_hash: str,
@@ -9629,12 +9682,16 @@ class PostgresControlPlane:
             )
             if cursor.fetchone() is None:
                 return _structure_intelligence_unavailable(current, "structure-intelligence-incomplete")
+            now_ms = int(datetime.now(UTC).timestamp() * 1_000)
             cursor.execute(
                 """SELECT event_id, payload FROM m1_structure_intelligence_events
                    WHERE generation_key=%s AND event_id > %s
-                     AND (%s::boolean IS NULL OR is_open=%s)
+                     AND (
+                         %s::boolean IS NULL
+                         OR (is_open IS TRUE AND sort_end_time_ms > %s)
+                     )
                    ORDER BY event_id LIMIT %s""",
-                (current, after, open_only, open_only, limit + 1),
+                (current, after, open_only, now_ms, limit + 1),
             )
             rows = cursor.fetchall()
         return _structure_intelligence_page(current, "events", rows, "event_id", limit)
@@ -9930,11 +9987,30 @@ class PostgresControlPlane:
                                WHEN 'incomplete-coverage' THEN 2
                                WHEN 'expired-or-closed' THEN 3
                                ELSE 4 END,
+                             CASE WHEN candidate_state = 'positive-edge'
+                                  AND gross_edge_bps > 0
+                                  AND (
+                                      (payload->>'executable_economic_value') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      OR (
+                                          (payload->>'bundle_cost') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                          AND (payload->>'max_bundle_size') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      )
+                                  )
+                                  THEN CASE
+                                      WHEN (payload->>'executable_economic_value') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      THEN (payload->>'executable_economic_value')::double precision
+                                      ELSE gross_edge_bps
+                                           * (payload->>'bundle_cost')::double precision
+                                           * (payload->>'max_bundle_size')::double precision / 10000
+                                  END
+                                  END DESC NULLS LAST,
                              gross_edge_bps DESC NULLS LAST, group_id ASC
                     LIMIT %s""",
                 (current, limit),
             )
             items = [dict(row["payload"]) for row in cursor.fetchall()]
+            for item in items:
+                _candidate_executable_economic_value(item)
         return {
             "schema_version": "m1.business-research-page.v1",
             "product": "analysis",
@@ -9947,6 +10023,85 @@ class PostgresControlPlane:
                 "state_counts": state_counts,
                 "materialized_at": _snapshot_aware(
                     projection["materialized_at"], "business_analysis.materialized_at"
+                ).isoformat(),
+            },
+            "items": items,
+            "limit": limit,
+            "next_after": None,
+        }
+
+    def business_quote_coverage_page(
+        self, *, generation_key: str | None, limit: int, after: str
+    ) -> dict[str, object]:
+        """Read current active group quote coverage without price-based discovery ranking."""
+        if not 1 <= limit <= 200 or after:
+            raise ValueError("invalid-quote-coverage-page")
+        now_ms = int(datetime.now(UTC).timestamp() * 1_000)
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT pointer.generation_key, input.structure_generation_key,
+                          projection.record_count, projection.materialized_at
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input
+                       ON input.generation_key = pointer.generation_key
+                     LEFT JOIN m1_analysis_candidate_projections AS projection
+                       ON projection.generation_key = pointer.generation_key
+                      AND projection.structure_generation_key = input.structure_generation_key
+                    WHERE pointer.pointer_key = 'quote:current'"""
+            )
+            projection = cursor.fetchone()
+            if projection is None:
+                return _quote_coverage_unavailable("not-published", "quote-not-published", limit)
+            current = str(projection["generation_key"])
+            if generation_key is not None and generation_key != current:
+                return _quote_coverage_unavailable("unavailable", "generation-not-current", limit, current)
+            if projection["record_count"] is None:
+                return _quote_coverage_unavailable(
+                    "not-published", "candidate-detail-not-published", limit, current
+                )
+            cursor.execute(
+                """WITH active_groups AS (
+                       SELECT group_id, candidate_state, payload,
+                              CASE candidate_state
+                                  WHEN 'incomplete-coverage' THEN 0
+                                  WHEN 'positive-edge' THEN 1
+                                  WHEN 'no-edge' THEN 2
+                                  ELSE 3 END AS priority
+                         FROM m1_analysis_candidate_rows
+                        WHERE generation_key = %s
+                          AND payload->'event'->>'is_open' = 'true'
+                          AND (payload->'event'->>'end_time_ms') ~ '^[0-9]+$'
+                          AND (payload->'event'->>'end_time_ms')::bigint > %s
+                     )
+                     SELECT group_id, candidate_state, payload, priority
+                       FROM active_groups
+                      ORDER BY priority ASC,
+                               GREATEST(
+                                 COALESCE((payload->>'expected_member_count')::integer, 0)
+                                 - COALESCE((payload->>'quoted_member_count')::integer, 0), 0
+                               ) DESC,
+                               (payload->'event'->>'end_time_ms')::bigint ASC,
+                               group_id ASC
+                      LIMIT %s""",
+                (current, now_ms, limit),
+            )
+            rows = cursor.fetchall()
+        items = [_quote_coverage_item(dict(row["payload"]), str(row["candidate_state"])) for row in rows]
+        state_counts: dict[str, int] = {}
+        for item in items:
+            state = str(item["coverage_state"])
+            state_counts[state] = state_counts.get(state, 0) + 1
+        return {
+            "schema_version": "m1.quote-coverage-page.v1",
+            "status": "available",
+            "generation_key": current,
+            "parent_structure_generation_key": str(projection["structure_generation_key"]),
+            "summary": {
+                "active_group_count": int(projection["record_count"]),
+                "visible_state_counts": state_counts,
+                "materialized_at": _snapshot_aware(
+                    projection["materialized_at"], "quote_coverage.materialized_at"
                 ).isoformat(),
             },
             "items": items,

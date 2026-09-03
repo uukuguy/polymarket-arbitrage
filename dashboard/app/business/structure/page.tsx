@@ -21,7 +21,7 @@ function GroupTable({ page }: { page: StructureIntelligencePage }) {
 export default async function StructurePage() {
   const overview = await readBusinessOverview();
   if (overview.status === "unavailable") return <UnavailableBusiness />;
-  const [summary, events, groups] = await Promise.all([readStructureIntelligenceSummary(), readStructureIntelligencePage("events"), readStructureIntelligencePage("groups")]);
+  const [summary, events, groups] = await Promise.all([readStructureIntelligenceSummary(), readStructureIntelligencePage("events", { openOnly: true }), readStructureIntelligencePage("groups")]);
   const { data } = overview;
   return <BusinessShell overview={data} title="Structure research" subtitle="Research the market universe as business evidence: what is active, when it ends, where activity is concentrated, and which neg-risk relationships need review.">
     <ProductCard title="Current structure generation" item={data.structure}><p>Generation: {data.structure.generation_key ?? "not published"}</p><p>Published source records: {data.structure.record_count?.toLocaleString() ?? "not published"}</p></ProductCard>

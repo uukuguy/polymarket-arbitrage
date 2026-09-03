@@ -156,6 +156,41 @@ async def business_research_page(request: Request) -> JSONResponse:
         )
 
 
+async def quote_coverage(request: Request) -> JSONResponse:
+    """Transport bounded group coverage health, separate from quote discovery."""
+    control_plane = getattr(request.app.state, "control_plane", None)
+    reader = None if control_plane is None else getattr(control_plane, "business_quote_coverage_page", None)
+    if not callable(reader):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "quote-coverage-unavailable"}, status_code=503
+        )
+    try:
+        limit = int(request.query_params.get("limit", "50"))
+        generation_key = request.query_params.get("generation_key")
+        after = request.query_params.get("after", "")
+        if not 1 <= limit <= 200 or len(after) > 256 or "\x00" in after:
+            raise ValueError("invalid-quote-coverage-page")
+        if generation_key is not None and (
+            not generation_key or len(generation_key) > 256 or "\x00" in generation_key
+        ):
+            raise ValueError("invalid-quote-coverage-page")
+        page = await run_blocking_call_with_timeout(
+            reader,
+            generation_key=generation_key,
+            limit=limit,
+            after=after,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:quote-coverage-read",
+        )
+        return JSONResponse(page)
+    except ValueError:
+        return JSONResponse({"error": "invalid quote coverage page"}, status_code=400)
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "quote-coverage-unavailable"}, status_code=503
+        )
+
+
 async def structure_intelligence(request: Request) -> JSONResponse:
     """Serve a bounded business view, never the raw Structure recovery index."""
     view = request.path_params["view"]
@@ -226,6 +261,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
             Route("/perception/control-plane", control_plane_status, methods=["GET"]),
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
             Route("/perception/business-overview", business_overview, methods=["GET"]),
+            Route("/perception/business/quote-coverage", quote_coverage, methods=["GET"]),
             Route("/perception/business/structure/{view:str}", structure_intelligence, methods=["GET"]),
             Route("/perception/business/{product:str}", business_research_page, methods=["GET"]),
         ]

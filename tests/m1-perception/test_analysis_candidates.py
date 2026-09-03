@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from polyarb.control_plane.analysis_candidates import build_group_candidate, candidate_payload
+from polyarb.control_plane.postgres import _quote_coverage_item
 
 
 def test_complete_current_group_with_positive_bundle_edge_is_positive_candidate() -> None:
@@ -65,6 +66,7 @@ def test_candidate_payload_is_compact_group_level_fact() -> None:
         "bundle_cost": 0.9,
         "gross_edge_bps": 1000.0,
         "max_bundle_size": 15.0,
+        "executable_economic_value": 1.35,
     }
 
 
@@ -81,3 +83,31 @@ def test_candidate_projection_uses_a_batched_database_write() -> None:
     stage = source[source.index("def stage_analysis_candidates") : source.index("def business_analysis_page")]
 
     assert "cursor.executemany(" in stage
+
+
+def test_quote_coverage_uses_group_completeness_not_price_extremity() -> None:
+    gap = _quote_coverage_item(
+        {
+            "group_id": "group-gap",
+            "expected_member_count": 3,
+            "quoted_member_count": 1,
+            "quality": "complete-supported",
+            "event": {"is_open": True, "end_time_ms": 1_800_000_000_000},
+        },
+        "incomplete-coverage",
+    )
+    healthy = _quote_coverage_item(
+        {
+            "group_id": "group-healthy",
+            "expected_member_count": 2,
+            "quoted_member_count": 2,
+            "quality": "complete-supported",
+            "event": {"is_open": True, "end_time_ms": 1_800_000_000_000},
+        },
+        "no-edge",
+    )
+
+    assert gap["coverage_state"] == "coverage-gap"
+    assert gap["missing_member_count"] == 2
+    assert healthy["coverage_state"] == "healthy"
+    assert "price_extremity_bps" not in gap

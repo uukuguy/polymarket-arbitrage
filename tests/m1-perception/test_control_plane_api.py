@@ -238,6 +238,31 @@ def test_business_quote_route_fails_closed_for_invalid_discovery_cursor() -> Non
     assert response.json() == {"error": "invalid business research page"}
 
 
+def test_quote_coverage_has_a_dedicated_health_reader() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class CoverageControlPlane:
+        def business_quote_coverage_page(
+            self, *, generation_key: str | None, limit: int, after: str
+        ) -> dict[str, object]:
+            assert generation_key is None
+            assert limit == 10
+            assert after == ""
+            return {
+                "schema_version": "m1.quote-coverage-page.v1",
+                "status": "available",
+                "items": [{"group_id": "group:1", "coverage_state": "healthy"}],
+                "limit": 10,
+                "next_after": None,
+            }
+
+    with TestClient(create_control_plane_app(control_plane=CoverageControlPlane())) as client:
+        response = client.get("/perception/business/quote-coverage?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "m1.quote-coverage-page.v1"
+
+
 def test_structure_intelligence_routes_expose_summary_events_and_risk_groups() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 

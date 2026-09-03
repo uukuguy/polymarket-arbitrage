@@ -76,6 +76,14 @@ def candidate_payload(
     for key in ("bundle_cost", "gross_edge_bps", "max_bundle_size"):
         if key in fact:
             payload[key] = fact[key]
+    if fact["candidate_state"] == "positive-edge":
+        payload["executable_economic_value"] = round(
+            float(fact["gross_edge_bps"])
+            * float(fact["bundle_cost"])
+            * float(fact["max_bundle_size"])
+            / 10_000,
+            8,
+        )
     octets = len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
     if octets > MAX_CANDIDATE_PAYLOAD_OCTETS:
         raise ValueError("analysis-candidate-payload-out-of-bounds")

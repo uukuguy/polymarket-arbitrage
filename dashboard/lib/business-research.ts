@@ -81,6 +81,55 @@ export async function readBusinessResearchPage(product: ResearchProduct, after =
   } catch { return null; }
 }
 
+export type QuoteCoverageItem = {
+  group_id: string;
+  coverage_state: "coverage-gap" | "analysis-ready" | "healthy" | "needs-context";
+  candidate_state: string;
+  expected_member_count: number;
+  quoted_member_count: number;
+  missing_member_count: number;
+  quality?: string;
+  event: Record<string, unknown>;
+  action: string;
+};
+export type QuoteCoveragePage = {
+  schema_version: "m1.quote-coverage-page.v1";
+  status: "available" | "not-published" | "unavailable";
+  generation_key?: string;
+  parent_structure_generation_key?: string;
+  reason_code?: string;
+  summary?: Record<string, unknown>;
+  items: QuoteCoverageItem[];
+  limit: number;
+  next_after: string | null;
+};
+
+export function decodeQuoteCoveragePage(value: unknown): QuoteCoveragePage | null {
+  if (!record(value) || value.schema_version !== "m1.quote-coverage-page.v1"
+    || !(value.status === "available" || value.status === "not-published" || value.status === "unavailable")
+    || !Array.isArray(value.items) || !nonNegativeInteger(value.limit) || value.limit < 1 || value.limit > 200
+    || !(value.next_after === null || typeof value.next_after === "string")) return null;
+  if (value.generation_key !== undefined && typeof value.generation_key !== "string") return null;
+  if (value.parent_structure_generation_key !== undefined && typeof value.parent_structure_generation_key !== "string") return null;
+  if (value.reason_code !== undefined && typeof value.reason_code !== "string") return null;
+  if (value.summary !== undefined && !record(value.summary)) return null;
+  const states = new Set(["coverage-gap", "analysis-ready", "healthy", "needs-context"]);
+  if (!value.items.every((item) => record(item)
+    && typeof item.group_id === "string" && states.has(String(item.coverage_state))
+    && typeof item.candidate_state === "string" && nonNegativeInteger(item.expected_member_count)
+    && nonNegativeInteger(item.quoted_member_count) && nonNegativeInteger(item.missing_member_count)
+    && record(item.event) && typeof item.action === "string")) return null;
+  return value as QuoteCoveragePage;
+}
+
+export async function readQuoteCoveragePage(): Promise<QuoteCoveragePage | null> {
+  try {
+    const response = await fetch(`${BASE_URL}/perception/business/quote-coverage?limit=100`, { cache: "no-store" });
+    const page = decodeQuoteCoveragePage(await response.json());
+    return response.ok && page ? page : null;
+  } catch { return null; }
+}
+
 export type StructureIntelligenceStatus = "available" | "unavailable";
 export type StructureIntelligenceSummary = {
   schema_version: "m1.structure-intelligence.v1";
@@ -129,9 +178,14 @@ export async function readStructureIntelligenceSummary(): Promise<StructureIntel
   } catch { return null; }
 }
 
-export async function readStructureIntelligencePage(product: "events" | "groups"): Promise<StructureIntelligencePage | null> {
+export async function readStructureIntelligencePage(
+  product: "events" | "groups",
+  options: { openOnly?: boolean } = {},
+): Promise<StructureIntelligencePage | null> {
   try {
-    const response = await fetch(`${BASE_URL}/perception/business/structure/${product}?limit=100`, { cache: "no-store" });
+    const params = new URLSearchParams({ limit: "100" });
+    if (product === "events" && options.openOnly === true) params.set("open_only", "true");
+    const response = await fetch(`${BASE_URL}/perception/business/structure/${product}?${params}`, { cache: "no-store" });
     const result = decodeStructureIntelligencePage(await response.json(), product);
     return response.ok && result ? result : null;
   } catch { return null; }

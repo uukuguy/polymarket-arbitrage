@@ -14900,6 +14900,44 @@ def test_structure_intelligence_reads_current_generation_only(
     assert groups["items"] == [{"group_id": "group:current", "event_id": "event:current", "quality": "complete-supported"}]
 
 
+def test_structure_intelligence_operational_events_exclude_closed_and_ended(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    current = "structure:" + "7" * 64
+    future_ms = int(datetime(2050, 1, 1, tzinfo=UTC).timestamp() * 1_000)
+    ended_ms = 1
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'structure-certify',%s,'succeeded',%s,%s)",
+            (f"{current}:certify", current, now, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,3,%s)",
+            (current, f"{current}:certify", "a" * 64, "b" * 64, now),
+        )
+    control_plane.stage_structure_intelligence(
+        generation_key=current,
+        events=(
+            ("event:future", {"title": "Future", "is_open": True, "end_time_ms": future_ms}),
+            ("event:ended", {"title": "Ended", "is_open": True, "end_time_ms": ended_ms}),
+            ("event:closed", {"title": "Closed", "is_open": False, "end_time_ms": future_ms}),
+        ),
+        groups=(),
+        summary={"event_count": 3, "market_count": 3},
+    )
+
+    operational = control_plane.structure_intelligence_events(
+        generation_key=None, limit=10, after="", open_only=True
+    )
+    archive = control_plane.structure_intelligence_events(
+        generation_key=None, limit=10, after="", open_only=None
+    )
+
+    assert [item["event_id"] for item in operational["items"]] == ["event:future"]
+    assert [item["event_id"] for item in archive["items"]] == ["event:closed", "event:ended", "event:future"]
+
+
 def test_business_quote_page_exposes_only_current_generation_rows(
     control_plane: PostgresControlPlane,
 ) -> None:

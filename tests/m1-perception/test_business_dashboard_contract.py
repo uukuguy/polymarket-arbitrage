@@ -46,24 +46,30 @@ def test_business_research_routes_are_separated_by_truth_layer() -> None:
     assert "structure_records" in analysis_page
     assert "quote_records" in analysis_page
     assert "certified_opportunities" in analysis_page
+    assert "executable economic value" in analysis_page
     assert "real current zero" in (root / "opportunities/page.tsx").read_text()
 
 
-def test_quote_coverage_renders_discovery_evidence_not_an_opportunity_claim() -> None:
+def test_structure_default_reads_only_open_unexpired_events() -> None:
+    page = Path("dashboard/app/business/structure/page.tsx").read_text()
+
+    assert 'readStructureIntelligencePage("events", { openOnly: true })' in page
+
+
+def test_quote_coverage_renders_health_not_price_discovery() -> None:
     page = Path("dashboard/app/business/quotes/page.tsx").read_text()
 
-    assert "Research leads" in page
-    assert "executable notional" in page
-    assert "research priority, not a certified opportunity" in page
-    assert "event_context" in page
-    assert "neg_risk_context" in page
-    assert "discovery" in page
+    assert "readQuoteCoveragePage" in page
+    assert "Group coverage health" in page
+    assert "Coverage gap" in page
+    assert "Price extremity is intentionally not a signal" in page
+    assert "price_extremity_bps" not in page
     assert "formatEndTime" in page
 
 
-def test_business_research_decoder_checks_quote_discovery_contract() -> None:
+def test_quote_coverage_decoder_checks_health_contract() -> None:
     reader = Path("dashboard/lib/business-research.ts").read_text()
 
-    assert "price_extremity_bps" in reader
-    assert "executable_notional_usd" in reader
-    assert "missing-or-invalid-quote" in reader
+    assert "m1.quote-coverage-page.v1" in reader
+    assert "coverage-gap" in reader
+    assert "readQuoteCoveragePage" in reader
