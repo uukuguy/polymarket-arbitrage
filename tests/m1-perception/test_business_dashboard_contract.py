@@ -56,6 +56,7 @@ def test_quote_coverage_renders_discovery_evidence_not_an_opportunity_claim() ->
     assert "event_context" in page
     assert "neg_risk_context" in page
     assert "discovery" in page
+    assert "formatEndTime" in page
 
 
 def test_business_research_decoder_checks_quote_discovery_contract() -> None:
