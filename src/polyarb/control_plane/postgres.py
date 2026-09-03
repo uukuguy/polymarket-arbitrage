@@ -10066,6 +10066,19 @@ class PostgresControlPlane:
                     "not-published", "candidate-detail-not-published", limit, current
                 )
             cursor.execute(
+                """SELECT candidate_state, count(*) AS count
+                     FROM m1_analysis_candidate_rows
+                    WHERE generation_key = %s
+                      AND payload->'event'->>'is_open' = 'true'
+                      AND (payload->'event'->>'end_time_ms') ~ '^[0-9]+$'
+                      AND (payload->'event'->>'end_time_ms')::bigint > %s
+                    GROUP BY candidate_state""",
+                (current, now_ms),
+            )
+            total_state_counts = {
+                str(row["candidate_state"]): int(row["count"]) for row in cursor.fetchall()
+            }
+            cursor.execute(
                 """WITH active_groups AS (
                        SELECT group_id, candidate_state, payload,
                               CASE candidate_state
@@ -10093,18 +10106,20 @@ class PostgresControlPlane:
             )
             rows = cursor.fetchall()
         items = [_quote_coverage_item(dict(row["payload"]), str(row["candidate_state"])) for row in rows]
-        state_counts: dict[str, int] = {}
-        for item in items:
-            state = str(item["coverage_state"])
-            state_counts[state] = state_counts.get(state, 0) + 1
+        state_counts = {
+            "coverage-gap": total_state_counts.get("incomplete-coverage", 0),
+            "analysis-ready": total_state_counts.get("positive-edge", 0),
+            "healthy": total_state_counts.get("no-edge", 0),
+            "needs-context": total_state_counts.get("context-unavailable", 0),
+        }
         return {
             "schema_version": "m1.quote-coverage-page.v1",
             "status": "available",
             "generation_key": current,
             "parent_structure_generation_key": str(projection["structure_generation_key"]),
             "summary": {
-                "active_group_count": int(projection["record_count"]),
-                "visible_state_counts": state_counts,
+                "active_group_count": sum(total_state_counts.values()),
+                "state_counts": state_counts,
                 "materialized_at": _snapshot_aware(
                     projection["materialized_at"], "quote_coverage.materialized_at"
                 ).isoformat(),

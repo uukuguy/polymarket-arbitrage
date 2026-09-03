@@ -62,6 +62,7 @@ def test_quote_coverage_renders_health_not_price_discovery() -> None:
     assert "readQuoteCoveragePage" in page
     assert "Group coverage health" in page
     assert "Coverage gap" in page
+    assert "Active coverage gaps" in page
     assert "Price extremity is intentionally not a signal" in page
     assert "price_extremity_bps" not in page
     assert "formatEndTime" in page
