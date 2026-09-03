@@ -1608,9 +1608,24 @@ def _backfill_analysis_candidates(
     capacity = control_plane.database_capacity()
     if capacity["state"] in {"critical", "exhausted"}:
         raise RuntimeError("analysis-candidate-capacity-not-admitted")
-    source = control_plane.analysis_candidate_sources(generation_key=generation_key)
-    if source["status"] != "available":
-        raise RuntimeError(f"analysis-candidate-source-{source.get('reason_code', source['status'])}")
+    after_group_id = ""
+    source_items: list[Mapping[str, object]] = []
+    source: Mapping[str, object] | None = None
+    while True:
+        source = control_plane.analysis_candidate_sources(
+            generation_key=generation_key, after_group_id=after_group_id, limit=500
+        )
+        if source["status"] != "available":
+            raise RuntimeError(
+                f"analysis-candidate-source-{source.get('reason_code', source['status'])}"
+            )
+        source_items.extend(cast(Sequence[Mapping[str, object]], source["items"]))
+        next_after_group_id = source.get("next_after_group_id")
+        if next_after_group_id is None:
+            break
+        after_group_id = str(next_after_group_id)
+    if source is None or len(source_items) > 20_000:
+        raise RuntimeError("analysis-candidate-source-over-budget")
     evaluated_at_ms = int(datetime.now(UTC).timestamp() * 1_000)
     rows = tuple(
         candidate_payload(
@@ -1620,7 +1635,7 @@ def _backfill_analysis_candidates(
             quotes=cast(Sequence[Mapping[str, object]], item["quotes"]),
             evaluated_at_ms=evaluated_at_ms,
         )
-        for item in cast(Sequence[Mapping[str, object]], source["items"])
+        for item in source_items
     )
     projection_octets = sum(
         len(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()) for row in rows

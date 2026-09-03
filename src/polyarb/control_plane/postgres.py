@@ -9674,9 +9674,11 @@ class PostgresControlPlane:
                 )
 
     def analysis_candidate_sources(
-        self, *, generation_key: str | None
+        self, *, generation_key: str | None, after_group_id: str = "", limit: int = 500
     ) -> dict[str, object]:
         """Read current, same-lineage group inputs for bounded analysis materialization."""
+        if not 1 <= limit <= 500 or len(after_group_id) > 256:
+            raise ValueError("invalid-analysis-candidate-source-page")
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
@@ -9713,11 +9715,18 @@ class PostgresControlPlane:
                     "items": [],
                 }
             cursor.execute(
-                """SELECT groups.group_id, groups.payload AS group_payload,
+                """WITH selected_groups AS (
+                       SELECT generation_key, group_id, event_id, payload
+                         FROM m1_structure_intelligence_groups
+                        WHERE generation_key = %s AND group_id > %s
+                        ORDER BY group_id ASC
+                        LIMIT %s
+                     )
+                     SELECT groups.group_id, groups.payload AS group_payload,
                           events.payload AS event_payload,
                           COALESCE(jsonb_agg(quotes.payload) FILTER (WHERE quotes.token_id IS NOT NULL),
                                    '[]'::jsonb) AS quote_payloads
-                     FROM m1_structure_intelligence_groups AS groups
+                     FROM selected_groups AS groups
                      LEFT JOIN m1_structure_intelligence_events AS events
                        ON events.generation_key = groups.generation_key
                       AND events.event_id = groups.event_id
@@ -9726,13 +9735,12 @@ class PostgresControlPlane:
                       AND quotes.payload->>'neg_risk_market_id' = groups.group_id
                     WHERE groups.generation_key = %s
                     GROUP BY groups.group_id, groups.payload, events.payload
-                    ORDER BY groups.group_id ASC
-                    LIMIT 20001""",
-                (quote_generation_key, structure_generation_key),
+                    ORDER BY groups.group_id ASC""",
+                (structure_generation_key, after_group_id, limit + 1, quote_generation_key),
             )
             rows = cursor.fetchall()
-        if len(rows) > 20_000:
-            raise ControlPlaneError("analysis-candidate-source-over-budget")
+        has_more = len(rows) > limit
+        page = rows[:limit]
         return {
             "status": "available",
             "generation_key": quote_generation_key,
@@ -9744,8 +9752,9 @@ class PostgresControlPlane:
                     "event": {} if row["event_payload"] is None else dict(row["event_payload"]),
                     "quotes": tuple(row["quote_payloads"]),
                 }
-                for row in rows
+                for row in page
             ],
+            "next_after_group_id": str(page[-1]["group_id"]) if has_more else None,
         }
 
     def stage_analysis_candidates(
