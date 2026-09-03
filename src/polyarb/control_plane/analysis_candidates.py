@@ -9,6 +9,22 @@ from math import isfinite
 MAX_CANDIDATE_PAYLOAD_OCTETS = 2_048
 
 
+def candidate_economics(*, bundle_cost: object, max_bundle_size: object) -> dict[str, float] | None:
+    """Return theoretical all-legs bundle economics, never an execution guarantee."""
+    if not (_finite_number(bundle_cost) and _finite_number(max_bundle_size)):
+        return None
+    cost, size = float(bundle_cost), float(max_bundle_size)
+    if not 0 < cost < 1 or size <= 0:
+        return None
+    capital = cost * size
+    profit = (1 - cost) * size
+    return {
+        "capital_required_usd": round(capital, 8),
+        "gross_profit_usd": round(profit, 8),
+        "gross_roi_bps": round(profit / capital * 10_000, 8),
+    }
+
+
 def build_group_candidate(
     *,
     group: Mapping[str, object],

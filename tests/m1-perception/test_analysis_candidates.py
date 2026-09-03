@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from polyarb.control_plane.analysis_candidates import build_group_candidate, candidate_payload
+from polyarb.control_plane.analysis_candidates import (
+    build_group_candidate,
+    candidate_economics,
+    candidate_payload,
+)
 from polyarb.control_plane.postgres import _quote_coverage_item
 
 
@@ -22,6 +26,16 @@ def test_complete_current_group_with_positive_bundle_edge_is_positive_candidate(
         "bundle_cost": 0.9,
         "gross_edge_bps": 1000.0,
         "max_bundle_size": 15.0,
+    }
+
+
+def test_positive_candidate_economics_use_bundle_payout_not_rank_proxy() -> None:
+    economics = candidate_economics(bundle_cost=0.9, max_bundle_size=15.0)
+
+    assert economics == {
+        "capital_required_usd": 13.5,
+        "gross_profit_usd": 1.5,
+        "gross_roi_bps": 1111.11111111,
     }
 
 

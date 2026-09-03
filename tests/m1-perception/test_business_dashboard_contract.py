@@ -46,7 +46,10 @@ def test_business_research_routes_are_separated_by_truth_layer() -> None:
     assert "structure_records" in analysis_page
     assert "quote_records" in analysis_page
     assert "certified_opportunities" in analysis_page
-    assert "executable economic value" in analysis_page
+    assert "gross profit" in analysis_page
+    assert "capital required" in analysis_page
+    assert "gross ROI" in analysis_page
+    assert "executable economic value" not in analysis_page
     assert "real current zero" in (root / "opportunities/page.tsx").read_text()
 
 

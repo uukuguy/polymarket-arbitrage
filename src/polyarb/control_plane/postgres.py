@@ -246,15 +246,17 @@ def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) ->
     }
 
 
-def _candidate_executable_economic_value(payload: dict[str, object]) -> None:
-    """Backfill a display field for a pre-existing bounded candidate generation."""
+def _candidate_display_economics(payload: dict[str, object]) -> None:
+    """Attach truthful research-only bundle facts without rewriting stored rows."""
     if payload.get("candidate_state") != "positive-edge":
         return
-    operands = (payload.get("gross_edge_bps"), payload.get("bundle_cost"), payload.get("max_bundle_size"))
-    if not all(_finite_number(value) and float(value) > 0 for value in operands):
-        return
-    edge, cost, size = (float(value) for value in operands)
-    payload["executable_economic_value"] = round(edge * cost * size / 10_000, 8)
+    from .analysis_candidates import candidate_economics
+
+    economics = candidate_economics(
+        bundle_cost=payload.get("bundle_cost"), max_bundle_size=payload.get("max_bundle_size")
+    )
+    if economics is not None:
+        payload.update(economics)
 
 
 def _quote_certification_identity(
@@ -9995,19 +9997,11 @@ class PostgresControlPlane:
                              CASE WHEN candidate_state = 'positive-edge'
                                   AND gross_edge_bps > 0
                                   AND (
-                                      (payload->>'executable_economic_value') ~ '^[0-9]+(\\.[0-9]+)?$'
-                                      OR (
-                                          (payload->>'bundle_cost') ~ '^[0-9]+(\\.[0-9]+)?$'
-                                          AND (payload->>'max_bundle_size') ~ '^[0-9]+(\\.[0-9]+)?$'
-                                      )
+                                      (payload->>'bundle_cost') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND (payload->>'max_bundle_size') ~ '^[0-9]+(\\.[0-9]+)?$'
                                   )
-                                  THEN CASE
-                                      WHEN (payload->>'executable_economic_value') ~ '^[0-9]+(\\.[0-9]+)?$'
-                                      THEN (payload->>'executable_economic_value')::double precision
-                                      ELSE gross_edge_bps
-                                           * (payload->>'bundle_cost')::double precision
-                                           * (payload->>'max_bundle_size')::double precision / 10000
-                                  END
+                                  THEN (1 - (payload->>'bundle_cost')::double precision)
+                                       * (payload->>'max_bundle_size')::double precision
                                   END DESC NULLS LAST,
                              gross_edge_bps DESC NULLS LAST, group_id ASC
                     LIMIT %s""",
@@ -10015,7 +10009,7 @@ class PostgresControlPlane:
             )
             items = [dict(row["payload"]) for row in cursor.fetchall()]
             for item in items:
-                _candidate_executable_economic_value(item)
+                _candidate_display_economics(item)
         return {
             "schema_version": "m1.business-research-page.v1",
             "product": "analysis",
