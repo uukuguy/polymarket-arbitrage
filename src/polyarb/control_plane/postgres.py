@@ -35,6 +35,11 @@ from .models import (
     StructureRangeSpec,
     StructureSourcePageSpec,
 )
+from .quote_discovery import (
+    decode_discovery_cursor,
+    encode_discovery_cursor,
+    quote_discovery,
+)
 from .recovery_records import RecoveryActionRecord
 from .runtime_contract import RUNTIME_STAGE_REGISTRY, RetryableHeartbeatError
 from .runtime_deadlines import runtime_retry_policy
@@ -128,6 +133,28 @@ def _optional_bool(value: object) -> bool | None:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _quote_event_context(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {"status": "not-indexed"}
+    return {
+        "status": "available",
+        "title": _optional_text(value.get("title")),
+        "is_open": _optional_bool(value.get("is_open")),
+        "end_time_ms": _optional_int(value.get("end_time_ms")),
+    }
+
+
+def _quote_neg_risk_context(*, group_id: object, value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {"status": "not-indexed"}
+    return {
+        "status": "available",
+        "group_id": _optional_text(group_id),
+        "quality": _optional_text(value.get("quality")),
+        "expected_member_count": _optional_int(value.get("expected_member_count")),
+    }
 
 
 def _structure_intelligence_unavailable(
@@ -9643,20 +9670,26 @@ class PostgresControlPlane:
         """Read one current, pointer-gated page of staged Quote research rows."""
         if not 1 <= limit <= 200 or len(after) > 256:
             raise ValueError("invalid-business-quote-page")
+        cursor_position = decode_discovery_cursor(after)
+        if after and cursor_position is None:
+            raise ValueError("invalid-business-quote-page")
+        after_score, after_notional, after_token = cursor_position or (0.0, 0.0, "")
         with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
             _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """SELECT pointer.generation_key, manifest.record_count,
+                          input.structure_generation_key,
                           COALESCE((
-                              SELECT sum(input.leg_count)
-                              FROM m1_quote_batch_inputs AS input
-                              WHERE input.job_key LIKE pointer.generation_key || ':batch:%'
+                              SELECT sum(batch_input.leg_count)
+                              FROM m1_quote_batch_inputs AS batch_input
+                              WHERE batch_input.job_key LIKE pointer.generation_key || ':batch:%'
                           ), manifest.record_count) AS expected_research_record_count,
                           (SELECT count(*) FROM m1_business_quote_rows AS research
                            WHERE research.generation_key = pointer.generation_key)
                               AS materialized_record_count
                    FROM m1_publication_pointers pointer
                    JOIN m1_generation_manifests manifest ON manifest.generation_key = pointer.generation_key
+                   LEFT JOIN m1_quote_generation_inputs input ON input.generation_key = pointer.generation_key
                    WHERE pointer.pointer_key='quote:current'"""
             )
             pointer = cursor.fetchone()
@@ -9681,14 +9714,89 @@ class PostgresControlPlane:
                     "next_after": None,
                 }
             cursor.execute(
-                """SELECT token_id, payload FROM m1_business_quote_rows
-                   WHERE generation_key=%s AND token_id > %s ORDER BY token_id LIMIT %s""",
-                (current, after, limit + 1),
+                """WITH quote_source AS (
+                       SELECT research.token_id, research.payload,
+                              event_projection.payload AS event_payload,
+                              group_projection.payload AS group_payload,
+                              CASE WHEN research.payload->>'terminal_state' = 'executable'
+                                      AND research.payload->>'best_ask_price' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND research.payload->>'best_ask_size' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                   THEN (research.payload->>'best_ask_price')::double precision
+                                   ELSE NULL END AS ask_price,
+                              CASE WHEN research.payload->>'terminal_state' = 'executable'
+                                      AND research.payload->>'best_ask_price' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND research.payload->>'best_ask_size' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                   THEN (research.payload->>'best_ask_size')::double precision
+                                   ELSE NULL END AS ask_size
+                         FROM m1_business_quote_rows AS research
+                    LEFT JOIN m1_structure_intelligence_events AS event_projection
+                           ON event_projection.generation_key=%s
+                          AND event_projection.event_id=research.payload->>'event_id'
+                    LEFT JOIN m1_structure_intelligence_groups AS group_projection
+                           ON group_projection.generation_key=%s
+                          AND group_projection.group_id=research.payload->>'neg_risk_market_id'
+                        WHERE research.generation_key=%s
+                     ), ranked AS (
+                       SELECT *,
+                              CASE WHEN ask_price BETWEEN 0 AND 1 AND ask_size > 0
+                                   THEN ask_price * ask_size ELSE 0 END AS executable_notional_usd,
+                              CASE WHEN ask_price BETWEEN 0 AND 1 AND ask_size > 0
+                                   THEN abs(ask_price - 0.5) * 10000 ELSE 0 END AS price_extremity_bps
+                         FROM quote_source
+                     ), scored AS (
+                       SELECT *, ln(1 + executable_notional_usd) * price_extremity_bps AS discovery_score
+                         FROM ranked
+                     )
+                     SELECT token_id, payload, event_payload, group_payload,
+                            executable_notional_usd, discovery_score
+                       FROM scored
+                      WHERE %s OR (discovery_score, executable_notional_usd, token_id)
+                           < (%s, %s, %s)
+                      ORDER BY discovery_score DESC, executable_notional_usd DESC, token_id ASC
+                      LIMIT %s""",
+                (
+                    pointer["structure_generation_key"],
+                    pointer["structure_generation_key"],
+                    current,
+                    cursor_position is None,
+                    after_score,
+                    after_notional,
+                    after_token,
+                    limit + 1,
+                ),
             )
             rows = cursor.fetchall()
             has_more = len(rows) > limit
             page = rows[:limit]
-            return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "generation_key": current, "items": [{"token_id": str(row["token_id"]), **dict(row["payload"])} for row in page], "limit": limit, "next_after": str(page[-1]["token_id"]) if has_more else None}
+            items = []
+            for row in page:
+                payload = dict(row["payload"])
+                discovery = quote_discovery(payload)
+                discovery["executable_notional_usd"] = round(
+                    float(row["executable_notional_usd"]), 8
+                )
+                discovery["score"] = round(float(row["discovery_score"]), 8)
+                items.append(
+                    {
+                        "token_id": str(row["token_id"]),
+                        **payload,
+                        "discovery": discovery,
+                        "event_context": _quote_event_context(row["event_payload"]),
+                        "neg_risk_context": _quote_neg_risk_context(
+                            group_id=payload.get("neg_risk_market_id"),
+                            value=row["group_payload"],
+                        ),
+                    }
+                )
+            next_after = None
+            if has_more:
+                final = page[-1]
+                next_after = encode_discovery_cursor(
+                    float(final["discovery_score"]),
+                    float(final["executable_notional_usd"]),
+                    str(final["token_id"]),
+                )
+            return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "generation_key": current, "items": items, "limit": limit, "next_after": next_after}
 
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:
         """Read one complete, atomically published opportunity projection."""

@@ -14933,7 +14933,117 @@ def test_business_quote_page_exposes_only_current_generation_rows(
 
     assert page["status"] == "available"
     assert page["generation_key"] == current
-    assert page["items"] == [{"token_id": "token:001", "market_id": "market:001", "best_ask": "0.49"}]
+    assert page["items"][0] == {
+        "token_id": "token:001",
+        "market_id": "market:001",
+        "best_ask": "0.49",
+        "discovery": {
+            "executable_notional_usd": 0.0,
+            "price_extremity_bps": 0.0,
+            "score": 0.0,
+            "reasons": ["not-executable"],
+        },
+        "event_context": {"status": "not-indexed"},
+        "neg_risk_context": {"status": "not-indexed"},
+    }
+
+
+def test_business_quote_page_orders_research_leads_and_uses_exact_parent_context(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure = "structure:" + "c" * 64
+    current = "quote:" + "d" * 64
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (current, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,%s,%s,'succeeded',%s,%s)",
+                (job_key, job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,3,%s)",
+                (generation, job_key, "a" * 64, "b" * 64, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (current, structure, "c" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)",
+            (current, now),
+        )
+    control_plane.stage_structure_intelligence(
+        generation_key=structure,
+        events=(("event:a", {"title": "Event A", "is_open": True, "end_time_ms": 1_800_000_000_000}),),
+        groups=(("group:a", {"event_id": "event:a", "quality": "complete-supported", "expected_member_count": 3}),),
+        summary={"event_count": 1},
+    )
+    control_plane.stage_business_quote_rows(
+        generation_key=current,
+        rows=(
+            ("token:shallow", {"event_id": "event:a", "neg_risk_market_id": "group:a", "terminal_state": "executable", "best_ask_price": 0.001, "best_ask_size": 20.0}),
+            ("token:deep", {"event_id": "event:a", "neg_risk_market_id": "group:a", "terminal_state": "executable", "best_ask_price": 0.70, "best_ask_size": 57.0}),
+            ("token:missing", {"event_id": "event:a", "terminal_state": "missing-book"}),
+        ),
+    )
+
+    page = control_plane.business_quote_page(generation_key=None, limit=2, after="")
+
+    assert [item["token_id"] for item in page["items"]] == ["token:deep", "token:shallow"]
+    assert page["items"][0]["discovery"]["reasons"] == [
+        "meaningful-executable-depth",
+        "non-neutral-yes-price",
+    ]
+    assert page["items"][0]["event_context"]["title"] == "Event A"
+    assert page["items"][0]["neg_risk_context"] == {
+        "status": "available",
+        "group_id": "group:a",
+        "quality": "complete-supported",
+        "expected_member_count": 3,
+    }
+    next_page = control_plane.business_quote_page(
+        generation_key=None, limit=2, after=page["next_after"]
+    )
+    assert [item["token_id"] for item in next_page["items"]] == ["token:missing"]
+
+
+def test_business_quote_page_does_not_join_newer_structure_context(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    parent, current, newer = "structure:" + "e" * 64, "quote:" + "f" * 64, "structure:" + "0" * 64
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((parent, "structure-certify"), (current, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,%s,%s,'succeeded',%s,%s)",
+                (job_key, job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, job_key, "a" * 64, "b" * 64, now),
+            )
+        connection.execute(
+            "INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)",
+            (current, parent, "c" * 64, now),
+        )
+        connection.execute(
+            "INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)",
+            (current, now),
+        )
+    control_plane.stage_structure_intelligence(
+        generation_key=newer,
+        events=(("event:new", {"title": "Wrong generation"}),),
+        groups=(),
+        summary={"event_count": 1},
+    )
+    control_plane.stage_business_quote_rows(
+        generation_key=current,
+        rows=(("token:one", {"event_id": "event:new", "terminal_state": "executable", "best_ask_price": 0.7, "best_ask_size": 57}),),
+    )
+
+    item = control_plane.business_quote_page(generation_key=None, limit=10, after="")["items"][0]
+
+    assert item["event_context"] == {"status": "not-indexed"}
 
 
 def test_business_quote_page_rejects_an_incomplete_current_research_index(
@@ -15048,10 +15158,9 @@ def test_business_quote_page_uses_admitted_leg_count_for_research_index_integrit
     page = control_plane.business_quote_page(generation_key=None, limit=10, after="")
 
     assert page["status"] == "available"
-    assert page["items"] == [
-        {"token_id": "token:001", "terminal_state": "executable"},
-        {"token_id": "token:002", "terminal_state": "missing-book"},
-    ]
+    assert [item["token_id"] for item in page["items"]] == ["token:001", "token:002"]
+    assert page["items"][0]["discovery"]["reasons"] == ["missing-or-invalid-quote"]
+    assert page["items"][1]["discovery"]["reasons"] == ["not-executable"]
 
 
 def test_structure_range_receipt_atomically_stages_business_research_rows(

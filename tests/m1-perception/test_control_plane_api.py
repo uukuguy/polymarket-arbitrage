@@ -211,6 +211,22 @@ def test_business_research_page_routes_transport_generation_bound_rows() -> None
     assert quote.json()["next_after"] == "market:001"
 
 
+def test_business_quote_route_fails_closed_for_invalid_discovery_cursor() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class CursorValidatingControlPlane:
+        def business_quote_page(
+            self, *, generation_key: str | None, limit: int, after: str
+        ) -> dict[str, object]:
+            raise ValueError("invalid-business-quote-page")
+
+    with TestClient(create_control_plane_app(control_plane=CursorValidatingControlPlane())) as client:
+        response = client.get("/perception/business/quotes?after=not-a-discovery-cursor")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid business research page"}
+
+
 def test_structure_intelligence_routes_expose_summary_events_and_risk_groups() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 
