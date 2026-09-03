@@ -215,6 +215,16 @@ def _quote_coverage_unavailable(
     return page
 
 
+def _event_research_unavailable(status: str, reason_code: str, event_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "m1.event-research-detail.v1",
+        "status": status,
+        "reason_code": reason_code,
+        "event_id": event_id,
+        "groups": [],
+    }
+
+
 def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) -> dict[str, object]:
     """Expose only group coverage health and the next operational action."""
     expected = _optional_int(payload.get("expected_member_count")) or 0
@@ -10121,6 +10131,77 @@ class PostgresControlPlane:
             "items": items,
             "limit": limit,
             "next_after": None,
+        }
+
+    def business_event_detail(
+        self, *, event_id: str, focus_group_id: str | None, observed_generation: str | None
+    ) -> dict[str, object]:
+        """Read one operational event and its bounded same-lineage research facts."""
+        now_ms = int(datetime.now(UTC).timestamp() * 1_000)
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT pointer.generation_key, input.structure_generation_key,
+                          projection.materialized_at
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input ON input.generation_key=pointer.generation_key
+                     LEFT JOIN m1_analysis_candidate_projections AS projection
+                       ON projection.generation_key=pointer.generation_key
+                      AND projection.structure_generation_key=input.structure_generation_key
+                    WHERE pointer.pointer_key='quote:current'"""
+            )
+            anchor = cursor.fetchone()
+            if anchor is None:
+                return _event_research_unavailable("not-published", "quote-not-published", event_id)
+            quote_generation = str(anchor["generation_key"])
+            structure_generation = str(anchor["structure_generation_key"])
+            if anchor["materialized_at"] is None:
+                return _event_research_unavailable("not-published", "candidate-detail-not-published", event_id)
+            cursor.execute(
+                """SELECT payload FROM m1_structure_intelligence_events
+                   WHERE generation_key=%s AND event_id=%s
+                     AND is_open IS TRUE AND sort_end_time_ms > %s""",
+                (structure_generation, event_id, now_ms),
+            )
+            event_row = cursor.fetchone()
+            if event_row is None:
+                return _event_research_unavailable("unavailable", "event-not-operational", event_id)
+            cursor.execute(
+                """SELECT groups.group_id, groups.payload AS group_payload,
+                          candidates.candidate_state, candidates.payload AS candidate_payload
+                     FROM m1_structure_intelligence_groups AS groups
+                     LEFT JOIN m1_analysis_candidate_rows AS candidates
+                       ON candidates.generation_key=%s AND candidates.group_id=groups.group_id
+                    WHERE groups.generation_key=%s AND groups.event_id=%s
+                    ORDER BY CASE candidates.candidate_state WHEN 'positive-edge' THEN 0
+                              WHEN 'incomplete-coverage' THEN 1 WHEN 'context-unavailable' THEN 2
+                              WHEN 'no-edge' THEN 3 ELSE 4 END,
+                             candidates.gross_edge_bps DESC NULLS LAST, groups.group_id ASC
+                    LIMIT 200""",
+                (quote_generation, structure_generation, event_id),
+            )
+            rows = cursor.fetchall()
+        groups: list[dict[str, object]] = []
+        state_counts: dict[str, int] = {}
+        for row in rows:
+            group = dict(row["group_payload"])
+            candidate = {} if row["candidate_payload"] is None else dict(row["candidate_payload"])
+            state = str(row["candidate_state"] or "context-unavailable")
+            state_counts[state] = state_counts.get(state, 0) + 1
+            _candidate_display_economics(candidate)
+            groups.append({
+                "group_id": str(row["group_id"]), "structure": group,
+                "candidate_state": state, "candidate": candidate,
+            })
+        focus = next((group for group in groups if group["group_id"] == focus_group_id), None)
+        return {
+            "schema_version": "m1.event-research-detail.v1", "status": "available", "event_id": event_id,
+            "anchor": {"quote_generation_key": quote_generation, "structure_generation_key": structure_generation,
+                       "changed_since_entry": observed_generation is not None and observed_generation != quote_generation,
+                       "materialized_at": _snapshot_aware(anchor["materialized_at"], "event_research.materialized_at").isoformat()},
+            "event": dict(event_row["payload"]), "state_counts": state_counts,
+            "groups": groups, "focused_group": focus,
+            "cautions": ["Fees, slippage, simultaneous execution, resolution, and settlement delay are not assessed."],
         }
 
     def business_quote_page(

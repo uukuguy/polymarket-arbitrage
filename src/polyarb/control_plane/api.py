@@ -191,6 +191,38 @@ async def quote_coverage(request: Request) -> JSONResponse:
         )
 
 
+async def event_research_detail(request: Request) -> JSONResponse:
+    """Serve one current, same-lineage event research envelope."""
+    control_plane = getattr(request.app.state, "control_plane", None)
+    reader = None if control_plane is None else getattr(control_plane, "business_event_detail", None)
+    if not callable(reader):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "event-research-unavailable"}, status_code=503
+        )
+    try:
+        event_id = request.path_params["event_id"]
+        focus_group_id = request.query_params.get("focus_group_id")
+        observed_generation = request.query_params.get("observed_generation")
+        for value in (event_id, focus_group_id, observed_generation):
+            if value is not None and (not value or len(value) > 256 or "\x00" in value):
+                raise ValueError("invalid-event-research-detail")
+        detail = await run_blocking_call_with_timeout(
+            reader,
+            event_id=event_id,
+            focus_group_id=focus_group_id,
+            observed_generation=observed_generation,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:event-research-detail",
+        )
+        return JSONResponse(detail)
+    except ValueError:
+        return JSONResponse({"error": "invalid event research detail"}, status_code=400)
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "event-research-unavailable"}, status_code=503
+        )
+
+
 async def structure_intelligence(request: Request) -> JSONResponse:
     """Serve a bounded business view, never the raw Structure recovery index."""
     view = request.path_params["view"]
@@ -262,6 +294,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
             Route("/perception/business-overview", business_overview, methods=["GET"]),
             Route("/perception/business/quote-coverage", quote_coverage, methods=["GET"]),
+            Route("/perception/business/events/{event_id:str}", event_research_detail, methods=["GET"]),
             Route("/perception/business/structure/{view:str}", structure_intelligence, methods=["GET"]),
             Route("/perception/business/{product:str}", business_research_page, methods=["GET"]),
         ]

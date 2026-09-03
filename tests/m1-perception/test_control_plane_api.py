@@ -263,6 +263,32 @@ def test_quote_coverage_has_a_dedicated_health_reader() -> None:
     assert response.json()["schema_version"] == "m1.quote-coverage-page.v1"
 
 
+def test_event_detail_route_transports_one_fenced_authority_envelope() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class EventReader:
+        def business_event_detail(
+            self, *, event_id: str, focus_group_id: str | None, observed_generation: str | None
+        ) -> dict[str, object]:
+            assert (event_id, focus_group_id, observed_generation) == (
+                "event:1", "group:1", "quote:old"
+            )
+            return {
+                "schema_version": "m1.event-research-detail.v1",
+                "status": "available",
+                "event_id": event_id,
+                "groups": [],
+            }
+
+    with TestClient(create_control_plane_app(control_plane=EventReader())) as client:
+        response = client.get(
+            "/perception/business/events/event%3A1?focus_group_id=group%3A1&observed_generation=quote%3Aold"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "m1.event-research-detail.v1"
+
+
 def test_structure_intelligence_routes_expose_summary_events_and_risk_groups() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 
