@@ -23,6 +23,36 @@ function nonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+const QUOTE_DISCOVERY_REASONS = new Set([
+  "meaningful-executable-depth",
+  "non-neutral-yes-price",
+  "insufficient-executable-depth",
+  "missing-or-invalid-quote",
+  "not-executable",
+]);
+
+function finiteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validQuoteContext(value: unknown): boolean {
+  if (!record(value) || typeof value.status !== "string") return false;
+  if (value.status === "not-indexed") return Object.keys(value).length === 1;
+  return value.status === "available";
+}
+
+function validQuoteDiscoveryItem(value: Record<string, unknown>): boolean {
+  const discovery = value.discovery;
+  return record(discovery)
+    && finiteNonNegative(discovery.executable_notional_usd)
+    && finiteNonNegative(discovery.price_extremity_bps)
+    && finiteNonNegative(discovery.score)
+    && Array.isArray(discovery.reasons)
+    && discovery.reasons.every((reason) => typeof reason === "string" && QUOTE_DISCOVERY_REASONS.has(reason))
+    && validQuoteContext(value.event_context)
+    && validQuoteContext(value.neg_risk_context);
+}
+
 export function decodeBusinessResearchPage(value: unknown, product: ResearchProduct): ResearchPage | null {
   const limit = record(value) ? value.limit : undefined;
   if (!record(value) || value.schema_version !== "m1.business-research-page.v1" || !Array.isArray(value.items) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !(value.next_after === null || typeof value.next_after === "string")) return null;
@@ -35,6 +65,7 @@ export function decodeBusinessResearchPage(value: unknown, product: ResearchProd
   }
   const identity = product === "structure" ? "entity_id" : "token_id";
   if (!value.items.every((item) => record(item) && typeof item[identity] === "string")) return null;
+  if (product === "quotes" && !value.items.every((item) => validQuoteDiscoveryItem(item as Record<string, unknown>))) return null;
   return value as ResearchPage;
 }
 

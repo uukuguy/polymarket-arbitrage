@@ -45,3 +45,22 @@ def test_business_research_routes_are_separated_by_truth_layer() -> None:
     assert "quote_records" in analysis_page
     assert "certified_opportunities" in analysis_page
     assert "real current zero" in (root / "opportunities/page.tsx").read_text()
+
+
+def test_quote_coverage_renders_discovery_evidence_not_an_opportunity_claim() -> None:
+    page = Path("dashboard/app/business/quotes/page.tsx").read_text()
+
+    assert "Research leads" in page
+    assert "executable notional" in page
+    assert "research priority, not a certified opportunity" in page
+    assert "event_context" in page
+    assert "neg_risk_context" in page
+    assert "discovery" in page
+
+
+def test_business_research_decoder_checks_quote_discovery_contract() -> None:
+    reader = Path("dashboard/lib/business-research.ts").read_text()
+
+    assert "price_extremity_bps" in reader
+    assert "executable_notional_usd" in reader
+    assert "missing-or-invalid-quote" in reader
