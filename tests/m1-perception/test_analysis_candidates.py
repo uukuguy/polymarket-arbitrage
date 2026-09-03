@@ -111,3 +111,9 @@ def test_quote_coverage_uses_group_completeness_not_price_extremity() -> None:
     assert gap["missing_member_count"] == 2
     assert healthy["coverage_state"] == "healthy"
     assert "price_extremity_bps" not in gap
+
+    invalid = _quote_coverage_item(
+        {"group_id": "group-invalid", "expected_member_count": 2, "quoted_member_count": 2},
+        "incomplete-coverage",
+    )
+    assert invalid["action"] == "replace invalid or non-executable quote legs"

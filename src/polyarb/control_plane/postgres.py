@@ -221,7 +221,12 @@ def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) ->
     quoted = _optional_int(payload.get("quoted_member_count")) or 0
     missing = max(expected - quoted, 0)
     if candidate_state == "incomplete-coverage":
-        coverage_state, action = "coverage-gap", "complete required quote legs"
+        action = (
+            "replace invalid or non-executable quote legs"
+            if missing == 0
+            else "complete required quote legs"
+        )
+        coverage_state = "coverage-gap"
     elif candidate_state == "positive-edge":
         coverage_state, action = "analysis-ready", "review the group in Analysis funnel"
     elif candidate_state == "no-edge":
