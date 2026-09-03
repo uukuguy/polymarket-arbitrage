@@ -118,7 +118,10 @@ async def business_overview(request: Request) -> JSONResponse:
 async def business_research_page(request: Request) -> JSONResponse:
     """Transport one bounded, generation-bound Structure or Quote research page."""
     product = request.path_params["product"]
-    method_name = f"business_{product.removesuffix('s')}_page"
+    method_name = {
+        "quotes": "business_quote_page",
+        "analysis": "business_analysis_page",
+    }.get(product, f"business_{product.removesuffix('s')}_page")
     control_plane = getattr(request.app.state, "control_plane", None)
     reader = None if control_plane is None else getattr(control_plane, method_name, None)
     if not callable(reader):

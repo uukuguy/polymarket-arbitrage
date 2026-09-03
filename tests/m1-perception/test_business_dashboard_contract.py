@@ -40,7 +40,9 @@ def test_business_research_routes_are_separated_by_truth_layer() -> None:
     assert (root / "analysis/page.tsx").is_file()
     assert (root / "opportunities/page.tsx").is_file()
     analysis_page = (root / "analysis/page.tsx").read_text()
-    assert "not yet persisted" in analysis_page
+    assert "readBusinessResearchPage(\"analysis\")" in analysis_page
+    assert "positive-edge" in analysis_page
+    assert "Candidate analysis is not a certified opportunity" in analysis_page
     assert "structure_records" in analysis_page
     assert "quote_records" in analysis_page
     assert "certified_opportunities" in analysis_page

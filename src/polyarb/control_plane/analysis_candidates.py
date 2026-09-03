@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from math import isfinite
+
+MAX_CANDIDATE_PAYLOAD_OCTETS = 2_048
 
 
 def build_group_candidate(
@@ -15,6 +18,8 @@ def build_group_candidate(
 ) -> dict[str, object]:
     """Classify one group without granting it Certified-opportunity authority."""
     if group.get("quality") != "complete-supported":
+        return {"candidate_state": "context-unavailable"}
+    if not isinstance(group.get("event_id"), str) or not event:
         return {"candidate_state": "context-unavailable"}
     end_time_ms = event.get("end_time_ms")
     is_event_active = (
@@ -42,6 +47,41 @@ def build_group_candidate(
     }
 
 
+def candidate_payload(
+    *,
+    group_id: str,
+    group: Mapping[str, object],
+    event: Mapping[str, object],
+    quotes: Sequence[Mapping[str, object]],
+    evaluated_at_ms: int,
+) -> dict[str, object]:
+    """Create the bounded dashboard fact for one group-level analysis result."""
+    fact = build_group_candidate(
+        group=group, event=event, quotes=quotes, evaluated_at_ms=evaluated_at_ms
+    )
+    payload: dict[str, object] = {
+        "group_id": group_id,
+        "event_id": _text(group.get("event_id"), maximum=160),
+        "candidate_state": fact["candidate_state"],
+        "quality": _text(group.get("quality"), maximum=64),
+        "expected_member_count": group.get("expected_member_count"),
+        "quoted_member_count": len(quotes),
+        "event": {
+            "title": _text(event.get("title"), maximum=320),
+            "slug": _text(event.get("slug"), maximum=160),
+            "is_open": event.get("is_open"),
+            "end_time_ms": event.get("end_time_ms"),
+        },
+    }
+    for key in ("bundle_cost", "gross_edge_bps", "max_bundle_size"):
+        if key in fact:
+            payload[key] = fact[key]
+    octets = len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+    if octets > MAX_CANDIDATE_PAYLOAD_OCTETS:
+        raise ValueError("analysis-candidate-payload-out-of-bounds")
+    return payload
+
+
 def _quote_leg(quote: Mapping[str, object]) -> tuple[float, float] | None:
     if quote.get("terminal_state") != "executable":
         return None
@@ -59,3 +99,7 @@ def _finite_number(value: object) -> bool:
         and not isinstance(value, bool)
         and isfinite(float(value))
     )
+
+
+def _text(value: object, *, maximum: int) -> str | None:
+    return value[:maximum] if isinstance(value, str) and value else None

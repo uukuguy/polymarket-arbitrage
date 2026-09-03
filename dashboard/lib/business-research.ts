@@ -1,15 +1,16 @@
 const BASE_URL = process.env.POLYARB_CONTROL_API_URL ?? "https://polyarb-control-api.fly.dev";
 
-export type ResearchProduct = "structure" | "quotes";
-export type ResearchItem = Record<string, unknown> & { entity_id?: string; token_id?: string };
+export type ResearchProduct = "structure" | "quotes" | "analysis";
+export type ResearchItem = Record<string, unknown> & { entity_id?: string; token_id?: string; group_id?: string };
 export type ResearchPage = {
   schema_version: "m1.business-research-page.v1";
-  product: "structure" | "quote";
+  product: "structure" | "quote" | "analysis";
   status: "available" | "not-published" | "unavailable";
   generation_key?: string;
   reason_code?: string;
   source_record_count?: number;
   indexed_record_count?: number;
+  summary?: Record<string, unknown>;
   items: ResearchItem[];
   limit: number;
   next_after: string | null;
@@ -56,14 +57,15 @@ function validQuoteDiscoveryItem(value: Record<string, unknown>): boolean {
 export function decodeBusinessResearchPage(value: unknown, product: ResearchProduct): ResearchPage | null {
   const limit = record(value) ? value.limit : undefined;
   if (!record(value) || value.schema_version !== "m1.business-research-page.v1" || !Array.isArray(value.items) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !(value.next_after === null || typeof value.next_after === "string")) return null;
-  const expected = product === "structure" ? "structure" : "quote";
+  const expected = product === "structure" ? "structure" : product === "quotes" ? "quote" : "analysis";
   if (value.product !== expected || !(value.status === "available" || value.status === "not-published" || value.status === "unavailable")) return null;
   if (value.generation_key !== undefined && typeof value.generation_key !== "string") return null;
   if (value.reason_code !== undefined && typeof value.reason_code !== "string") return null;
+  if (value.summary !== undefined && !record(value.summary)) return null;
   for (const key of ["source_record_count", "indexed_record_count"] as const) {
     if (value[key] !== undefined && !nonNegativeInteger(value[key])) return null;
   }
-  const identity = product === "structure" ? "entity_id" : "token_id";
+  const identity = product === "structure" ? "entity_id" : product === "quotes" ? "token_id" : "group_id";
   if (!value.items.every((item) => record(item) && typeof item[identity] === "string")) return null;
   if (product === "quotes" && !value.items.every((item) => validQuoteDiscoveryItem(item as Record<string, unknown>))) return null;
   return value as ResearchPage;

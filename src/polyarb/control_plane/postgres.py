@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from math import isfinite
 from typing import Any
 from uuid import uuid4
 
@@ -133,6 +134,14 @@ def _optional_bool(value: object) -> bool | None:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        isinstance(value, int | float | Decimal)
+        and not isinstance(value, bool)
+        and isfinite(float(value))
+    )
 
 
 def _quote_event_context(value: object) -> dict[str, object]:
@@ -9663,6 +9672,248 @@ class PostgresControlPlane:
                        VALUES (%s,%s,%s) ON CONFLICT (generation_key, token_id) DO NOTHING""",
                     (generation_key, token_id, Jsonb(dict(payload))),
                 )
+
+    def analysis_candidate_sources(
+        self, *, generation_key: str | None
+    ) -> dict[str, object]:
+        """Read current, same-lineage group inputs for bounded analysis materialization."""
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT pointer.generation_key, input.structure_generation_key
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input
+                       ON input.generation_key = pointer.generation_key
+                    WHERE pointer.pointer_key = 'quote:current'"""
+            )
+            pointer = cursor.fetchone()
+            if pointer is None:
+                return {"status": "not-published", "reason_code": "quote-not-published", "items": []}
+            quote_generation_key = str(pointer["generation_key"])
+            structure_generation_key = str(pointer["structure_generation_key"])
+            if generation_key is not None and generation_key != quote_generation_key:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "generation-not-current",
+                    "generation_key": quote_generation_key,
+                    "items": [],
+                }
+            cursor.execute(
+                """SELECT generation_key FROM m1_generation_manifests
+                     WHERE generation_key LIKE 'structure:' || chr(37)
+                     ORDER BY published_at DESC, generation_key DESC LIMIT 1"""
+            )
+            current_structure = cursor.fetchone()
+            if current_structure is None or str(current_structure["generation_key"]) != structure_generation_key:
+                return {
+                    "status": "lagging",
+                    "reason_code": "quote-lineage-lagging",
+                    "generation_key": quote_generation_key,
+                    "parent_structure_generation_key": structure_generation_key,
+                    "items": [],
+                }
+            cursor.execute(
+                """SELECT groups.group_id, groups.payload AS group_payload,
+                          events.payload AS event_payload,
+                          COALESCE(jsonb_agg(quotes.payload) FILTER (WHERE quotes.token_id IS NOT NULL),
+                                   '[]'::jsonb) AS quote_payloads
+                     FROM m1_structure_intelligence_groups AS groups
+                     LEFT JOIN m1_structure_intelligence_events AS events
+                       ON events.generation_key = groups.generation_key
+                      AND events.event_id = groups.event_id
+                     LEFT JOIN m1_business_quote_rows AS quotes
+                       ON quotes.generation_key = %s
+                      AND quotes.payload->>'neg_risk_market_id' = groups.group_id
+                    WHERE groups.generation_key = %s
+                    GROUP BY groups.group_id, groups.payload, events.payload
+                    ORDER BY groups.group_id ASC
+                    LIMIT 20001""",
+                (quote_generation_key, structure_generation_key),
+            )
+            rows = cursor.fetchall()
+        if len(rows) > 20_000:
+            raise ControlPlaneError("analysis-candidate-source-over-budget")
+        return {
+            "status": "available",
+            "generation_key": quote_generation_key,
+            "parent_structure_generation_key": structure_generation_key,
+            "items": [
+                {
+                    "group_id": str(row["group_id"]),
+                    "group": dict(row["group_payload"]),
+                    "event": {} if row["event_payload"] is None else dict(row["event_payload"]),
+                    "quotes": tuple(row["quote_payloads"]),
+                }
+                for row in rows
+            ],
+        }
+
+    def stage_analysis_candidates(
+        self,
+        *,
+        generation_key: str,
+        structure_generation_key: str,
+        rows: Sequence[Mapping[str, object]],
+        now: datetime,
+    ) -> None:
+        """Atomically replace the current compact candidate projection only."""
+        if len(rows) > 20_000:
+            raise ValueError("analysis-candidate-projection-over-budget")
+        normalized: list[tuple[str, str, float | None, Mapping[str, object], int]] = []
+        seen_group_ids: set[str] = set()
+        for row in rows:
+            group_id = row.get("group_id")
+            candidate_state = row.get("candidate_state")
+            if not isinstance(group_id, str) or not group_id or not isinstance(candidate_state, str):
+                raise ValueError("invalid-analysis-candidate-row")
+            if group_id in seen_group_ids:
+                raise ValueError("analysis-candidate-group-duplicate")
+            seen_group_ids.add(group_id)
+            payload = dict(row)
+            gross_edge_bps = payload.get("gross_edge_bps")
+            if not _finite_number(gross_edge_bps):
+                gross_edge_bps = None
+            normalized.append(
+                (
+                    group_id,
+                    candidate_state,
+                    None if gross_edge_bps is None else float(gross_edge_bps),
+                    payload,
+                    _bounded_json_octets(payload, maximum=2_048),
+                )
+            )
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                """SELECT input.structure_generation_key
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input
+                       ON input.generation_key = pointer.generation_key
+                    WHERE pointer.pointer_key = 'quote:current'
+                      AND pointer.generation_key = %s""",
+                (generation_key,),
+            )
+            pointer = cursor.fetchone()
+            if pointer is None or str(pointer["structure_generation_key"]) != structure_generation_key:
+                raise PublicationPointerConflictError("analysis candidates require current quote lineage")
+            cursor.execute("DELETE FROM m1_analysis_candidate_rows WHERE generation_key <> %s", (generation_key,))
+            cursor.execute("DELETE FROM m1_analysis_candidate_projections WHERE generation_key <> %s", (generation_key,))
+            cursor.execute("DELETE FROM m1_analysis_candidate_rows WHERE generation_key = %s", (generation_key,))
+            cursor.execute("DELETE FROM m1_analysis_candidate_projections WHERE generation_key = %s", (generation_key,))
+            cursor.execute(
+                """INSERT INTO m1_analysis_candidate_projections
+                   (generation_key, structure_generation_key, record_count, positive_edge_count, materialized_at)
+                   VALUES (%s,%s,%s,%s,%s)""",
+                (
+                    generation_key,
+                    structure_generation_key,
+                    len(normalized),
+                    sum(candidate_state == "positive-edge" for _group, candidate_state, _edge, _payload, _octets in normalized),
+                    now,
+                ),
+            )
+            for group_id, candidate_state, gross_edge_bps, payload, payload_octets in normalized:
+                cursor.execute(
+                    """INSERT INTO m1_analysis_candidate_rows
+                       (generation_key, group_id, candidate_state, gross_edge_bps, payload, payload_octets)
+                       VALUES (%s,%s,%s,%s,%s,%s)""",
+                    (generation_key, group_id, candidate_state, gross_edge_bps, Jsonb(dict(payload)), payload_octets),
+                )
+
+    def business_analysis_page(
+        self, *, generation_key: str | None, limit: int, after: str
+    ) -> dict[str, object]:
+        """Read the current bounded group candidate/rejection funnel."""
+        if not 1 <= limit <= 200 or after:
+            raise ValueError("invalid-business-analysis-page")
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT pointer.generation_key, input.structure_generation_key,
+                          projection.record_count, projection.positive_edge_count,
+                          projection.materialized_at
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input
+                       ON input.generation_key = pointer.generation_key
+                     LEFT JOIN m1_analysis_candidate_projections AS projection
+                       ON projection.generation_key = pointer.generation_key
+                      AND projection.structure_generation_key = input.structure_generation_key
+                    WHERE pointer.pointer_key = 'quote:current'"""
+            )
+            projection = cursor.fetchone()
+            if projection is None:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "analysis",
+                    "status": "not-published",
+                    "reason_code": "quote-not-published",
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
+            current = str(projection["generation_key"])
+            if generation_key is not None and generation_key != current:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "analysis",
+                    "status": "unavailable",
+                    "reason_code": "generation-not-current",
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
+            if projection["record_count"] is None:
+                return {
+                    "schema_version": "m1.business-research-page.v1",
+                    "product": "analysis",
+                    "status": "not-published",
+                    "reason_code": "candidate-detail-not-published",
+                    "generation_key": current,
+                    "parent_structure_generation_key": str(projection["structure_generation_key"]),
+                    "items": [],
+                    "limit": limit,
+                    "next_after": None,
+                }
+            cursor.execute(
+                """SELECT candidate_state, count(*) AS count
+                     FROM m1_analysis_candidate_rows
+                    WHERE generation_key = %s
+                    GROUP BY candidate_state""",
+                (current,),
+            )
+            state_counts = {str(row["candidate_state"]): int(row["count"]) for row in cursor.fetchall()}
+            cursor.execute(
+                """SELECT payload FROM m1_analysis_candidate_rows
+                    WHERE generation_key = %s
+                    ORDER BY CASE candidate_state
+                               WHEN 'positive-edge' THEN 0
+                               WHEN 'no-edge' THEN 1
+                               WHEN 'incomplete-coverage' THEN 2
+                               WHEN 'expired-or-closed' THEN 3
+                               ELSE 4 END,
+                             gross_edge_bps DESC NULLS LAST, group_id ASC
+                    LIMIT %s""",
+                (current, limit),
+            )
+            items = [dict(row["payload"]) for row in cursor.fetchall()]
+        return {
+            "schema_version": "m1.business-research-page.v1",
+            "product": "analysis",
+            "status": "available",
+            "generation_key": current,
+            "parent_structure_generation_key": str(projection["structure_generation_key"]),
+            "summary": {
+                "record_count": int(projection["record_count"]),
+                "positive_edge_count": int(projection["positive_edge_count"]),
+                "state_counts": state_counts,
+                "materialized_at": _snapshot_aware(
+                    projection["materialized_at"], "business_analysis.materialized_at"
+                ).isoformat(),
+            },
+            "items": items,
+            "limit": limit,
+            "next_after": None,
+        }
 
     def business_quote_page(
         self, *, generation_key: str | None, limit: int, after: str

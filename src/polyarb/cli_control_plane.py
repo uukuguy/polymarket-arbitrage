@@ -10,8 +10,8 @@ import re
 import signal
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -30,14 +30,13 @@ from polyarb.control_plane.alert_delivery import (
     ALERT_DELIVERY_POLICY,
     TransactionalAlertDeliveryWorker,
 )
+from polyarb.control_plane.analysis_candidates import candidate_payload
 from polyarb.control_plane.blocking_bridge import (
     run_blocking_call,
     run_blocking_call_until_stopped,
 )
 from polyarb.control_plane.business_brief import (
     BusinessBriefUnavailable,
-    build_business_brief,
-    render_business_brief,
     render_business_overview,
 )
 from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY, RECOVERY_DB_POLICY
@@ -248,6 +247,13 @@ def _parser() -> argparse.ArgumentParser:
     structure_intelligence_backfill.add_argument("--enable", action="store_true")
     structure_intelligence_backfill.add_argument("--generation-key", required=True)
     structure_intelligence_backfill.add_argument("--json", action="store_true")
+    analysis_candidate_backfill = subcommands.add_parser(
+        "analysis-candidate-backfill",
+        help="materialize bounded current Quote group candidates and explicit rejection reasons",
+    )
+    analysis_candidate_backfill.add_argument("--enable", action="store_true")
+    analysis_candidate_backfill.add_argument("--generation-key", required=True)
+    analysis_candidate_backfill.add_argument("--json", action="store_true")
     structure_source_once = subcommands.add_parser(
         "structure-source-once",
         help=(
@@ -1595,6 +1601,53 @@ def _backfill_structure_intelligence(
     }
 
 
+def _backfill_analysis_candidates(
+    control_plane: PostgresControlPlane, *, generation_key: str
+) -> dict[str, object]:
+    """Persist one bounded current-lineage group candidate/rejection projection."""
+    capacity = control_plane.database_capacity()
+    if capacity["state"] in {"critical", "exhausted"}:
+        raise RuntimeError("analysis-candidate-capacity-not-admitted")
+    source = control_plane.analysis_candidate_sources(generation_key=generation_key)
+    if source["status"] != "available":
+        raise RuntimeError(f"analysis-candidate-source-{source.get('reason_code', source['status'])}")
+    evaluated_at_ms = int(datetime.now(UTC).timestamp() * 1_000)
+    rows = tuple(
+        candidate_payload(
+            group_id=str(item["group_id"]),
+            group=cast(Mapping[str, object], item["group"]),
+            event=cast(Mapping[str, object], item["event"]),
+            quotes=cast(Sequence[Mapping[str, object]], item["quotes"]),
+            evaluated_at_ms=evaluated_at_ms,
+        )
+        for item in cast(Sequence[Mapping[str, object]], source["items"])
+    )
+    projection_octets = sum(
+        len(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()) for row in rows
+    )
+    projected_used = int(capacity["used_bytes"]) + projection_octets
+    if projected_used * 100 >= int(capacity["budget_bytes"]) * 75:
+        raise RuntimeError("analysis-candidate-capacity-not-admitted")
+    control_plane.stage_analysis_candidates(
+        generation_key=str(source["generation_key"]),
+        structure_generation_key=str(source["parent_structure_generation_key"]),
+        rows=rows,
+        now=datetime.now(UTC),
+    )
+    states: dict[str, int] = {}
+    for row in rows:
+        state = str(row["candidate_state"])
+        states[state] = states.get(state, 0) + 1
+    return {
+        "status": "ok",
+        "generation_key": source["generation_key"],
+        "parent_structure_generation_key": source["parent_structure_generation_key"],
+        "record_count": len(rows),
+        "candidate_states": states,
+        "projection_octets": projection_octets,
+    }
+
+
 async def _run_scheduler_service(
     scheduler: TransactionalControlPlaneScheduler | TransactionalWorkerLoop,
     *,
@@ -2201,6 +2254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "qualification-serve",
         "structure-index-backfill",
         "structure-intelligence-backfill",
+        "analysis-candidate-backfill",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
@@ -2623,6 +2677,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _backfill_structure_intelligence(
                     control_plane, generation_key=args.generation_key
                 ),
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "analysis-candidate-backfill":
+            _write(
+                _backfill_analysis_candidates(control_plane, generation_key=args.generation_key),
                 as_json=args.json,
             )
             return 0

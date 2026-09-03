@@ -201,14 +201,25 @@ def test_business_research_page_routes_transport_generation_bound_rows() -> None
             assert after == ""
             return {"schema_version": "m1.business-research-page.v1", "product": "quote", "status": "available", "items": [{"market_id": "market:001"}], "limit": 1, "next_after": "market:001"}
 
+        def business_analysis_page(
+            self, *, generation_key: str | None, limit: int, after: str
+        ) -> dict[str, object]:
+            assert generation_key is None
+            assert limit == 1
+            assert after == ""
+            return {"schema_version": "m1.business-research-page.v1", "product": "analysis", "status": "available", "items": [{"group_id": "group:001"}], "limit": 1, "next_after": None}
+
     with TestClient(create_control_plane_app(control_plane=ResearchFocusedControlPlane())) as client:
         structure = client.get("/perception/business/structure?generation_key=structure%3Acurrent&limit=2&after=market%3A001")
         quote = client.get("/perception/business/quotes?limit=1")
+        analysis = client.get("/perception/business/analysis?limit=1")
 
     assert structure.status_code == 200
     assert structure.json()["items"] == [{"entity_id": "market:002"}]
     assert quote.status_code == 200
     assert quote.json()["next_after"] == "market:001"
+    assert analysis.status_code == 200
+    assert analysis.json()["items"] == [{"group_id": "group:001"}]
 
 
 def test_business_quote_route_fails_closed_for_invalid_discovery_cursor() -> None:

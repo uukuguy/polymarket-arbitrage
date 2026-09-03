@@ -59,6 +59,8 @@ RUNTIME_ALLOWED = {
     "m1_structure_intelligence_events": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
     "m1_structure_intelligence_groups": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
     "m1_structure_intelligence_summaries": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
+    "m1_analysis_candidate_projections": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
+    "m1_analysis_candidate_rows": frozenset({"SELECT", "INSERT", "DELETE", "TRUNCATE"}),
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
     # Bounded runtime observation is mutated only through its security-definer
     # turn function.  The controller reads the one-row status for its
