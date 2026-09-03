@@ -9117,7 +9117,17 @@ class PostgresControlPlane:
                 " FROM m1_opportunity_publication_pointers pointer"
                 " JOIN m1_opportunity_projections projection ON projection.generation_key = pointer.generation_key"
                 " WHERE pointer.pointer_key = 'opportunity:current'"
-                ") opportunity) AS opportunity",
+                ") opportunity) AS opportunity, "
+                "(SELECT to_jsonb(candidate) FROM ("
+                " SELECT projection.generation_key, projection.structure_generation_key, projection.record_count, "
+                "        projection.positive_edge_count"
+                " FROM m1_publication_pointers pointer"
+                " JOIN m1_quote_generation_inputs lineage ON lineage.generation_key = pointer.generation_key"
+                " JOIN m1_analysis_candidate_projections projection"
+                "   ON projection.generation_key = pointer.generation_key"
+                "  AND projection.structure_generation_key = lineage.structure_generation_key"
+                " WHERE pointer.pointer_key = 'quote:current'"
+                ") candidate) AS candidate",
             )
             row = cursor.fetchone()
             if row is None:
@@ -9127,6 +9137,7 @@ class PostgresControlPlane:
         structure = _snapshot_optional_mapping(row["structure"], "business_overview.structure")
         quote = _snapshot_optional_mapping(row["quote"], "business_overview.quote")
         opportunity = _snapshot_optional_mapping(row["opportunity"], "business_overview.opportunity")
+        candidate = _snapshot_optional_mapping(row.get("candidate"), "business_overview.candidate")
         if structure is None:
             return {
                 "schema_version": "m1.business-overview.v1", "status": "available", "observed_at": observed_at,
@@ -9181,6 +9192,16 @@ class PostgresControlPlane:
                     opportunity["record_count"],
                     "business_overview.analysis.certified_opportunities",
                 )
+            candidate_current = candidate is not None and str(candidate["generation_key"]) == str(
+                quote["generation_key"]
+            )
+            if candidate_current:
+                component_counts["analysis_groups"] = _snapshot_int(
+                    candidate["record_count"], "business_overview.analysis.analysis_groups"
+                )
+                component_counts["positive_edge_candidates"] = _snapshot_int(
+                    candidate["positive_edge_count"], "business_overview.analysis.positive_edge_candidates"
+                )
             analysis = {
                 "status": (
                     "available"
@@ -9190,14 +9211,15 @@ class PostgresControlPlane:
                 "generation_key": str(quote["generation_key"]),
                 "parent_structure_generation_key": str(quote["structure_generation_key"]),
                 "component_counts": component_counts,
-                "reason_code": (
+            }
+            if not candidate_current:
+                analysis["reason_code"] = (
                     "candidate-reject-detail-not-published"
                     if quote_current and quote_index_ready
                     else "research-index-incomplete"
                     if not quote_index_ready
                     else "quote-lineage-lagging"
-                ),
-            }
+                )
         structure_product: dict[str, object] = {
             "status": "available" if structure_index_ready else "unavailable",
             "generation_key": str(structure["generation_key"]),
