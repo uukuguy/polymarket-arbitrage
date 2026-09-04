@@ -1,33 +1,80 @@
 {
   "version": "1.0",
-  "timestamp": "2026-09-02T11:12:49.571Z",
+  "timestamp": "2026-09-04T19:18:49.994Z",
   "phase": "05.6",
   "phase_name": "self-healing-structure-production",
   "phase_dir": ".planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production",
-  "plan": 0,
-  "task": 0,
-  "total_tasks": 0,
+  "plan": 108,
+  "task": 2,
+  "total_tasks": 4,
   "status": "paused",
   "completed_tasks": [
-    {"id": 1, "name": "Structure business intelligence", "status": "done", "commit": "f3d97919"},
-    {"id": 2, "name": "Quote business evidence view", "status": "done", "commit": "5446f60b"},
-    {"id": 3, "name": "Analysis and opportunity production audit", "status": "done"}
+    {
+      "id": 1,
+      "name": "Correct candidate economics before exposing investment detail",
+      "status": "done",
+      "commit": "e8636b79"
+    },
+    {
+      "id": 2,
+      "name": "Publish one fenced Event research detail authority",
+      "status": "in_progress",
+      "progress": "The detail endpoint and current-lineage fence are deployed (9a3ab9b7), but compact quote-leg aggregation, the legs endpoint, full lineage fixtures, and final group ordering remain unfinished."
+    },
+    {
+      "id": 3,
+      "name": "Build the workbench and link all three main tables",
+      "status": "in_progress",
+      "progress": "The server page and contextual links are deployed (87af8d3f, b883c8d6, 991e6c13, 88bacc6a, f443a785), but strict decoding, source-aware focus behavior, denser evidence presentation, and contract tests remain unfinished."
+    },
+    {
+      "id": 4,
+      "name": "Deploy and validate the investment-research path",
+      "status": "in_progress",
+      "progress": "Fly API smoke and authenticated browser navigation have passed for live event and quote-coverage examples; full contractual and visual validation awaits Tasks 2 and 3."
+    }
   ],
   "remaining_tasks": [
-    {"id": 1, "name": "Add capacity admission and physical-space reuse before cadence restart", "status": "not_started"},
-    {"id": 2, "name": "Persist bounded analysis funnel and rejection evidence", "status": "not_started"},
-    {"id": 3, "name": "Publish current-lineage certified opportunities and detailed Dashboard research", "status": "not_started"}
+    {
+      "id": 2,
+      "name": "Complete quote-leg aggregation, legs endpoint, and lineage tests",
+      "status": "in_progress"
+    },
+    {
+      "id": 3,
+      "name": "Harden decoder and event workbench UX/information density",
+      "status": "in_progress"
+    },
+    {
+      "id": 4,
+      "name": "Run full tests, deploy, and validate the final research path",
+      "status": "not_started"
+    }
   ],
-  "blockers": [
-    {"description": "Coordinator is intentionally stopped until capacity admission and automatic space reuse are implemented and verified.", "type": "technical", "workaround": "Read-only research remains available; do not restart it as part of observation."},
-    {"description": "Analysis candidate/reject detail is not published, and the opportunity pointer is stale relative to the current Quote generation.", "type": "technical", "workaround": "Treat neither as a current market conclusion; implement the missing bounded facts and lineage contract."}
-  ],
+  "blockers": [],
   "human_actions_pending": [],
   "decisions": [
-    {"decision": "Use R2 for complete immutable artifacts and Postgres only for bounded research projections.", "rationale": "Full detail mirroring exhausted the Free database budget.", "phase": "05.6"},
-    {"decision": "Require current Structure-to-Quote-to-opportunity lineage for a verified zero conclusion.", "rationale": "Historical zero opportunity data was stale after Quote advanced.", "phase": "05.6"}
+    {
+      "decision": "Event research is served from one current Quote pointer and its exact parent Structure generation.",
+      "rationale": "The Dashboard must not merge independently paginated business endpoints into an apparently consistent investment view.",
+      "phase": "05.6"
+    },
+    {
+      "decision": "Candidate economics use capital, theoretical gross profit, and gross ROI rather than the legacy ranking proxy.",
+      "rationale": "The proxy was not a monetary return and would mislead investment research.",
+      "phase": "05.6"
+    },
+    {
+      "decision": "No new persistent detail projection or raw order-book mirror is permitted.",
+      "rationale": "Supabase capacity must remain bounded; all detail is a bounded read from existing projections.",
+      "phase": "05.6"
+    }
   ],
-  "uncommitted_files": [".planning/JOURNAL.md", ".wrangler/", "output/"],
-  "next_action": "Resume M1, collect read-only health/brief evidence, then create a bounded design for capacity admission before any coordinator restart.",
-  "context_notes": "Structure and Quote business pages are production-useful. The remaining mainline is capacity-safe continuous collection plus truthful Analysis and current certified-opportunity data products."
+  "uncommitted_files": [
+    ".planning/JOURNAL.md (pre-existing user change; preserve)",
+    ".wrangler/ (untracked; preserve)",
+    "output/ (untracked rollout, Playwright, and structure-intelligence evidence; preserve)"
+  ],
+  "next_action": "Run make planning-status, then add the failing event-detail repository/API tests for current-lineage fencing and distinct quote-leg counts before implementing the bounded group-legs reader.",
+  "context_notes": "Production is healthy for the deployed partial workbench: make smoke-control-plane-prod passed, the live event endpoint returned an available current-lineage envelope, and the authenticated Vercel Dashboard links worked. Do not treat this as completion: the detail page is deliberately minimal and lacks per-leg proof and strong decoder/UX contracts."
 }
