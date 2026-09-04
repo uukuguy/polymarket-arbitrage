@@ -130,6 +130,11 @@ export async function readQuoteCoveragePage(): Promise<QuoteCoveragePage | null>
   } catch { return null; }
 }
 
+export type EventResearchDetail = { schema_version: "m1.event-research-detail.v1"; status: "available" | "unavailable" | "not-published"; reason_code?: string; event_id: string; event?: Record<string, unknown>; anchor?: Record<string, unknown>; state_counts?: Record<string, number>; groups: Array<Record<string, unknown>>; cautions?: string[]; };
+export async function readEventResearchDetail(eventId: string, focusGroupId?: string, observedGeneration?: string): Promise<EventResearchDetail | null> {
+  try { const params = new URLSearchParams(); if (focusGroupId) params.set("focus_group_id", focusGroupId); if (observedGeneration) params.set("observed_generation", observedGeneration); const response = await fetch(`${BASE_URL}/perception/business/events/${encodeURIComponent(eventId)}?${params}`, { cache: "no-store" }); const value = await response.json(); return response.ok && record(value) && value.schema_version === "m1.event-research-detail.v1" && typeof value.event_id === "string" && Array.isArray(value.groups) ? value as EventResearchDetail : null; } catch { return null; }
+}
+
 export type StructureIntelligenceStatus = "available" | "unavailable";
 export type StructureIntelligenceSummary = {
   schema_version: "m1.structure-intelligence.v1";
