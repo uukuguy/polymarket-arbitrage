@@ -83,6 +83,7 @@ export async function readBusinessResearchPage(product: ResearchProduct, after =
 
 export type QuoteCoverageItem = {
   group_id: string;
+  event_id?: string;
   coverage_state: "coverage-gap" | "analysis-ready" | "healthy" | "needs-context";
   candidate_state: string;
   expected_member_count: number;

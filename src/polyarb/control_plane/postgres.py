@@ -245,6 +245,7 @@ def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) ->
         coverage_state, action = "needs-context", "restore current structure context"
     return {
         "group_id": payload.get("group_id"),
+        "event_id": payload.get("event_id"),
         "coverage_state": coverage_state,
         "candidate_state": candidate_state,
         "expected_member_count": expected,
