@@ -14960,7 +14960,7 @@ def test_business_event_detail_fences_lineage_and_counts_distinct_quote_legs(
     control_plane.stage_structure_intelligence(
         generation_key=structure,
         events=(("event:one", {"title": "One", "is_open": True, "end_time_ms": future_ms}), ("event:ended", {"is_open": True, "end_time_ms": 1})),
-        groups=(("group:positive", {"event_id": "event:one", "expected_member_count": 3}), ("group:gap", {"event_id": "event:one", "expected_member_count": 4}), ("group:empty", {"event_id": "event:one", "expected_member_count": 1})),
+        groups=(("group:positive", {"event_id": "event:one", "expected_member_count": 2}), ("group:gap", {"event_id": "event:one", "expected_member_count": 4}), ("group:empty", {"event_id": "event:one", "expected_member_count": 1}), ("group:no-edge", {"event_id": "event:one", "expected_member_count": 1})),
         summary={"event_count": 2},
     )
     control_plane.stage_structure_intelligence(generation_key=foreign_structure, events=(("event:foreign", {"is_open": True, "end_time_ms": future_ms}),), groups=(("group:foreign", {"event_id": "event:foreign", "expected_member_count": 9}),), summary={"event_count": 1})
@@ -14968,20 +14968,26 @@ def test_business_event_detail_fences_lineage_and_counts_distinct_quote_legs(
         ("token:one", {"event_id": "event:one", "neg_risk_market_id": "group:positive", "terminal_state": "executable", "best_ask_price": 0.4, "best_ask_size": 4}),
         ("token:two", {"event_id": "event:one", "neg_risk_market_id": "group:positive", "terminal_state": "missing-book"}),
         ("token:three", {"event_id": "event:one", "neg_risk_market_id": "group:gap", "terminal_state": "executable", "best_ask_price": 0.5, "best_ask_size": 2}),
+        ("token:four", {"event_id": "event:one", "neg_risk_market_id": "group:no-edge", "terminal_state": "executable", "best_ask_price": 0.6, "best_ask_size": 1}),
     ))
     control_plane.stage_analysis_candidates(generation_key=quote, structure_generation_key=structure, now=now, rows=(
         {"group_id": "group:positive", "candidate_state": "positive-edge", "bundle_cost": 0.9, "max_bundle_size": 15, "gross_edge_bps": 100, "event": {"is_open": True, "end_time_ms": future_ms}},
         {"group_id": "group:gap", "candidate_state": "incomplete-coverage", "gross_edge_bps": 0, "event": {"is_open": True, "end_time_ms": future_ms}},
+        {"group_id": "group:no-edge", "candidate_state": "no-edge", "gross_edge_bps": 0, "event": {"is_open": True, "end_time_ms": future_ms}},
         {"group_id": "group:foreign", "candidate_state": "positive-edge", "bundle_cost": 0.1, "max_bundle_size": 99, "gross_edge_bps": 9000, "event": {"is_open": True, "end_time_ms": future_ms}},
     ))
 
     detail = control_plane.business_event_detail(event_id="event:one", focus_group_id="group:foreign", observed_generation="quote:old")
-    assert [group["group_id"] for group in detail["groups"]] == ["group:positive", "group:gap", "group:empty"]
-    assert detail["anchor"]["changed_since_entry"] is True
+    groups = cast(list[dict[str, object]], detail["groups"])
+    anchor = cast(dict[str, object], detail["anchor"])
+    assert [group["group_id"] for group in groups] == ["group:positive", "group:gap", "group:no-edge", "group:empty"]
+    assert anchor["changed_since_entry"] is True
     assert detail["focused_group"] is None
-    assert detail["groups"][0]["quote_coverage"] == {"expected": 3, "observed": 2, "executable": 1, "non_executable": 1, "missing": 1}
-    assert detail["groups"][1]["quote_coverage"] == {"expected": 4, "observed": 1, "executable": 1, "non_executable": 0, "missing": 3}
-    assert detail["groups"][2]["quote_coverage"] == {"expected": 1, "observed": 0, "executable": 0, "non_executable": 0, "missing": 1}
+    assert groups[0]["quote_coverage"] == {"expected": 2, "observed": 2, "executable": 1, "non_executable": 1, "missing": 0, "coverage_state": "complete-non-executable"}
+    assert groups[1]["quote_coverage"] == {"expected": 4, "observed": 1, "executable": 1, "non_executable": 0, "missing": 3, "coverage_state": "incomplete-missing"}
+    assert groups[2]["quote_coverage"] == {"expected": 1, "observed": 1, "executable": 1, "non_executable": 0, "missing": 0, "coverage_state": "complete-executable"}
+    assert groups[3]["quote_coverage"] == {"expected": 1, "observed": 0, "executable": 0, "non_executable": 0, "missing": 1, "coverage_state": "incomplete-missing"}
+    assert detail["state_counts"] == {"positive-edge": 1, "incomplete-coverage": 1, "context-unavailable": 1, "no-edge": 1}
     assert control_plane.business_event_detail(event_id="event:ended", focus_group_id=None, observed_generation=None)["reason_code"] == "event-not-operational"
 
 
@@ -15002,9 +15008,9 @@ def test_business_event_group_legs_is_bounded_and_fences_event_group_ownership(
     control_plane.stage_business_quote_rows(generation_key=quote, rows=(("token:1", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "executable", "best_ask_price": 0.4, "best_ask_size": 2}), ("token:2", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "missing-book"}), ("token:z", {"event_id": "event:other", "neg_risk_market_id": "group:other", "terminal_state": "executable"})))
 
     first = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after="")
-    assert [leg["token_id"] for leg in first["legs"]] == ["token:1"]
-    second = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after=first["next_after"])
-    assert [leg["token_id"] for leg in second["legs"]] == ["token:2"]
+    assert [leg["token_id"] for leg in cast(list[dict[str, object]], first["legs"])] == ["token:1"]
+    second = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after=cast(str, first["next_after"]))
+    assert [leg["token_id"] for leg in cast(list[dict[str, object]], second["legs"])] == ["token:2"]
     assert control_plane.business_event_group_legs(event_id="event:one", group_id="group:other", limit=1, after="")["reason_code"] == "group-not-event-owned"
 
 

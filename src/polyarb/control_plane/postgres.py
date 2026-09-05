@@ -240,6 +240,21 @@ def _event_research_legs_unavailable(
     }
 
 
+def _event_group_coverage_state(
+    *, expected: int | None, observed: int, executable: int, non_executable: int
+) -> str:
+    """Classify quote evidence without treating absent structure expectations as zero."""
+    if expected is None:
+        return "unknown"
+    if observed < expected:
+        return "incomplete-missing"
+    if non_executable:
+        return "complete-non-executable"
+    if executable >= expected:
+        return "complete-executable"
+    return "incomplete-missing"
+
+
 def _quote_coverage_item(payload: Mapping[str, object], candidate_state: str) -> dict[str, object]:
     """Expose only group coverage health and the next operational action."""
     expected = _optional_int(payload.get("expected_member_count")) or 0
@@ -10251,6 +10266,12 @@ class PostgresControlPlane:
                     "executable": executable,
                     "non_executable": non_executable,
                     "missing": None if expected is None else max(expected - observed, 0),
+                    "coverage_state": _event_group_coverage_state(
+                        expected=expected,
+                        observed=observed,
+                        executable=executable,
+                        non_executable=non_executable,
+                    ),
                 },
             })
         focus = next((group for group in groups if group["group_id"] == focus_group_id), None)
