@@ -188,6 +188,13 @@ def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:
     assert "readBusinessResearchPage" not in detail
 
 
+def test_event_workbench_wraps_long_group_ids_inside_evidence_cards() -> None:
+    detail = Path("dashboard/app/business/events/[event_id]/page.tsx").read_text()
+
+    assert 'const groupIdStyle = { overflowWrap: "anywhere", wordBreak: "break-word" } as const;' in detail
+    assert detail.count('style={groupIdStyle}') == 3
+
+
 def test_all_business_main_tables_link_events_to_one_workbench() -> None:
     for page in ("structure", "quotes", "analysis"):
         source = Path(f"dashboard/app/business/{page}/page.tsx").read_text()
