@@ -170,7 +170,16 @@ function validEventResearchGroup(value: unknown): value is EventResearchGroup {
   if (!EVENT_COVERAGE_STATES.has(String(coverage.coverage_state))) return false;
   for (const key of ["observed", "executable", "non_executable"] as const) if (!nonNegativeInteger(coverage[key])) return false;
   if (!(coverage.expected === null || nonNegativeInteger(coverage.expected)) || !(coverage.missing === null || nonNegativeInteger(coverage.missing))) return false;
-  for (const key of ["expected_member_count", "market_count", "active_market_count"] as const) {
+  // These are the only nullable fields emitted by the Structure group source.
+  // Null means the source could not establish the fact; it must not be made up
+  // as zero by the dashboard decoder.
+  for (const key of ["expected_member_count", "active_named_count"] as const) {
+    if (value.structure[key] !== undefined && value.structure[key] !== null && !nonNegativeInteger(value.structure[key])) return false;
+  }
+  for (const key of ["event_id", "neg_risk_type", "quality", "reason"] as const) {
+    if (value.structure[key] !== undefined && value.structure[key] !== null && typeof value.structure[key] !== "string") return false;
+  }
+  for (const key of ["market_count", "active_market_count"] as const) {
     if (value.structure[key] !== undefined && !nonNegativeInteger(value.structure[key])) return false;
   }
   for (const key of ["bundle_cost", "max_bundle_size", "capital_required_usd", "gross_profit_usd", "gross_roi_bps"] as const) {

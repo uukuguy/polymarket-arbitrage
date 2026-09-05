@@ -171,6 +171,35 @@ process.stdout.write(JSON.stringify(result));
     assert result.stdout == '{"nullMissing":true,"undefinedMissing":true,"negative":true,"nonFinite":true,"wrongType":true}'
 
 
+def test_event_workbench_accepts_only_nullable_structure_source_fields() -> None:
+    """Null source facts remain Unknown; malformed structure facts fail closed."""
+    script = r'''
+const fs = require("fs");
+const ts = require("./dashboard/node_modules/typescript");
+const source = fs.readFileSync("dashboard/lib/business-research.ts", "utf8");
+const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const module = { exports: {} };
+new Function("exports", "module", "require", compiled)(module.exports, module, require);
+const group = (structure) => ({ group_id: "group:one", structure, candidate_state: "no-edge", candidate: {}, quote_coverage: { expected: null, observed: 0, executable: 0, non_executable: 0, missing: null, coverage_state: "unknown" } });
+const base = { schema_version: "m1.event-research-detail.v1", status: "available", event_id: "event:one", event: {}, anchor: { quote_generation_key: "quote:one", structure_generation_key: "structure:one", changed_since_entry: false, materialized_at: "2026-09-06T00:00:00Z" }, state_counts: {}, structure: { group_count: 1 }, quote_coverage: { expected: null, observed: 0, executable: 0, non_executable: 0, missing: null }, analysis: { research_only: true }, blockers: [], cautions: [] };
+const decode = module.exports.decodeEventResearchDetail;
+const nullableSource = { event_id: null, neg_risk_type: null, expected_member_count: null, active_named_count: null, quality: null, reason: null };
+const result = {
+  nullableSource: decode({ ...base, groups: [group(nullableSource)], focused_group: null }) !== null,
+  negativeExpected: decode({ ...base, groups: [group({ expected_member_count: -1 })], focused_group: null }) === null,
+  badActiveNamed: decode({ ...base, groups: [group({ active_named_count: "two" })], focused_group: null }) === null,
+  badQuality: decode({ ...base, groups: [group({ quality: 42 })], focused_group: null }) === null,
+  unrelatedNull: decode({ ...base, groups: [group({ market_count: null })], focused_group: null }) === null,
+};
+process.stdout.write(JSON.stringify(result));
+'''
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, cwd=Path.cwd(), text=True
+    )
+
+    assert result.stdout == '{"nullableSource":true,"negativeExpected":true,"badActiveNamed":true,"badQuality":true,"unrelatedNull":true}'
+
+
 def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:
     detail = Path("dashboard/app/business/events/[event_id]/page.tsx").read_text()
 
@@ -186,6 +215,19 @@ def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:
     assert "readStructure" not in detail
     assert "readQuoteCoveragePage" not in detail
     assert "readBusinessResearchPage" not in detail
+
+
+def test_event_workbench_keeps_analysis_order_and_sorts_quote_defects_separately() -> None:
+    detail = Path("dashboard/app/business/events/[event_id]/page.tsx").read_text()
+
+    assert "const groups = detail.groups;" in detail
+    assert "const coverageGroups = [...groups].sort" in detail
+    assert "coverageDefectRank" in detail
+    assert "neg_risk_type" in detail
+    assert "active_named_count" in detail
+    assert "structure.quality" in detail
+    assert "structure.reason" in detail
+    assert "[focus, ...detail.groups" not in detail
 
 
 def test_event_workbench_wraps_long_group_ids_inside_evidence_cards() -> None:
