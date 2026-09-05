@@ -1,5 +1,6 @@
 """Source contracts for the atomic M1 business research page."""
 
+import subprocess
 from pathlib import Path
 
 
@@ -106,6 +107,37 @@ def test_event_workbench_rejects_untrusted_detail_shapes() -> None:
         "value.status !== \"available\"",
     ):
         assert contract in reader
+
+
+def test_event_workbench_decoder_requires_the_requested_focused_group() -> None:
+    """A requested focus is an authority constraint, not a presentation hint."""
+    script = r'''
+const fs = require("fs");
+const ts = require("./dashboard/node_modules/typescript");
+const source = fs.readFileSync("dashboard/lib/business-research.ts", "utf8");
+const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const module = { exports: {} };
+new Function("exports", "module", "require", compiled)(module.exports, module, require);
+const group = (group_id) => ({ group_id, structure: {}, candidate_state: "no-edge", candidate: {}, quote_coverage: { expected: 0, observed: 0, executable: 0, non_executable: 0, missing: 0, coverage_state: "complete-executable" } });
+const focused = group("group:requested");
+const base = { schema_version: "m1.event-research-detail.v1", status: "available", event_id: "event:one", event: {}, anchor: { quote_generation_key: "quote:one", structure_generation_key: "structure:one", changed_since_entry: false, materialized_at: "2026-09-06T00:00:00Z" }, state_counts: {}, structure: { group_count: 2 }, quote_coverage: { expected: 0, observed: 0, executable: 0, non_executable: 0, missing: 0 }, analysis: { research_only: true }, blockers: [], cautions: [], groups: [focused, group("group:other")] };
+const decode = module.exports.decodeEventResearchDetail;
+const result = {
+  matching: decode({ ...base, focused_group: focused }, "group:requested") !== null,
+  missing: decode({ ...base, focused_group: null }, "group:requested") === null,
+  mismatched: decode({ ...base, focused_group: group("group:other") }, "group:requested") === null,
+};
+process.stdout.write(JSON.stringify(result));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        cwd=Path.cwd(),
+        text=True,
+    )
+
+    assert result.stdout == '{"matching":true,"missing":true,"mismatched":true}'
 
 
 def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:

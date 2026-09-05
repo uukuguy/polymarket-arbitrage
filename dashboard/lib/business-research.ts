@@ -205,7 +205,7 @@ export function decodeEventResearchDetail(value: unknown, focusGroupId?: string)
   if (!(value.focused_group === null || value.focused_group === undefined || validEventResearchGroup(value.focused_group))) return null;
   const focused = value.focused_group;
   if (focused && !value.groups.some((group) => group.group_id === focused.group_id)) return null;
-  if (focusGroupId && focused !== null && focused !== undefined && focused.group_id !== focusGroupId) return null;
+  if (focusGroupId && (!focused || focused.group_id !== focusGroupId)) return null;
   return value as EventResearchDetail;
 }
 
