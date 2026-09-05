@@ -24,6 +24,7 @@
 | 10 | [L2 跟踪（Phase 03：候选集 WS 流 → 实时信号源）](10-L2-跟踪.md) | 独立 polyarb-l2 daemon 与 polyarb-l1 的分工 / WsWatchdog 30s 业务层心跳为什么不依赖 TCP PING / POLYARB_EVENT_BUS_ENABLED B1 安全门 / fail-soft 双锚点为什么成功路径也 emit breadcrumb / hybrid catchup+bootstrap 启动期实战修法 |
 | 11 | [L3 K 线（Phase 05：深度 book → OHLC 视图 → 仪表盘）](11-L3-K线.md) | L1/L2/L3 三层金字塔心智模型 / promoter 5-min cron 的 9 步 promote_run 流水线 / book_levels top-10 投影 / OHLC 1m/5m/1h 视图为什么不用 TimescaleDB / chicken-and-egg 冷启动种子集 / pitfall 5 候选集与 L3 集互不覆盖 / 5 道自检题 |
 | 12-M1 | [M1 持续运行（生产巡检、告警与恢复）](12-M1-持续运行.md) | 四个生产面如何一起判定 / Polywatch 15 分钟巡检 / WAITING 与空机会的正确语义 / 五条日常命令 / 最小恢复流程 |
+| 12-Research | [Event Research Workbench](12-event-research-workbench.md) | 如何从 Structure→Quote Coverage→Analysis 读一个 event；observed、executable、missing 与理论经济性各代表什么；为什么它不是下单授权 |
 | 12 | [套利引擎（M2 Combinatorial Arbitrage）](12-套利引擎.md) | ArbitrageSignal / ExecutionLeg / RoutingDecision 数据契约 / SlippageCalculator 三笔成本 / _select_venue 滑点感知选场 / abort-vs-partial 原子不变式 / paper-mode vs real venue 安全面 / 五个 Makefile target 对照 |
 | 13 | [仓位持久化：让每个进程看见同一本账](13-仓位持久化.md) | PositionState / repository transition / BEGIN IMMEDIATE / 三表原子投影 / operation ID 幂等 / fail-closed DB / 跨进程 run→status→close |
 | 14 | [精确现金账本：价格可以近似，钱必须有唯一答案](14-精确现金账本.md) | price float 与 cash authority 的边界 / micro-pUSD / HALF_EVEN / additive SQLite migration / tagged Money receipt / 五道对手测试 |
