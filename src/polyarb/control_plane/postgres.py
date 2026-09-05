@@ -10361,6 +10361,10 @@ class PostgresControlPlane:
         return {
             "schema_version": "m1.event-research-group-legs.v1",
             "status": "available", "event_id": event_id, "group_id": group_id,
+            "anchor": {
+                "quote_generation_key": quote_generation,
+                "structure_generation_key": structure_generation,
+            },
             "legs": [
                 {"token_id": str(row["token_id"]), "market_id": dict(row["payload"]).get("market_id"),
                  "best_ask_price": dict(row["payload"]).get("best_ask_price"),

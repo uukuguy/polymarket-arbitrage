@@ -15008,6 +15008,10 @@ def test_business_event_group_legs_is_bounded_and_fences_event_group_ownership(
     control_plane.stage_business_quote_rows(generation_key=quote, rows=(("token:1", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "executable", "best_ask_price": 0.4, "best_ask_size": 2}), ("token:2", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "missing-book"}), ("token:z", {"event_id": "event:other", "neg_risk_market_id": "group:other", "terminal_state": "executable"})))
 
     first = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after="")
+    assert first["anchor"] == {
+        "quote_generation_key": quote,
+        "structure_generation_key": structure,
+    }
     assert [leg["token_id"] for leg in cast(list[dict[str, object]], first["legs"])] == ["token:1"]
     second = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after=cast(str, first["next_after"]))
     assert [leg["token_id"] for leg in cast(list[dict[str, object]], second["legs"])] == ["token:2"]
