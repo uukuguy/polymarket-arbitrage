@@ -10277,18 +10277,19 @@ class PostgresControlPlane:
         focus = next((group for group in groups if group["group_id"] == focus_group_id), None)
         coverages = [cast(dict[str, object], group["quote_coverage"]) for group in groups]
         coverage_totals: dict[str, object] = {}
-        for key in ("observed", "executable", "non_executable", "missing"):
+        for key in ("observed", "executable", "non_executable"):
             coverage_totals[key] = sum(
                 value
                 for coverage in coverages
                 if isinstance(value := coverage[key], int)
             )
-        expected_totals = [coverage["expected"] for coverage in coverages]
-        coverage_totals["expected"] = (
-            sum(int(expected) for expected in expected_totals if isinstance(expected, int))
-            if any(isinstance(expected, int) for expected in expected_totals)
-            else None
-        )
+        coverage_unknown = any(coverage["expected"] is None for coverage in coverages)
+        for key in ("expected", "missing"):
+            coverage_totals[key] = (
+                None
+                if coverage_unknown
+                else sum(int(coverage[key]) for coverage in coverages)
+            )
         if state_counts.get("positive-edge", 0):
             research_stage = "ready-for-analysis"
         elif state_counts.get("incomplete-coverage", 0):

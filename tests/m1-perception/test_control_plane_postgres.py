@@ -14991,6 +14991,84 @@ def test_business_event_detail_fences_lineage_and_counts_distinct_quote_legs(
     assert control_plane.business_event_detail(event_id="event:ended", focus_group_id=None, observed_generation=None)["reason_code"] == "event-not-operational"
 
 
+@pytest.mark.parametrize(
+    ("group_specs", "quote_rows", "expected_coverage"),
+    (
+        (
+            (("group:unknown", None),),
+            (("token:unknown", "group:unknown", "executable"),),
+            {
+                "expected": None,
+                "observed": 1,
+                "executable": 1,
+                "non_executable": 0,
+                "missing": None,
+            },
+        ),
+        (
+            (("group:known", 3), ("group:unknown", None)),
+            (
+                ("token:known", "group:known", "missing-book"),
+                ("token:unknown", "group:unknown", "executable"),
+            ),
+            {
+                "expected": None,
+                "observed": 2,
+                "executable": 1,
+                "non_executable": 1,
+                "missing": None,
+            },
+        ),
+    ),
+)
+def test_business_event_detail_propagates_unknown_quote_coverage_totals(
+    control_plane: PostgresControlPlane,
+    group_specs: tuple[tuple[str, int | None], ...],
+    quote_rows: tuple[tuple[str, str, str], ...],
+    expected_coverage: dict[str, int | None],
+) -> None:
+    now = _now()
+    structure, quote = "structure:" + "f" * 64, "quote:" + "0" * 64
+    future_ms = int(datetime(2050, 1, 1, tzinfo=UTC).timestamp() * 1_000)
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (quote, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)",
+                (job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, job_key, "a" * 64, "b" * 64, now),
+            )
+        connection.execute("INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)", (quote, structure, "d" * 64, now))
+        connection.execute("INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)", (quote, now))
+    control_plane.stage_structure_intelligence(
+        generation_key=structure,
+        events=(("event:one", {"is_open": True, "end_time_ms": future_ms}),),
+        groups=tuple(
+            (group_id, {"event_id": "event:one", **({} if expected is None else {"expected_member_count": expected})})
+            for group_id, expected in group_specs
+        ),
+        summary={"event_count": 1},
+    )
+    control_plane.stage_business_quote_rows(
+        generation_key=quote,
+        rows=tuple(
+            (token_id, {"event_id": "event:one", "neg_risk_market_id": group_id, "terminal_state": terminal_state})
+            for token_id, group_id, terminal_state in quote_rows
+        ),
+    )
+    control_plane.stage_analysis_candidates(
+        generation_key=quote, structure_generation_key=structure, now=now, rows=()
+    )
+
+    detail = control_plane.business_event_detail(
+        event_id="event:one", focus_group_id=None, observed_generation=None
+    )
+
+    assert detail["quote_coverage"] == expected_coverage
+
+
 def test_business_event_group_legs_is_bounded_and_fences_event_group_ownership(
     control_plane: PostgresControlPlane,
 ) -> None:
