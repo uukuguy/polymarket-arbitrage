@@ -77,3 +77,63 @@ def test_quote_coverage_decoder_checks_health_contract() -> None:
     assert "m1.quote-coverage-page.v1" in reader
     assert "coverage-gap" in reader
     assert "readQuoteCoveragePage" in reader
+
+
+def test_event_workbench_has_one_strict_detail_decoder() -> None:
+    reader = Path("dashboard/lib/business-research.ts").read_text()
+
+    assert "decodeEventResearchDetail" in reader
+    assert "m1.event-research-detail.v1" in reader
+    assert "validEventResearchGroup" in reader
+    assert "validEventResearchAnchor" in reader
+    assert "Number.isFinite" in reader
+    assert "nonNegativeInteger" in reader
+    assert "focusGroupId" in reader
+    assert "focus_group_id" in reader
+    assert "value.groups.length !== 0" in reader
+
+
+def test_event_workbench_rejects_untrusted_detail_shapes() -> None:
+    reader = Path("dashboard/lib/business-research.ts").read_text()
+
+    # The decoder must fence malformed lineage, non-finite economics, negative
+    # counts, foreign focus IDs, and unavailable envelopes carrying facts.
+    for contract in (
+        "validEventResearchAnchor",
+        "finiteNonNegative",
+        "nonNegativeInteger",
+        "focused_group",
+        "value.status !== \"available\"",
+    ):
+        assert contract in reader
+
+
+def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:
+    detail = Path("dashboard/app/business/events/[event_id]/page.tsx").read_text()
+
+    assert "readEventResearchDetail(event_id, {" in detail
+    assert "from?: string" in detail
+    assert "SOURCE_FOCUS" in detail
+    assert "focus_group_id" in detail
+    assert "Structure evidence" in detail
+    assert "Quote coverage" in detail
+    assert "Gross profit" in detail
+    assert "not assessed" in detail
+    assert "Lineage and provenance" in detail
+    assert "readStructure" not in detail
+    assert "readQuoteCoveragePage" not in detail
+    assert "readBusinessResearchPage" not in detail
+
+
+def test_all_business_main_tables_link_events_to_one_workbench() -> None:
+    for page in ("structure", "quotes", "analysis"):
+        source = Path(f"dashboard/app/business/{page}/page.tsx").read_text()
+        assert "/business/events/" in source
+        assert "focusVisible" in source
+
+    quote_page = Path("dashboard/app/business/quotes/page.tsx").read_text()
+    analysis_page = Path("dashboard/app/business/analysis/page.tsx").read_text()
+    assert "focus_group_id" in quote_page
+    assert "observed_generation" in quote_page
+    assert "focus_group_id" in analysis_page
+    assert "observed_generation" in analysis_page

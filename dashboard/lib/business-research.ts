@@ -131,9 +131,94 @@ export async function readQuoteCoveragePage(): Promise<QuoteCoveragePage | null>
   } catch { return null; }
 }
 
-export type EventResearchDetail = { schema_version: "m1.event-research-detail.v1"; status: "available" | "unavailable" | "not-published"; reason_code?: string; event_id: string; event?: Record<string, unknown>; anchor?: Record<string, unknown>; state_counts?: Record<string, number>; groups: Array<Record<string, unknown>>; cautions?: string[]; };
-export async function readEventResearchDetail(eventId: string, focusGroupId?: string, observedGeneration?: string): Promise<EventResearchDetail | null> {
-  try { const params = new URLSearchParams(); if (focusGroupId) params.set("focus_group_id", focusGroupId); if (observedGeneration) params.set("observed_generation", observedGeneration); const response = await fetch(`${BASE_URL}/perception/business/events/${encodeURIComponent(eventId)}?${params}`, { cache: "no-store" }); const value = await response.json(); return response.ok && record(value) && value.schema_version === "m1.event-research-detail.v1" && typeof value.event_id === "string" && Array.isArray(value.groups) ? value as EventResearchDetail : null; } catch { return null; }
+export type EventResearchDetail = Record<string, unknown> & {
+  schema_version: "m1.event-research-detail.v1";
+  status: "available" | "unavailable" | "not-published";
+  reason_code?: string;
+  event_id: string;
+  event?: Record<string, unknown>;
+  anchor?: Record<string, unknown>;
+  state_counts?: Record<string, number>;
+  groups: EventResearchGroup[];
+  focused_group?: EventResearchGroup | null;
+  cautions?: string[];
+};
+export type EventResearchGroup = Record<string, unknown> & {
+  group_id: string;
+  structure: Record<string, unknown>;
+  candidate_state: string;
+  candidate: Record<string, unknown>;
+  quote_coverage: Record<string, unknown>;
+};
+export type EventResearchDetailOptions = { focusGroupId?: string; observedGeneration?: string };
+
+const EVENT_COVERAGE_STATES = new Set(["unknown", "incomplete-missing", "complete-non-executable", "complete-executable"]);
+
+function validEventResearchAnchor(value: unknown): boolean {
+  return record(value)
+    && typeof value.quote_generation_key === "string"
+    && typeof value.structure_generation_key === "string"
+    && typeof value.changed_since_entry === "boolean"
+    && typeof value.materialized_at === "string"
+    && !Number.isNaN(Date.parse(value.materialized_at));
+}
+
+function validEventResearchGroup(value: unknown): value is EventResearchGroup {
+  if (!record(value) || typeof value.group_id !== "string" || !value.group_id || !record(value.structure)
+    || typeof value.candidate_state !== "string" || !record(value.candidate) || !record(value.quote_coverage)) return false;
+  const coverage = value.quote_coverage;
+  if (!EVENT_COVERAGE_STATES.has(String(coverage.coverage_state))) return false;
+  for (const key of ["observed", "executable", "non_executable"] as const) if (!nonNegativeInteger(coverage[key])) return false;
+  if (!(coverage.expected === null || nonNegativeInteger(coverage.expected)) || !(coverage.missing === null || nonNegativeInteger(coverage.missing))) return false;
+  for (const key of ["expected_member_count", "market_count", "active_market_count"] as const) {
+    if (value.structure[key] !== undefined && !nonNegativeInteger(value.structure[key])) return false;
+  }
+  for (const key of ["bundle_cost", "max_bundle_size", "capital_required_usd", "gross_profit_usd", "gross_roi_bps"] as const) {
+    if (value.candidate[key] !== undefined && !finiteNonNegative(value.candidate[key])) return false;
+  }
+  return true;
+}
+
+export function decodeEventResearchDetail(value: unknown, focusGroupId?: string): EventResearchDetail | null {
+  if (!record(value) || value.schema_version !== "m1.event-research-detail.v1"
+    || !(value.status === "available" || value.status === "unavailable" || value.status === "not-published")
+    || typeof value.event_id !== "string" || !value.event_id || !Array.isArray(value.groups)
+    || (value.reason_code !== undefined && typeof value.reason_code !== "string")) return null;
+  if (value.status !== "available") {
+    if (value.groups.length !== 0 || value.event !== undefined || value.anchor !== undefined || value.focused_group !== undefined
+      || value.state_counts !== undefined || value.structure !== undefined || value.quote_coverage !== undefined || value.analysis !== undefined) return null;
+    return value as EventResearchDetail;
+  }
+  if (!record(value.event) || !validEventResearchAnchor(value.anchor) || !record(value.state_counts)
+    || !record(value.structure) || !record(value.quote_coverage) || !record(value.analysis)
+    || !Array.isArray(value.cautions) || !value.cautions.every((caution) => typeof caution === "string")
+    || !value.groups.every(validEventResearchGroup)) return null;
+  if (!Object.values(value.state_counts).every(nonNegativeInteger)) return null;
+  for (const key of ["liquidity", "volume"] as const) if (value.event[key] !== undefined && !finiteNonNegative(value.event[key])) return null;
+  for (const key of ["market_count", "active_market_count"] as const) if (value.event[key] !== undefined && !nonNegativeInteger(value.event[key])) return null;
+  for (const key of ["group_count"] as const) if (!nonNegativeInteger(value.structure[key])) return null;
+  for (const key of ["expected", "observed", "executable", "non_executable", "missing"] as const) {
+    if (!(value.quote_coverage[key] === null || nonNegativeInteger(value.quote_coverage[key]))) return null;
+  }
+  if (value.analysis.research_only !== true) return null;
+  if (!Array.isArray(value.blockers) || !value.blockers.every((blocker) => record(blocker) && typeof blocker.code === "string" && nonNegativeInteger(blocker.count))) return null;
+  if (!(value.focused_group === null || value.focused_group === undefined || validEventResearchGroup(value.focused_group))) return null;
+  const focused = value.focused_group;
+  if (focused && !value.groups.some((group) => group.group_id === focused.group_id)) return null;
+  if (focusGroupId && focused !== null && focused !== undefined && focused.group_id !== focusGroupId) return null;
+  return value as EventResearchDetail;
+}
+
+export async function readEventResearchDetail(eventId: string, options: EventResearchDetailOptions = {}): Promise<EventResearchDetail | null> {
+  try {
+    const params = new URLSearchParams();
+    if (options.focusGroupId) params.set("focus_group_id", options.focusGroupId);
+    if (options.observedGeneration) params.set("observed_generation", options.observedGeneration);
+    const suffix = params.size ? `?${params}` : "";
+    const response = await fetch(`${BASE_URL}/perception/business/events/${encodeURIComponent(eventId)}${suffix}`, { cache: "no-store" });
+    const detail = decodeEventResearchDetail(await response.json(), options.focusGroupId);
+    return response.ok && detail ? detail : null;
+  } catch { return null; }
 }
 
 export type StructureIntelligenceStatus = "available" | "unavailable";
