@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from math import isfinite
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import psycopg
@@ -222,6 +222,21 @@ def _event_research_unavailable(status: str, reason_code: str, event_id: str) ->
         "reason_code": reason_code,
         "event_id": event_id,
         "groups": [],
+    }
+
+
+def _event_research_legs_unavailable(
+    status: str, reason_code: str, event_id: str, group_id: str, limit: int
+) -> dict[str, object]:
+    return {
+        "schema_version": "m1.event-research-group-legs.v1",
+        "status": status,
+        "reason_code": reason_code,
+        "event_id": event_id,
+        "group_id": group_id,
+        "legs": [],
+        "limit": limit,
+        "next_after": None,
     }
 
 
@@ -10168,18 +10183,50 @@ class PostgresControlPlane:
             if event_row is None:
                 return _event_research_unavailable("unavailable", "event-not-operational", event_id)
             cursor.execute(
-                """SELECT groups.group_id, groups.payload AS group_payload,
-                          candidates.candidate_state, candidates.payload AS candidate_payload
-                     FROM m1_structure_intelligence_groups AS groups
-                     LEFT JOIN m1_analysis_candidate_rows AS candidates
-                       ON candidates.generation_key=%s AND candidates.group_id=groups.group_id
-                    WHERE groups.generation_key=%s AND groups.event_id=%s
-                    ORDER BY CASE candidates.candidate_state WHEN 'positive-edge' THEN 0
-                              WHEN 'incomplete-coverage' THEN 1 WHEN 'context-unavailable' THEN 2
-                              WHEN 'no-edge' THEN 3 ELSE 4 END,
-                             candidates.gross_edge_bps DESC NULLS LAST, groups.group_id ASC
-                    LIMIT 200""",
-                (quote_generation, structure_generation, event_id),
+                """WITH event_groups AS (
+                       SELECT group_id, event_id, payload
+                         FROM m1_structure_intelligence_groups
+                        WHERE generation_key=%s AND event_id=%s
+                     ), quote_counts AS (
+                       SELECT groups.group_id,
+                              count(DISTINCT quotes.token_id) AS observed,
+                              count(DISTINCT quotes.token_id) FILTER (WHERE quotes.payload->>'terminal_state'='executable') AS executable,
+                              count(DISTINCT quotes.token_id) FILTER (WHERE quotes.payload->>'terminal_state'<>'executable') AS non_executable
+                         FROM event_groups AS groups
+                         LEFT JOIN m1_business_quote_rows AS quotes
+                           ON quotes.generation_key=%s
+                          AND quotes.payload->>'neg_risk_market_id'=groups.group_id
+                          AND quotes.payload->>'event_id'=groups.event_id
+                        GROUP BY groups.group_id
+                     )
+                     SELECT groups.group_id, groups.payload AS group_payload,
+                            candidates.candidate_state, candidates.payload AS candidate_payload,
+                            COALESCE(counts.observed, 0) AS observed,
+                            COALESCE(counts.executable, 0) AS executable,
+                            COALESCE(counts.non_executable, 0) AS non_executable
+                       FROM event_groups AS groups
+                       LEFT JOIN m1_analysis_candidate_rows AS candidates
+                         ON candidates.generation_key=%s AND candidates.group_id=groups.group_id
+                       LEFT JOIN quote_counts AS counts ON counts.group_id=groups.group_id
+                      ORDER BY CASE candidates.candidate_state WHEN 'positive-edge' THEN 0
+                                WHEN 'incomplete-coverage' THEN 1 WHEN 'context-unavailable' THEN 2
+                                WHEN 'no-edge' THEN 3 ELSE 4 END,
+                               CASE WHEN candidates.candidate_state='positive-edge'
+                                      AND (candidates.payload->>'bundle_cost') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND (candidates.payload->>'max_bundle_size') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                    THEN (1-(candidates.payload->>'bundle_cost')::double precision)
+                                         *(candidates.payload->>'max_bundle_size')::double precision END DESC NULLS LAST,
+                               CASE WHEN candidates.candidate_state='positive-edge'
+                                      AND (candidates.payload->>'bundle_cost') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND (candidates.payload->>'max_bundle_size') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                      AND (candidates.payload->>'bundle_cost')::double precision > 0
+                                    THEN ((1-(candidates.payload->>'bundle_cost')::double precision)
+                                          /(candidates.payload->>'bundle_cost')::double precision) END DESC NULLS LAST,
+                               CASE WHEN candidates.candidate_state='incomplete-coverage' THEN
+                                 GREATEST(COALESCE((groups.payload->>'expected_member_count')::integer, 0)-COALESCE(counts.observed, 0), 0) END ASC NULLS LAST,
+                               groups.group_id ASC
+                      LIMIT 200""",
+                (structure_generation, event_id, quote_generation, quote_generation),
             )
             rows = cursor.fetchall()
         groups: list[dict[str, object]] = []
@@ -10189,20 +10236,120 @@ class PostgresControlPlane:
             candidate = {} if row["candidate_payload"] is None else dict(row["candidate_payload"])
             state = str(row["candidate_state"] or "context-unavailable")
             state_counts[state] = state_counts.get(state, 0) + 1
+            candidate["candidate_state"] = state
             _candidate_display_economics(candidate)
+            expected = _optional_int(group.get("expected_member_count"))
+            observed, executable, non_executable = (
+                int(row["observed"]), int(row["executable"]), int(row["non_executable"])
+            )
             groups.append({
                 "group_id": str(row["group_id"]), "structure": group,
                 "candidate_state": state, "candidate": candidate,
+                "quote_coverage": {
+                    "expected": expected,
+                    "observed": observed,
+                    "executable": executable,
+                    "non_executable": non_executable,
+                    "missing": None if expected is None else max(expected - observed, 0),
+                },
             })
         focus = next((group for group in groups if group["group_id"] == focus_group_id), None)
+        coverages = [cast(dict[str, object], group["quote_coverage"]) for group in groups]
+        coverage_totals: dict[str, object] = {}
+        for key in ("observed", "executable", "non_executable", "missing"):
+            coverage_totals[key] = sum(
+                value
+                for coverage in coverages
+                if isinstance(value := coverage[key], int)
+            )
+        expected_totals = [coverage["expected"] for coverage in coverages]
+        coverage_totals["expected"] = (
+            sum(int(expected) for expected in expected_totals if isinstance(expected, int))
+            if any(isinstance(expected, int) for expected in expected_totals)
+            else None
+        )
+        if state_counts.get("positive-edge", 0):
+            research_stage = "ready-for-analysis"
+        elif state_counts.get("incomplete-coverage", 0):
+            research_stage = "repair-coverage"
+        elif state_counts.get("context-unavailable", 0):
+            research_stage = "structure-context-unavailable"
+        else:
+            research_stage = "no-positive-group-edge"
         return {
             "schema_version": "m1.event-research-detail.v1", "status": "available", "event_id": event_id,
             "anchor": {"quote_generation_key": quote_generation, "structure_generation_key": structure_generation,
                        "changed_since_entry": observed_generation is not None and observed_generation != quote_generation,
                        "materialized_at": _snapshot_aware(anchor["materialized_at"], "event_research.materialized_at").isoformat()},
             "event": dict(event_row["payload"]), "state_counts": state_counts,
+            "research_stage": research_stage,
+            "blockers": [
+                {"code": "coverage-gap", "count": state_counts.get("incomplete-coverage", 0)}
+            ]
+            if state_counts.get("incomplete-coverage", 0)
+            else [],
+            "structure": {"generation_key": structure_generation, "group_count": len(groups)},
+            "quote_coverage": coverage_totals,
+            "analysis": {"state_counts": state_counts, "research_only": True},
             "groups": groups, "focused_group": focus,
             "cautions": ["Fees, slippage, simultaneous execution, resolution, and settlement delay are not assessed."],
+        }
+
+    def business_event_group_legs(
+        self, *, event_id: str, group_id: str, limit: int, after: str
+    ) -> dict[str, object]:
+        """Read a stable bounded page of compact evidence for an event-owned group."""
+        if not 1 <= limit <= 200 or len(after) > 256:
+            raise ValueError("invalid-event-research-group-legs")
+        now_ms = int(datetime.now(UTC).timestamp() * 1_000)
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            _set_structure_read_timeouts(cursor, read_only=True)
+            cursor.execute(
+                """SELECT pointer.generation_key, input.structure_generation_key
+                     FROM m1_publication_pointers AS pointer
+                     JOIN m1_quote_generation_inputs AS input ON input.generation_key=pointer.generation_key
+                    WHERE pointer.pointer_key='quote:current'"""
+            )
+            anchor = cursor.fetchone()
+            if anchor is None:
+                return _event_research_legs_unavailable("not-published", "quote-not-published", event_id, group_id, limit)
+            quote_generation, structure_generation = str(anchor["generation_key"]), str(anchor["structure_generation_key"])
+            cursor.execute(
+                """SELECT 1 FROM m1_structure_intelligence_events
+                    WHERE generation_key=%s AND event_id=%s AND is_open IS TRUE AND sort_end_time_ms>%s""",
+                (structure_generation, event_id, now_ms),
+            )
+            if cursor.fetchone() is None:
+                return _event_research_legs_unavailable("unavailable", "event-not-operational", event_id, group_id, limit)
+            cursor.execute(
+                """SELECT 1 FROM m1_structure_intelligence_groups
+                    WHERE generation_key=%s AND event_id=%s AND group_id=%s""",
+                (structure_generation, event_id, group_id),
+            )
+            if cursor.fetchone() is None:
+                return _event_research_legs_unavailable("unavailable", "group-not-event-owned", event_id, group_id, limit)
+            cursor.execute(
+                """SELECT token_id, payload FROM m1_business_quote_rows
+                    WHERE generation_key=%s AND token_id>%s
+                      AND payload->>'event_id'=%s AND payload->>'neg_risk_market_id'=%s
+                    ORDER BY token_id ASC LIMIT %s""",
+                (quote_generation, after, event_id, group_id, limit + 1),
+            )
+            rows = cursor.fetchall()
+        page, has_more = rows[:limit], len(rows) > limit
+        return {
+            "schema_version": "m1.event-research-group-legs.v1",
+            "status": "available", "event_id": event_id, "group_id": group_id,
+            "legs": [
+                {"token_id": str(row["token_id"]), "market_id": dict(row["payload"]).get("market_id"),
+                 "best_ask_price": dict(row["payload"]).get("best_ask_price"),
+                 "best_ask_size": dict(row["payload"]).get("best_ask_size"),
+                 "terminal_state": dict(row["payload"]).get("terminal_state")}
+                for row in page
+            ],
+            "limit": limit,
+            "next_after": str(page[-1]["token_id"]) if has_more else None,
+            "caution": "Top-of-book evidence does not prove simultaneous multi-leg execution.",
         }
 
     def business_quote_page(

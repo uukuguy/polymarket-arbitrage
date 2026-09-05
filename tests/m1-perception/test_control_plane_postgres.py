@@ -14938,6 +14938,76 @@ def test_structure_intelligence_operational_events_exclude_closed_and_ended(
     assert [item["event_id"] for item in archive["items"]] == ["event:closed", "event:ended", "event:future"]
 
 
+def test_business_event_detail_fences_lineage_and_counts_distinct_quote_legs(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure, foreign_structure = "structure:" + "a" * 64, "structure:" + "b" * 64
+    quote = "quote:" + "c" * 64
+    future_ms = int(datetime(2050, 1, 1, tzinfo=UTC).timestamp() * 1_000)
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (foreign_structure, "foreign-certify"), (quote, "quote-certify")):
+            connection.execute(
+                "INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)",
+                (job_key, generation, now, now),
+            )
+            connection.execute(
+                "INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)",
+                (generation, job_key, "a" * 64, "b" * 64, now),
+            )
+        connection.execute("INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)", (quote, structure, "d" * 64, now))
+        connection.execute("INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)", (quote, now))
+    control_plane.stage_structure_intelligence(
+        generation_key=structure,
+        events=(("event:one", {"title": "One", "is_open": True, "end_time_ms": future_ms}), ("event:ended", {"is_open": True, "end_time_ms": 1})),
+        groups=(("group:positive", {"event_id": "event:one", "expected_member_count": 3}), ("group:gap", {"event_id": "event:one", "expected_member_count": 4}), ("group:empty", {"event_id": "event:one", "expected_member_count": 1})),
+        summary={"event_count": 2},
+    )
+    control_plane.stage_structure_intelligence(generation_key=foreign_structure, events=(("event:foreign", {"is_open": True, "end_time_ms": future_ms}),), groups=(("group:foreign", {"event_id": "event:foreign", "expected_member_count": 9}),), summary={"event_count": 1})
+    control_plane.stage_business_quote_rows(generation_key=quote, rows=(
+        ("token:one", {"event_id": "event:one", "neg_risk_market_id": "group:positive", "terminal_state": "executable", "best_ask_price": 0.4, "best_ask_size": 4}),
+        ("token:two", {"event_id": "event:one", "neg_risk_market_id": "group:positive", "terminal_state": "missing-book"}),
+        ("token:three", {"event_id": "event:one", "neg_risk_market_id": "group:gap", "terminal_state": "executable", "best_ask_price": 0.5, "best_ask_size": 2}),
+    ))
+    control_plane.stage_analysis_candidates(generation_key=quote, structure_generation_key=structure, now=now, rows=(
+        {"group_id": "group:positive", "candidate_state": "positive-edge", "bundle_cost": 0.9, "max_bundle_size": 15, "gross_edge_bps": 100, "event": {"is_open": True, "end_time_ms": future_ms}},
+        {"group_id": "group:gap", "candidate_state": "incomplete-coverage", "gross_edge_bps": 0, "event": {"is_open": True, "end_time_ms": future_ms}},
+        {"group_id": "group:foreign", "candidate_state": "positive-edge", "bundle_cost": 0.1, "max_bundle_size": 99, "gross_edge_bps": 9000, "event": {"is_open": True, "end_time_ms": future_ms}},
+    ))
+
+    detail = control_plane.business_event_detail(event_id="event:one", focus_group_id="group:foreign", observed_generation="quote:old")
+    assert [group["group_id"] for group in detail["groups"]] == ["group:positive", "group:gap", "group:empty"]
+    assert detail["anchor"]["changed_since_entry"] is True
+    assert detail["focused_group"] is None
+    assert detail["groups"][0]["quote_coverage"] == {"expected": 3, "observed": 2, "executable": 1, "non_executable": 1, "missing": 1}
+    assert detail["groups"][1]["quote_coverage"] == {"expected": 4, "observed": 1, "executable": 1, "non_executable": 0, "missing": 3}
+    assert detail["groups"][2]["quote_coverage"] == {"expected": 1, "observed": 0, "executable": 0, "non_executable": 0, "missing": 1}
+    assert control_plane.business_event_detail(event_id="event:ended", focus_group_id=None, observed_generation=None)["reason_code"] == "event-not-operational"
+
+
+def test_business_event_group_legs_is_bounded_and_fences_event_group_ownership(
+    control_plane: PostgresControlPlane,
+) -> None:
+    # The detail fixture above proves the broader lineage fence; this checks the leg cursor boundary.
+    now = _now()
+    structure, quote = "structure:" + "d" * 64, "quote:" + "e" * 64
+    future_ms = int(datetime(2050, 1, 1, tzinfo=UTC).timestamp() * 1_000)
+    with control_plane._connection_factory() as connection:
+        for generation, job_key in ((structure, "structure-certify"), (quote, "quote-certify")):
+            connection.execute("INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at) VALUES (%s,'quote-certify',%s,'succeeded',%s,%s)", (job_key, generation, now, now))
+            connection.execute("INSERT INTO m1_generation_manifests(generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at) VALUES (%s,%s,%s,'artifact',%s,1,%s)", (generation, job_key, "a" * 64, "b" * 64, now))
+        connection.execute("INSERT INTO m1_quote_generation_inputs(generation_key,structure_generation_key,universe_hash,cadence_seconds,cadence_bucket,admitted_at) VALUES (%s,%s,%s,NULL,NULL,%s)", (quote, structure, "d" * 64, now))
+        connection.execute("INSERT INTO m1_publication_pointers(pointer_key,generation_key,expected_generation_key,lease_epoch,published_at) VALUES ('quote:current',%s,NULL,1,%s)", (quote, now))
+    control_plane.stage_structure_intelligence(generation_key=structure, events=(("event:one", {"is_open": True, "end_time_ms": future_ms}),), groups=(("group:one", {"event_id": "event:one"}), ("group:other", {"event_id": "event:other"})), summary={"event_count": 1})
+    control_plane.stage_business_quote_rows(generation_key=quote, rows=(("token:1", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "executable", "best_ask_price": 0.4, "best_ask_size": 2}), ("token:2", {"event_id": "event:one", "neg_risk_market_id": "group:one", "terminal_state": "missing-book"}), ("token:z", {"event_id": "event:other", "neg_risk_market_id": "group:other", "terminal_state": "executable"})))
+
+    first = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after="")
+    assert [leg["token_id"] for leg in first["legs"]] == ["token:1"]
+    second = control_plane.business_event_group_legs(event_id="event:one", group_id="group:one", limit=1, after=first["next_after"])
+    assert [leg["token_id"] for leg in second["legs"]] == ["token:2"]
+    assert control_plane.business_event_group_legs(event_id="event:one", group_id="group:other", limit=1, after="")["reason_code"] == "group-not-event-owned"
+
+
 def test_business_quote_page_exposes_only_current_generation_rows(
     control_plane: PostgresControlPlane,
 ) -> None:

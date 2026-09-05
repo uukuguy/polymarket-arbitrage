@@ -289,6 +289,26 @@ def test_event_detail_route_transports_one_fenced_authority_envelope() -> None:
     assert response.json()["schema_version"] == "m1.event-research-detail.v1"
 
 
+def test_event_group_legs_route_validates_transport_and_reports_authority_failure() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    class EventReader:
+        def business_event_group_legs(self, *, event_id: str, group_id: str, limit: int, after: str):
+            assert (event_id, group_id, limit, after) == ("event:1", "group:1", 2, "token:1")
+            return {"schema_version": "m1.event-research-group-legs.v1", "status": "available"}
+
+    with TestClient(create_control_plane_app(control_plane=EventReader())) as client:
+        valid = client.get("/perception/business/events/event%3A1/groups/group%3A1/legs?limit=2&after=token%3A1")
+        malformed = client.get("/perception/business/events/event%3A1/groups/group%3A1/legs?limit=0")
+    assert valid.status_code == 200
+    assert malformed.status_code == 400
+
+    with TestClient(create_control_plane_app(control_plane=object())) as client:
+        unavailable = client.get("/perception/business/events/event%3A1/groups/group%3A1/legs")
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"status": "unavailable", "reason": "event-research-unavailable"}
+
+
 def test_structure_intelligence_routes_expose_summary_events_and_risk_groups() -> None:
     from polyarb.control_plane.api import create_control_plane_app
 

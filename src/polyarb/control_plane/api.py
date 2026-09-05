@@ -223,6 +223,44 @@ async def event_research_detail(request: Request) -> JSONResponse:
         )
 
 
+async def event_research_group_legs(request: Request) -> JSONResponse:
+    """Serve bounded compact quote evidence for one fenced event group."""
+    control_plane = getattr(request.app.state, "control_plane", None)
+    reader = None if control_plane is None else getattr(control_plane, "business_event_group_legs", None)
+    if not callable(reader):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "event-research-unavailable"}, status_code=503
+        )
+    try:
+        event_id = request.path_params["event_id"]
+        group_id = request.path_params["group_id"]
+        limit = int(request.query_params.get("limit", "50"))
+        after = request.query_params.get("after", "")
+        if (
+            not 1 <= limit <= 200
+            or any(not value or len(value) > 256 or "\x00" in value for value in (event_id, group_id))
+            or len(after) > 256
+            or "\x00" in after
+        ):
+            raise ValueError("invalid-event-research-group-legs")
+        legs = await run_blocking_call_with_timeout(
+            reader,
+            event_id=event_id,
+            group_id=group_id,
+            limit=limit,
+            after=after,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:event-research-group-legs",
+        )
+        return JSONResponse(legs)
+    except ValueError:
+        return JSONResponse({"error": "invalid event research group legs"}, status_code=400)
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "event-research-unavailable"}, status_code=503
+        )
+
+
 async def structure_intelligence(request: Request) -> JSONResponse:
     """Serve a bounded business view, never the raw Structure recovery index."""
     view = request.path_params["view"]
@@ -294,6 +332,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
             Route("/perception/business-overview", business_overview, methods=["GET"]),
             Route("/perception/business/quote-coverage", quote_coverage, methods=["GET"]),
+            Route("/perception/business/events/{event_id:str}/groups/{group_id:str}/legs", event_research_group_legs, methods=["GET"]),
             Route("/perception/business/events/{event_id:str}", event_research_detail, methods=["GET"]),
             Route("/perception/business/structure/{view:str}", structure_intelligence, methods=["GET"]),
             Route("/perception/business/{product:str}", business_research_page, methods=["GET"]),
