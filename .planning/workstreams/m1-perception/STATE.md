@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: objective_selection
-stopped_at: H-065 receipt-coupled business research index integrated locally; rollout and current-generation materialization pending
-last_updated: "2026-09-01T17:25:00+08:00"
+stopped_at: Event Research Workbench complete, deployed, and reviewed for the R&D-stage contract
+last_updated: "2026-09-06T04:23:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -18,18 +18,20 @@ progress:
 
 ## Current Position
 
-- **Phase:** 05.6 — Self-healing Structure Production. Plans 267 and 268 are
-  complete; their work is integrated on `main` (`74b76f9c`). There is no active
-  M1 implementation, rollout, or merge task.
+- **Phase:** 05.6 — Self-healing Structure Production. Plan 269's Event Research
+  Workbench is complete on `main` (`1e07b51d`): truthful candidate economics,
+  current-lineage Event/group-leg authorities, strict source-aware UI, teaching,
+  Fly deployment, and production-API browser validation are all complete.
 - **Production fact, last verified 2026-08-31:** exact release
   `3a70cd9f5a52294fba5709f0d390421600baa5de` recovered a blocked Quote certifier
   from durable receipts without operator SQL. A later Structure → Quote →
   Opportunity successor lineage returned the existing qualification epoch to
   `eligible`; the checked control plane had zero expired leases and zero open
   circuits.
-- **Current decision:** select a fresh, bounded M1 objective only from new
-  production evidence. Do not reopen the superseded revision-026 authorization
-  path merely because older status documents mention it.
+- **Current decision:** return to bounded M1 objective selection. Keep Event
+  research reads bounded to existing projections and preserve current Quote →
+  parent Structure lineage. A fixed REPEATABLE READ snapshot remains an explicit
+  R&D follow-up; do not restart the intentionally stopped coordinator.
 - **Daily-intelligence boundary:** `6640b330` and `05ff19a9` close Make query
   expansion risk for the read-only opportunity projection. The target captures
   only its own raw `CONTROL_PLANE_OPPORTUNITIES_*` values; the operator cadence
@@ -66,6 +68,8 @@ progress:
   — recurring Quote recovery and exact eight-Machine rollout.
 - [Plan 05.6-268 summary](phases/05.6-self-healing-structure-production/05.6-268-SUMMARY.md)
   — scoped connection contract and daemon pool regression closure.
+- [Plan 05.6-269 summary](phases/05.6-self-healing-structure-production/05.6-269-SUMMARY.md)
+  — Event research workbench, truthful economics, lineage fence, and validation.
 - [Production successor proof](phases/05.6-self-healing-structure-production/evidence/runtime-v36-rolling-resume/proof.json)
   — same-epoch Structure → Quote → Opportunity recovery.
 - [Session 387–390](../../JOURNAL.md) — append-only chronology and the state
@@ -75,20 +79,15 @@ progress:
 
 ## Next Action
 
-1. H-065 is integrated locally. Before production mutation, produce the scoped
-   rollout/migration proof for revision 040 and then observe a newly certified
-   Structure→Quote successor generation through the research pages. Until that
-   proof, historical detail must remain unavailable rather than zero.
-2. Obtain fresh, read-only business evidence in order: `make
-   smoke-control-plane-prod`, then `make control-plane-business-brief`. Use
-   `format=json` only for automation of the same summary; audit a result through
-   `make control-plane-status limit=20` and `make control-plane-opportunities
-   limit=50`. The final command reads the current certified projection at
-   `https://polyarb-control-api.fly.dev/perception/opportunities`; none adds
-   deployment, job, qualification, or trading authority.
-2. Treat `status=available` with `current_opportunity_count=0` as a verified
-   zero only. A nonzero command exit, HTTP/JSON failure, or unavailable status
-   is business data unavailable, never a zero-opportunity conclusion.
-3. Classify any finding as either a bounded M1 objective, a cross-workstream
-   thread update, or a backlog item; do not infer an implementation task from
-   historical `[NEXT]` entries.
+1. Run `make control-plane-business-brief` for a fresh read-only business view.
+2. Route only a supported finding into the next bounded M1 objective; otherwise
+   use `/gsd-explore` for research or record a note/thread update.
+3. Keep the coordinator stopped. Treat REPEATABLE READ for the multi-query Event
+   authority and explicit >200-group truncation as known R&D follow-ups, not
+   reasons to reopen Plan 269 without production evidence.
+
+## Session Continuity
+
+Last session: 2026-09-06
+Stopped at: Event Research Workbench completed, deployed, and final-reviewed
+Resume file: none; use this STATE plus JOURNAL session 400
