@@ -140,6 +140,37 @@ process.stdout.write(JSON.stringify(result));
     assert result.stdout == '{"matching":true,"missing":true,"mismatched":true}'
 
 
+def test_event_workbench_accepts_null_missing_event_metrics_but_rejects_invalid_values() -> None:
+    """The authority uses null (not zero) when an event metric is unavailable."""
+    script = r'''
+const fs = require("fs");
+const ts = require("./dashboard/node_modules/typescript");
+const source = fs.readFileSync("dashboard/lib/business-research.ts", "utf8");
+const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const module = { exports: {} };
+new Function("exports", "module", "require", compiled)(module.exports, module, require);
+const base = { schema_version: "m1.event-research-detail.v1", status: "available", event_id: "event:one", event: {}, anchor: { quote_generation_key: "quote:one", structure_generation_key: "structure:one", changed_since_entry: false, materialized_at: "2026-09-06T00:00:00Z" }, state_counts: {}, structure: { group_count: 0 }, quote_coverage: { expected: 0, observed: 0, executable: 0, non_executable: 0, missing: 0 }, analysis: { research_only: true }, blockers: [], cautions: [], groups: [], focused_group: null };
+const decode = module.exports.decodeEventResearchDetail;
+const result = {
+  nullMissing: decode({ ...base, event: { liquidity: null, volume: null, missing_fields: ["liquidity", "volume"] } }) !== null,
+  undefinedMissing: decode({ ...base, event: { missing_fields: ["liquidity", "volume"] } }) !== null,
+  negative: decode({ ...base, event: { volume: -1 } }) === null,
+  nonFinite: decode({ ...base, event: { liquidity: Number.NaN } }) === null,
+  wrongType: decode({ ...base, event: { volume: "unknown" } }) === null,
+};
+process.stdout.write(JSON.stringify(result));
+'''
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        cwd=Path.cwd(),
+        text=True,
+    )
+
+    assert result.stdout == '{"nullMissing":true,"undefinedMissing":true,"negative":true,"nonFinite":true,"wrongType":true}'
+
+
 def test_event_workbench_renders_one_authority_with_contextual_focus() -> None:
     detail = Path("dashboard/app/business/events/[event_id]/page.tsx").read_text()
 

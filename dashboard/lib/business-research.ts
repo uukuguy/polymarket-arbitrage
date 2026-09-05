@@ -194,7 +194,7 @@ export function decodeEventResearchDetail(value: unknown, focusGroupId?: string)
     || !Array.isArray(value.cautions) || !value.cautions.every((caution) => typeof caution === "string")
     || !value.groups.every(validEventResearchGroup)) return null;
   if (!Object.values(value.state_counts).every(nonNegativeInteger)) return null;
-  for (const key of ["liquidity", "volume"] as const) if (value.event[key] !== undefined && !finiteNonNegative(value.event[key])) return null;
+  for (const key of ["liquidity", "volume"] as const) if (value.event[key] !== undefined && value.event[key] !== null && !finiteNonNegative(value.event[key])) return null;
   for (const key of ["market_count", "active_market_count"] as const) if (value.event[key] !== undefined && !nonNegativeInteger(value.event[key])) return null;
   for (const key of ["group_count"] as const) if (!nonNegativeInteger(value.structure[key])) return null;
   for (const key of ["expected", "observed", "executable", "non_executable", "missing"] as const) {
